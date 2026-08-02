@@ -1,4 +1,22 @@
-# Encar Projects
+# Encar Projects Desktop
+
+This repository is an isolated copy of the working Encar Projects web
+application and is reserved for its desktop productization. The original
+`SearchCar` repository is not modified by work performed here.
+
+The complete implementation plan is available in
+[`docs/DESKTOP_PRODUCTIZATION_PLAN.md`](docs/DESKTOP_PRODUCTIZATION_PLAN.md).
+The decisions already agreed with the product owner are recorded in
+[`docs/DESKTOP_DECISIONS.md`](docs/DESKTOP_DECISIONS.md), and the planned
+nontechnical operating procedures are listed in
+[`docs/NONTECHNICAL_OPERATIONS_PLAN.md`](docs/NONTECHNICAL_OPERATIONS_PLAN.md).
+The exact upstream commit and copy exclusions are documented in
+[`docs/UPSTREAM_BASELINE.md`](docs/UPSTREAM_BASELINE.md).
+
+Until the desktop milestones are implemented, the baseline application below
+continues to run through Docker exactly as it did in the source repository.
+
+## Web baseline
 
 A localhost-first, multi-user application for monitoring vehicle listings on
 Encar Korea. Projects, favorites, comments, ratings, scan runs, and scheduler

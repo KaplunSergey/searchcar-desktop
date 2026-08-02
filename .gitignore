@@ -46,3 +46,30 @@ next-env.d.ts
 /work/
 /storage/
 /legacy-data/
+
+# desktop build output and local runtime state
+**/src-tauri/target/
+/artifacts/
+/desktop-dist/
+*.build/
+*.dist/
+*.onefile-build/
+.playwright/
+ms-playwright/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.encar-backup
+
+# Cloudflare local secrets and signing material
+.dev.vars
+.dev.vars.*
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+tauri-signing-private-key*
+license-signing-private-key*

@@ -1,0 +1,848 @@
+# План реализации Encar Projects Desktop
+
+Версия плана: 1.0
+
+Дата: 2 августа 2026 года
+
+Статус: утверждение перед началом реализации
+
+## 1. Цель
+
+Преобразовать работающий localhost-first web-проект Encar Projects в
+устанавливаемое локальное приложение для Windows и macOS, которое:
+
+- запускается без Docker, PostgreSQL, Node.js и Python у клиента;
+- сохраняет текущий интерфейс и бизнес-логику;
+- хранит пользовательские проекты, авто, историю и изображения локально;
+- скрывает исходный Python-код наиболее ценной логики;
+- поддерживает trial и продлеваемые лицензии, привязанные к одному компьютеру;
+- использует бесплатную онлайн-инфраструктуру лицензирования;
+- допускает безопасный просмотр и экспорт данных после окончания подписки;
+- устанавливается, обновляется, резервируется и переносится по инструкции,
+  понятной человеку без технической подготовки;
+- развивается независимо от исходного web-репозитория.
+
+## 2. Безопасность исходной версии и структура репозиториев
+
+### 2.1 Уже выполненная изоляция
+
+Новый репозиторий создан как снимок отслеживаемого кода исходного проекта:
+
+```text
+2026-07-23/
+├── files-mentioned-by-the-user-monitor/   # существующая web-версия
+└── encar-projects-desktop/                # новая desktop-ветка продукта
+```
+
+В новую копию намеренно не перенесены:
+
+- `.git` исходного проекта;
+- `.env` и другие секреты;
+- `node_modules` и build caches;
+- `.wrangler`, `dist`, `outputs`, `work`;
+- пользовательская БД Docker;
+- `storage` с изображениями и скриншотами;
+- `legacy-data`.
+
+Первый коммит нового репозитория должен оставаться неизменяемой точкой
+сравнения с web-версией. Для него создаётся тег `web-baseline-2026-08-02`.
+
+### 2.2 Будущие репозитории
+
+Рекомендуемая структура GitHub:
+
+```text
+KaplunSergey/EncarProjectsDesktop           # private, весь исходный код
+KaplunSergey/EncarProjectsDesktop-Releases  # public, только бинарники/manifest
+```
+
+Публичный releases-only репозиторий не содержит product source, CI scripts,
+ключи или `.env`. Автоматические source archives GitHub будут содержать только
+его пустой release manifest/README, а не приватный код приложения.
+
+### 2.3 Правила Git
+
+- `main` всегда должна проходить тесты и собираться;
+- каждая фаза выполняется отдельной feature-веткой;
+- перед миграцией БД, лицензированием и выпуском создаются теги;
+- изменения схемы имеют миграцию и обратимый data-backup сценарий;
+- никакие секреты не коммитятся;
+- исходный web-репозиторий не используется как рабочая директория desktop-задач;
+- перенос исправлений между репозиториями выполняется осознанным cherry-pick,
+  а не синхронизацией каталогов.
+
+## 3. Объём первой версии
+
+### 3.1 Входит в первую версию
+
+- Windows 10/11 x64;
+- macOS 13+ Apple Silicon;
+- Tauri desktop shell;
+- текущий React UI;
+- FastAPI, scanner, parser и worker как один скомпилированный sidecar;
+- Playwright Chromium внутри поставки;
+- SQLite и локальное файловое хранилище;
+- ручной поиск проектов и ручное индивидуальное обновление авто;
+- текущая многопользовательская локальная авторизация;
+- бесплатный 30-дневный trial;
+- ключи 1/3/6/12 месяцев и бессрочный;
+- ежедневная проверка лицензии и один день льготы при сбое связи;
+- отдельная web-админка лицензий;
+- перенос лицензии владельцем;
+- backup/restore данных между Windows и macOS;
+- подписанные Tauri updates;
+- неподписанные/adhoc pilot installers с инструкциями;
+- диагностический пакет без секретов;
+- инструкции владельца и клиента.
+
+### 3.2 Не входит в первую версию
+
+- Intel Mac;
+- Linux;
+- Microsoft Store и Mac App Store;
+- фоновые автоматические поиски и scheduler;
+- запуск вместе с операционной системой;
+- merge двух независимых клиентских баз;
+- синхронизация автомобильных данных между компьютерами;
+- удалённое хранение проектов и изображений;
+- гарантированная поддержка виртуальных машин;
+- шифрование SQLite, изображений и backup;
+- аппаратный USB-ключ;
+- абсолютная защита от дизассемблирования;
+- платные сертификаты подписи Windows/macOS на этапе пилота.
+
+## 4. Целевая архитектура
+
+```mermaid
+flowchart LR
+    U["Пользователь"] --> T["Tauri desktop"]
+    T --> UI["React UI"]
+    T --> LC["Rust license coordinator"]
+    T --> C["encar-core sidecar"]
+    C --> API["FastAPI localhost"]
+    C --> W["Worker + Playwright"]
+    C --> DB["SQLite"]
+    C --> FS["Images and screenshots"]
+    W --> E["Encar"]
+    LC --> LS["Cloudflare Worker license API"]
+    LS --> D1["Cloudflare D1"]
+    A["Owner admin UI"] --> LS
+    T --> R["Signed GitHub Releases"]
+```
+
+### 4.1 Процессы клиента
+
+`Encar Projects Desktop` запускает один `encar-core` sidecar. Sidecar имеет
+подкоманды или внутренние режимы `serve`, `worker`, `migrate`, `backup` и
+`diagnose`, но клиент их не запускает вручную.
+
+Предпочтительный runtime:
+
+1. Tauri получает single-instance lock.
+2. Определяет каталог данных ОС.
+3. Запускает sidecar с одноразовым session secret и случайным localhost-портом.
+4. Sidecar применяет SQLite migrations и выполняет health check.
+5. FastAPI раздаёт статический frontend и `/api` с одного origin.
+6. Tauri открывает окно только после готовности backend.
+7. При закрытии отправляет graceful shutdown, закрывает Chromium и помечает
+   незавершённые jobs как `INTERRUPTED`.
+
+### 4.2 Каталоги данных
+
+Windows:
+
+```text
+%LOCALAPPDATA%/EncarProjects/
+├── data/encar.sqlite3
+├── storage/cars/...
+├── logs/...
+├── backups/...
+└── runtime/...
+```
+
+macOS:
+
+```text
+~/Library/Application Support/EncarProjects/
+├── data/encar.sqlite3
+├── storage/cars/...
+├── logs/...
+├── backups/...
+└── runtime/...
+```
+
+В БД хранятся только относительные файловые пути. Каталог установки считается
+read-only и не используется для пользовательских данных.
+
+### 4.3 Планируемая структура исходников
+
+```text
+apps/
+├── desktop-ui/          # Vite React SPA из текущего интерфейса
+├── desktop/             # Tauri/Rust shell
+└── license-admin/       # отдельная web-админка владельца
+backend/                 # FastAPI/parser/scanner/worker
+license-service/         # Cloudflare Worker + D1 migrations
+packages/
+└── license-protocol/    # versioned schemas/test vectors
+scripts/                 # setup/build/release/backup helpers
+tests/                   # cross-component acceptance tests
+docs/                    # owner/client/technical instructions
+```
+
+Docker-конфигурация baseline сохраняется для разработки и сравнения до момента,
+когда desktop-путь достигнет функционального паритета. Desktop UI собирается как
+обычный Vite SPA; Node/Next/Vinext server в установщик не включается.
+
+## 5. Ключевые пользовательские сценарии
+
+### 5.1 Первый запуск и trial
+
+1. Пользователь устанавливает и открывает приложение.
+2. Приложение создаёт Ed25519 key pair устройства; private key сохраняется в
+   DPAPI на Windows или Keychain на macOS.
+3. Создаётся privacy-safe fingerprint из стабильных характеристик устройства;
+   на сервер отправляются только нормализованные/хешированные значения.
+4. Первый запуск требует интернет.
+5. Сервер проверяет, выдавался ли trial этому устройству и пользователю.
+6. При успехе создаёт лицензию `TRIAL`, срок 30 суток от серверного времени.
+7. Приложение получает подписанный lease и открывает onboarding локального
+   администратора.
+8. Переустановка приложения не создаёт новый trial.
+
+### 5.2 Ежедневная проверка
+
+- проверка выполняется при старте, если последняя успешная проверка устарела;
+- открытое приложение повторяет проверку не реже одного раза в 24 часа;
+- сервер возвращает подписанные `server_time`, `license_id`, `device_id`,
+  `subscription_expires_at`, `lease_expires_at`, `entitlements`, `app_version`;
+- rollback системных часов относительно последнего trusted time вызывает
+  немедленную проверку;
+- lease допускает один дополнительный день отсутствия связи;
+- льгота связи никогда не разрешает поиск после реальной даты окончания;
+- истечение lease блокирует операции непосредственно в backend, а не только UI.
+
+### 5.3 Предупреждение и окончание
+
+- за 24 часа и в последний день показывается верхний banner;
+- banner содержит точную локальную дату/время и кнопку `Продлить`;
+- после окончания доступен экран ввода ключа;
+- существующие страницы, фильтры, комментарии, избранное и рейтинг работают;
+- разрешены backup, restore, export и открытие сохранённых файлов;
+- запрещены project scan, global scan и individual car refresh;
+- API возвращает единый код `LICENSE_SEARCH_DISABLED`, переводимый UI без
+  технического текста.
+
+### 5.4 Продление
+
+1. Владелец создаёт в админке одноразовый ключ, заранее привязанный к лицензии.
+2. Пользователь вставляет ключ.
+3. Backend передаёт его серверу только через TLS.
+4. Сервер атомарно проверяет hash, unused status, target license и срок.
+5. Для активной лицензии новый срок считается от текущего окончания; для
+   истёкшей — от текущего server time.
+6. Server записывает old/new expiry и помечает ключ использованным.
+7. Клиент получает новый подписанный lease.
+
+### 5.5 Перенос устройства
+
+Нормальный сценарий:
+
+1. На старом компьютере создаётся проверенный `.encar-backup`.
+2. На новом компьютере приложение создаёт device key и одноразовый transfer
+   request со сроком действия около 30 минут.
+3. Пользователь передаёт короткий код владельцу.
+4. Владелец открывает лицензию, вводит код и видит сравнение устройств.
+5. После второго подтверждения D1-транзакция деактивирует старую привязку,
+   создаёт новую, сохраняет срок и увеличивает activation count.
+6. Новый компьютер получает lease; старый перестаёт получать новые lease.
+7. Пользователь восстанавливает `.encar-backup`.
+
+Если старое устройство потеряно, шаг backup возможен только из ранее созданной
+копии, но администратор всё равно может перепривязать лицензию. Перенос не
+использует и не восстанавливает старый subscription key.
+
+Из-за ежедневной модели старый компьютер может работать до окончания последнего
+lease, максимум около 48 часов. Мгновенное отключение потребовало бы онлайн-
+проверки перед каждым поиском и не входит в текущие решения.
+
+## 6. Локальная база и перенос существующих данных
+
+### 6.1 SQLite baseline
+
+Текущие PostgreSQL migrations нельзя запускать на SQLite из-за JSONB, casts,
+`UPDATE ... FROM`, lateral queries и DDL constraints. Поэтому создаётся новая
+baseline migration, соответствующая актуальной схеме web-версии.
+
+Обязательные настройки SQLite:
+
+- `PRAGMA foreign_keys=ON`;
+- WAL mode;
+- `busy_timeout`;
+- UTC timestamps через единый TypeDecorator или epoch;
+- один backend и один scanner;
+- короткие write transactions;
+- сетевой Playwright I/O вне открытой write transaction;
+- атомарный захват queued job без PostgreSQL `SKIP LOCKED`;
+- single-instance lock на уровне Tauri.
+
+### 6.2 Конвертер PostgreSQL → SQLite
+
+Отдельный migration wizard:
+
+1. не изменяет исходную PostgreSQL-базу;
+2. просит выбрать папку старого проекта либо автоматически обнаруживает её;
+3. проверяет доступность Docker/PostgreSQL;
+4. читает данные в согласованном snapshot;
+5. сохраняет IDs, JSON и связи;
+6. нормализует даты в UTC;
+7. превращает абсолютные пути файлов в относительные;
+8. копирует storage с checksums;
+9. сравнивает количество строк по таблицам;
+10. выполняет `foreign_key_check` и `integrity_check`;
+11. показывает отчёт до переключения приложения на новую базу.
+
+Если автоматическое обнаружение невозможно, инструкция старта старой Docker-
+версии должна быть пошаговой. Конвертер остаётся в новом репозитории и не требует
+изменения исходного проекта.
+
+### 6.3 Формат backup
+
+```text
+backup.encar-backup
+├── manifest.json
+├── database.sqlite3
+├── storage/cars/...
+└── checksums.json
+```
+
+Export блокирует новый поиск, ждёт окончания или отмены активного, использует
+SQLite Online Backup API и проверяет архив. Restore распаковывает во временный
+каталог, проверяет schema/checksums, обновляет копию до текущей схемы, создаёт
+rollback-backup и только затем атомарно заменяет данные.
+
+Незавершённые jobs становятся `INTERRUPTED`, auth sessions сбрасываются. License
+state, device private key и lease никогда не входят в архив.
+
+## 7. Защита кода и локального API
+
+### 7.1 Что защищаем
+
+- `parser.py`;
+- `scanner.py`;
+- integrity/change-detection algorithms;
+- `services.py` с ценной бизнес-логикой;
+- `worker.py`;
+- FastAPI backend;
+- license enforcement.
+
+### 7.2 Механизмы
+
+- Nuitka standalone/onefile prototype, затем выбор наиболее стабильного режима;
+- strip debug symbols там, где это не мешает crash diagnostics;
+- release frontend без source maps и DevTools;
+- лицензирование в Rust/Tauri и повторная проверка в sidecar;
+- localhost API на случайном порту;
+- одноразовый session secret между Tauri и sidecar;
+- CORS/origin allowlist и secure local cookies;
+- backend не слушает внешний сетевой интерфейс;
+- server signing private key отсутствует в клиенте;
+- клиент содержит только verification public key;
+- Tauri update private key хранится только у владельца/CI.
+
+Cython рассматривается только после измерения результата Nuitka и не является
+обязательной зависимостью первой версии.
+
+## 8. Лицензионный сервис и админка
+
+### 8.1 Бесплатная инфраструктура
+
+- Cloudflare Worker: API;
+- Cloudflare D1: transactional state;
+- Cloudflare Pages или Worker static assets: admin UI;
+- Worker Secrets: signing key, admin secrets, peppers;
+- `workers.dev`/`pages.dev`: бесплатные адреса;
+- регулярный D1 export и offline backup ключей.
+
+Система проектируется так, чтобы endpoint и данные можно было перенести на
+другого провайдера через конфигурацию/обновление клиента.
+
+### 8.2 Минимальная схема D1
+
+- `customers` — владелец лицензии и минимальный контакт;
+- `licenses` — type, status, trial, expiry, perpetual;
+- `devices` — public key, fingerprint hash, active state, first/last seen;
+- `activation_codes` — hash, duration, target license, used state;
+- `license_checks` — агрегированная последняя проверка и версия;
+- `renewals` — old/new expiry, code id, actor, timestamp;
+- `device_transfers` — old/new device, request, actor, result;
+- `admin_users` и `admin_sessions`;
+- `audit_events` — security-sensitive owner actions;
+- `app_releases` — latest/minimum version metadata.
+
+Сырые hardware identifiers, клиентская автомобильная база, изображения,
+пароли и комментарии на лицензирующий сервер не отправляются.
+
+### 8.3 API
+
+Версионированные endpoints:
+
+- `POST /v1/trials/activate`;
+- `POST /v1/licenses/check`;
+- `POST /v1/licenses/redeem`;
+- `POST /v1/transfers/request`;
+- `POST /v1/transfers/claim`;
+- `GET /v1/releases/latest`;
+- admin CRUD для customers/licenses/codes/transfers/backups.
+
+Обязательны schema validation, idempotency keys, rate limits, replay protection,
+atomic redemption, signed responses, structured audit и безопасные ошибки без
+разглашения существования пользователей/ключей.
+
+### 8.4 Админка
+
+Операции выполняются кнопками:
+
+- создать пользователя;
+- открыть 30-дневный trial;
+- создать лицензию;
+- создать ключ 1/3/6/12 месяцев или perpetual;
+- предварительно показать новую дату;
+- просмотреть использованные/неиспользованные ключи;
+- подтвердить перенос устройства;
+- просмотреть version, activation count, check time и renewal history;
+- выгрузить audit и backup.
+
+Регистрация клиентов публично не показывается. Админка имеет отдельную strong
+authentication, rate limiting, короткие sessions и recovery codes. Конкретный
+механизм выбирается после spike на Worker runtime; он не должен требовать
+платного Cloudflare Access.
+
+## 9. Обновления и релизы
+
+### 9.1 Update model
+
+- Tauri Updater;
+- обязательная Ed25519-подпись artifacts;
+- source repo private;
+- release artifacts в отдельном public releases-only repo;
+- `latest.json` для Windows x64 и macOS arm64;
+- автоматическая проверка при запуске не чаще заданного интервала;
+- download/install только после согласия пользователя;
+- rollback installer предыдущей версии сохраняется владельцем;
+- incompatible database downgrade запрещается с понятным сообщением.
+
+### 9.2 CI без платной подписки
+
+GitHub Actions workflow собирает matrix:
+
+- `windows-latest`, target x86_64, NSIS `.exe`;
+- `macos` Apple Silicon runner или проверенная local/CI arm64 сборка, `.dmg`;
+- unit/integration tests;
+- Nuitka sidecar;
+- закреплённый Playwright browser;
+- Tauri package;
+- checksums/SBOM;
+- update signatures;
+- draft release для ручного smoke test;
+- публикация только после approval.
+
+Если бесплатные CI minutes или arm64 runner недоступны, остаются документированные
+локальные one-command builds. Ни один секрет не записывается в workflow logs.
+
+### 9.3 Неподписанный пилот
+
+Windows pilot может показывать SmartScreen; macOS build получает ad-hoc подпись
+и требует `Open Anyway`. Это допустимо только для информированного пилота.
+
+Платный production-signing — отдельный gate перед коммерческой поставкой:
+
+- Apple Developer ID + notarization;
+- доверенный Windows code-signing certificate;
+- подпись installer, sidecar и вложенных browser helpers.
+
+## 10. Поэтапная реализация
+
+Оценки ниже — ориентиры для одного разработчика, а не обещание календарной даты.
+Каждая фаза завершается демонстрацией и отдельным коммитом/тегом.
+
+### Фаза 0. Изоляция и baseline — выполнено частично
+
+Задачи:
+
+- создать соседний репозиторий из Git-снимка;
+- исключить secrets/runtime data/caches;
+- зафиксировать baseline commit и tag;
+- добавить plan/decisions/operations docs;
+- проверить, что исходный репозиторий чист и не изменён;
+- настроить новый private remote позднее отдельным действием.
+
+Критерий готовности: обе папки имеют независимые `.git`; baseline нового repo
+совпадает по tracked content с исходным commit; текущий сайт запускается как
+раньше.
+
+### Фаза 1. Test baseline, feasibility spike и desktop skeleton — 2–4 дня
+
+Задачи:
+
+- зафиксировать текущие backend/frontend тесты;
+- добавить desktop-specific configuration без удаления Docker development;
+- создать Tauri 2 skeleton;
+- создать минимальный Vite SPA build текущего UI;
+- запустить минимальный Nuitka sidecar на обеих целевых платформах;
+- bundled Playwright должен открыть тестовую страницу и сохранить screenshot;
+- runtime API URL заменить на same-origin `/api`;
+- реализовать single-instance и lifecycle prototype;
+- добавить platform data directories и structured logging.
+
+Критерий: dev desktop window открывает существующий UI, health check проходит,
+закрытие не оставляет процессов, а минимальный compiled scanner работает без
+системных Python/Node/Docker. Если Playwright packaging не проходит, дальнейший
+рефакторинг приостанавливается до смены packaging approach.
+
+### Фаза 2. SQLite и очередь — 5–8 дней
+
+Задачи:
+
+- новая SQLite baseline schema;
+- UTC timestamp type;
+- FK/WAL/busy timeout;
+- заменить `FOR UPDATE`/`SKIP LOCKED`;
+- сократить транзакции вокруг Playwright;
+- восстановление interrupted jobs;
+- тесты concurrency, constraints, cascade и timezone;
+- seed/onboarding без CLI.
+
+Критерий: весь backend test suite проходит на SQLite; два процесса не могут
+одновременно захватить job; crash не оставляет вечный `RUNNING`.
+
+### Фаза 3. Конвертер и backup foundation — 4–7 дней
+
+Задачи:
+
+- read-only PostgreSQL → SQLite converter;
+- относительные storage paths;
+- counts/integrity/file validation;
+- `.encar-backup` export/restore library;
+- rollback backup;
+- cross-platform path tests;
+- UI wizard для миграции текущей локальной установки.
+
+Критерий: копия реальной базы мигрируется без изменения источника; counts и
+checksums совпадают; backup восстанавливается в чистой установке.
+
+### Фаза 4. Sidecar и Playwright packaging — 5–8 дней
+
+Задачи:
+
+- единый `encar-core` entrypoint;
+- Nuitka build matrix;
+- включить совместимый Chromium/headless shell;
+- направить browser paths на bundled resources;
+- graceful cancellation/shutdown;
+- внешний Encar открывать системным браузером;
+- smoke scans в установочной структуре;
+- оценить размер и время установки.
+
+Критерий: машина без Python/Node/Docker запускает backend и выполняет полный
+ручной поиск с изображениями и скриншотом.
+
+### Фаза 5. Cloudflare license service — 4–7 дней
+
+Задачи:
+
+- Worker project и D1 migrations;
+- trial/check/redeem/transfer APIs;
+- server time и signed leases;
+- hash-only one-time codes;
+- idempotency/replay/rate limits;
+- audit events;
+- backup/export scripts;
+- local Miniflare/Worker tests;
+- бесплатный deploy workflow.
+
+Критерий: duplicate code redemption невозможен; clock comes only from server;
+перенос атомарен; API восстанавливается из documented backup.
+
+### Фаза 6. Клиентское enforcement — 4–6 дней
+
+Задачи:
+
+- device key в DPAPI/Keychain;
+- fingerprint strategy и privacy review;
+- Rust lease verification;
+- trusted time state;
+- backend entitlement guard;
+- banner/expiry/redeem UI;
+- read-only safe mode;
+- perpetual flow;
+- network grace;
+- tests clock rollback, expired, offline и copied DB.
+
+Критерий: UI/API обход не запускает scanner без entitlement; перевод времени и
+копирование backup не продлевают доступ; просмотр данных после expiry работает.
+
+### Фаза 7. Лицензионная админка — 4–6 дней
+
+Задачи:
+
+- secure owner login;
+- customers/licenses/devices screens;
+- key generation;
+- renewal history;
+- device transfer confirmation;
+- activation count/version/check time;
+- audit/export;
+- русские понятные ошибки и подтверждения;
+- responsive UI и owner runbook.
+
+Критерий: нетехнический владелец самостоятельно создаёт trial, выдаёт ключ,
+проверяет срок и переносит устройство без терминала.
+
+### Фаза 8. Полный backup и перенос устройства — 3–5 дней
+
+Задачи:
+
+- UI export/restore;
+- transfer request UI;
+- admin approval flow;
+- restore на новой OS;
+- автоматическое отключение старой binding;
+- event/history/activation count;
+- broken-old-device flow;
+- support copy text.
+
+Критерий: полный сценарий Mac → Windows и Windows → Mac проходит по инструкции;
+license state не копируется; old device не получает новый lease.
+
+### Фаза 9. Updater и release automation — 4–7 дней
+
+Задачи:
+
+- release-only repo;
+- Tauri signing keys и offline recovery copy;
+- GitHub Actions matrix;
+- version injection в client/license check;
+- update prompt/download/install;
+- rollback procedure;
+- release notes и one-click owner workflow.
+
+Критерий: старая пилотная сборка видит новую, проверяет подпись, обновляется и
+сохраняет данные; изменённый artifact отклоняется.
+
+### Фаза 10. Installers и nontechnical documentation — 4–7 дней
+
+Задачи:
+
+- NSIS `.exe`;
+- ad-hoc signed `.dmg`;
+- uninstall без удаления данных по умолчанию;
+- optional `Удалить и данные` с двойным подтверждением;
+- Windows/macOS installation screenshots;
+- first-run/backup/license/transfer/release/disaster instructions;
+- diagnostic bundle;
+- независимый usability walkthrough.
+
+Критерий: тестовый пользователь без навыков разработки проходит installation,
+trial, scan, backup, renewal и transfer только по документации.
+
+### Фаза 11. Security, reliability и pilot — 5–10 дней
+
+Задачи:
+
+- threat-model review;
+- dependency/license/SBOM review;
+- parser regression against known fixtures;
+- long scan cancellation and crash recovery;
+- network/captcha/server outage simulations;
+- D1 backup restore drill;
+- corrupted backup/update tests;
+- Windows 10/11 and macOS 13+ matrix;
+- 1–3 pilot devices;
+- исправления по telemetry-free support logs.
+
+Критерий: все acceptance scenarios ниже пройдены, critical defects отсутствуют,
+rollback и disaster recovery проверены практикой.
+
+### Фаза 12. Коммерческая подпись — отложена
+
+После успешного бесплатного пилота:
+
+- Apple Developer Program, Developer ID и notarization;
+- Windows certificate/Trusted Signing;
+- подпись всех nested binaries;
+- повторная проверка SmartScreen/Gatekeeper;
+- обновление пользовательских инструкций.
+
+## 11. Acceptance matrix
+
+### Установка и lifecycle
+
+- чистая Windows 10 x64;
+- чистая Windows 11 x64;
+- macOS 13+ Apple Silicon;
+- первый запуск без Docker/Node/Python;
+- второй экземпляр не запускается;
+- закрытие во время scan не повреждает БД;
+- restart восстанавливает понятный статус.
+
+### Данные
+
+- PostgreSQL converter сохраняет counts/relationships;
+- изображения доступны после миграции;
+- backup создаётся при активной и истёкшей лицензии;
+- restore не переносит лицензию;
+- restore более старой schema выполняет migration;
+- испорченный архив не заменяет рабочие данные;
+- Windows/macOS cross-restore.
+
+### Лицензия
+
+- trial только один раз на пользователя/устройство;
+- reinstall не создаёт новый trial;
+- часы назад/вперёд не продлевают срок;
+- code redeem строго один раз;
+- 1/3/6/12 месяцев корректно прибавляются;
+- perpetual не истекает, но проверяет device binding;
+- один день outage grace;
+- реальный expiry сразу блокирует search;
+- local data остаются доступны;
+- copied DB не активирует другой компьютер;
+- transfer сохраняет срок и отключает old binding;
+- concurrent transfer/redeem atomic.
+
+### Обновление
+
+- корректно подписанное обновление устанавливается;
+- изменённое/неподписанное отклоняется;
+- данные сохраняются;
+- failed update возвращает предыдущую рабочую версию;
+- app version видна в admin UI.
+
+### UX без технических навыков
+
+- клиент не открывает терминал;
+- владелец использует admin UI/Run workflow;
+- каждая ошибка содержит действие, а не stack trace;
+- support package создаётся одной кнопкой;
+- все опасные действия имеют preview и confirmation;
+- независимый тестировщик проходит ключевые сценарии по инструкции.
+
+## 12. Основные риски и меры
+
+| Риск | Влияние | Снижение риска |
+| --- | --- | --- |
+| Playwright/Chromium не собирается с Nuitka | Высокое | Отдельный packaging spike до лицензирования, pinned versions, platform CI |
+| SQLite lock во время долгого scan | Высокое | Короткие транзакции, один worker, WAL, busy timeout, stress tests |
+| PostgreSQL migration теряет связи/файлы | Высокое | Read-only source, counts, FK/integrity checks, rollback report |
+| Закрытие приложения оставляет job RUNNING | Высокое | Graceful shutdown + startup reconciliation + cancellation tests |
+| Cloudflare free terms меняются | Среднее | Малый portable API, D1 exports, endpoint configuration, provider migration doc |
+| License server недоступен | Среднее | Подписанный outage lease, status page, backup/redeploy runbook |
+| Потерян signing key | Критическое | Две offline-копии, owner checklist, recovery drill |
+| Fingerprint меняется после ремонта/OS reinstall | Среднее | Admin-assisted transfer вместо автоматической блокировки |
+| Unsigned installer пугает/блокируется | Высокое для продаж | Pilot instructions; production signing gate |
+| Клиент дизассемблирует binary | Остаточное | Nuitka/Rust/no sources; честная граница защиты; server authority |
+| Encar captcha/rate limits | Высокое | Conservative scan behavior, wait/readiness checks, clear human-action status |
+| CI free quota заканчивается | Среднее | Local one-command Windows/Mac builds |
+
+## 13. Распределение ответственности
+
+### Что можно полностью реализовать и автоматизировать в репозитории
+
+- Tauri shell и lifecycle;
+- SQLite schema, converter, backup и restore;
+- Nuitka/Playwright packaging;
+- Worker API, D1 migrations и admin UI;
+- license protocol и client enforcement;
+- GitHub Actions и локальные build scripts;
+- installer configuration;
+- updater и подпись Tauri artifacts;
+- тесты, fixtures, diagnostics и recovery scripts;
+- все инструкции, checklists и шаблоны сообщений клиенту.
+
+### Что неизбежно должен сделать владелец внешнего аккаунта
+
+- создать или подтвердить Cloudflare/GitHub account;
+- войти в Cloudflare через открытое окно браузера и разрешить deployment;
+- сохранить offline-копии signing/recovery keys в предложенное безопасное место;
+- нажать подтверждение перед публикацией релиза;
+- проверить установщик на физическом Windows/Mac;
+- выбрать клиента, срок лицензии и подтвердить перенос устройства;
+- при будущем платном этапе зарегистрировать Apple Developer/Windows signing
+  account и принять юридические условия провайдера.
+
+Для каждого такого действия проект обязан предоставить wizard, кнопку GitHub
+Actions или инструкцию со скриншотами. Клиентские операции не должны требовать
+терминала. Первоначальная операция владельца допускает максимум одну заранее
+подготовленную команду, которая сама проверяет результат и объясняет ошибку.
+
+### Что не передаётся исполнителю и не публикуется
+
+- пароли аккаунтов владельца;
+- Cloudflare/GitHub long-lived tokens;
+- private license/update signing keys;
+- клиентские базы и изображения без явного диагностического запроса;
+- production `.env`/`.dev.vars`.
+
+## 14. Контроль стоимости
+
+Первая версия не требует платных подписок:
+
+- Cloudflare Workers/D1/Pages — free tier;
+- GitHub private source — существующий аккаунт/доступный free plan;
+- GitHub Releases — отдельный binary repository;
+- Tauri/Rust/SQLite/Nuitka Community/Playwright — open source;
+- ad-hoc macOS и unsigned Windows pilot — бесплатно.
+
+Возможные будущие расходы, не входящие в бесплатный пилот:
+
+- Apple Developer Program;
+- Windows code-signing certificate;
+- собственный домен;
+- платный CI при превышении free minutes;
+- платный Cloudflare plan при росте нагрузки.
+
+Любой переход на платный компонент выполняется только после отдельного решения.
+
+## 15. Definition of Done первой версии
+
+Первая desktop-версия готова, когда:
+
+1. исходный web-репозиторий остаётся рабочим и неизменённым;
+2. `.exe` и `.dmg` устанавливают самодостаточное приложение;
+3. ручной Encar scan воспроизводит текущую функциональность;
+4. PostgreSQL-данные переносятся в SQLite с проверяемым отчётом;
+5. trial, renewal, expiry, perpetual и transfer проходят acceptance tests;
+6. после expiry блокируется только поиск/обновление;
+7. `.encar-backup` переносит данные между поддерживаемыми ОС;
+8. обновления проверяются криптографической подписью;
+9. владелец управляет лицензиями через отдельную админку;
+10. установка и регулярные операции документированы для нетехнического человека;
+11. D1 и ключи восстановлены в тестовом disaster drill;
+12. пилот успешно отработал минимум на Windows 10, Windows 11 и Apple Silicon Mac.
+
+## 16. Первый следующий шаг после утверждения
+
+Не начинать сразу с лицензирования. Сначала выполнить короткий технический spike:
+
+1. Tauri открывает текущий UI;
+2. SQLite baseline поднимает актуальную схему;
+3. Nuitka sidecar запускает FastAPI;
+4. bundled Playwright открывает одну тестовую страницу Encar;
+5. установочная структура проверяется на Windows x64 и macOS arm64.
+
+Этот spike проверяет три наиболее дорогих риска до строительства админки и
+лицензионного сервера. После успешного результата план продолжается с Фазы 2;
+при проблеме меняется packaging approach без потери текущего приложения.
+
+## 17. Официальные технические ориентиры
+
+- [Tauri sidecars](https://v2.tauri.app/develop/sidecar/)
+- [Tauri updater](https://v2.tauri.app/plugin/updater/)
+- [Tauri Windows signing](https://v2.tauri.app/distribute/sign/windows/)
+- [Tauri macOS signing](https://v2.tauri.app/distribute/sign/macos/)
+- [Playwright Python packaging](https://playwright.dev/python/docs/library#pyinstaller)
+- [Cloudflare Workers limits](https://developers.cloudflare.com/workers/platform/limits/)
+- [Cloudflare D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/)
+- [Apple: open an app from an unknown developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac)
+- [Microsoft Smart App Control](https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/overview)
