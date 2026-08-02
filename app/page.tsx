@@ -304,6 +304,7 @@ function scanStatusKey(status: string): Key {
     RUNNING: "running",
     CANCEL_REQUESTED: "cancelling",
     CANCELLED: "cancelled",
+    INTERRUPTED: "interrupted",
     SUCCEEDED: "success",
     PARTIAL: "partial",
     FAILED: "failed",
@@ -617,7 +618,7 @@ function App({
               latestReport={(scansQuery.data || []).find(
                 (scan) =>
                   scan.payload?.project_ids?.length &&
-                  ["SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED"].includes(scan.status),
+                  ["SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED", "INTERRUPTED"].includes(scan.status),
               )}
               refresh={(ids) => refreshMutation.mutate(ids)}
               cancelScan={cancelScan}

@@ -29,13 +29,30 @@ Still required before M1 is complete:
   and Windows 11 pilot machines;
 - generate unsigned `.dmg` and `.exe` installers and document OS warnings.
 
-## Current stage
+## Milestone M2 — SQLite and durable queue
 
-The Windows x64 build pipeline is ready for its first run in GitHub Actions.
-Milestone M1 remains open until the generated installer is exercised on clean
-Windows 10 and Windows 11 pilot machines.
+Implemented:
+
+- independent versioned SQLite migration ledger and startup write lock;
+- UTC-aware timestamp type for PostgreSQL and SQLite;
+- durable single-worker claim metadata, heartbeat and terminal timing;
+- atomic queue claim protected against concurrent worker loops;
+- startup recovery to `INTERRUPTED` with partial report preservation;
+- one in-process desktop worker alongside FastAPI;
+- automatic creation of the first local administrator without a CLI;
+- queued automatic/manual project-run merging;
+- scheduler re-anchor from a finished manual project refresh;
+- migration, concurrency, recovery, UTC and scheduler unit tests.
+
+Validation still required before M2 is complete:
+
+- run the complete Python suite when the dependency environment or Docker
+  daemon is available (network installation is unavailable in this sandbox);
+- exercise process-crash recovery against a compiled sidecar;
+- stress long browser scans and confirm transactions stay short;
+- validate the PostgreSQL compatibility migration in Docker.
 
 ## Next milestone
 
-Introduce versioned SQLite migrations, a persistent update-job queue and
-recovery rules for searches interrupted by an application or system restart.
+Finish M2 runtime validation, then implement the read-only PostgreSQL-to-SQLite
+converter and the verified `.searchcar-backup` export/restore foundation.

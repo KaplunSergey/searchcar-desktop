@@ -2,10 +2,13 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event
+from uuid import uuid4
 
 from sqlalchemy import select
 
-from .database import SessionLocal, settings
+from .database import SessionLocal, engine, settings
+from .job_queue import claim_next_job
 from .models import (
     Car,
     CarImage,
@@ -40,10 +43,45 @@ class ScanCancelled(Exception):
     pass
 
 
+def _reanchor_scheduler_after_manual_projects(
+    db,
+    job: ScanRun,
+    finished_at: datetime,
+) -> None:
+    payload = dict(job.payload or {})
+    if (
+        job.kind != "PROJECTS"
+        or payload.get("trigger") != "MANUAL"
+        or job.started_at is None
+    ):
+        return
+    setting = db.scalar(
+        select(SchedulerSetting).where(
+            SchedulerSetting.user_id == job.owner_id,
+            SchedulerSetting.enabled.is_(True),
+        )
+    )
+    if not setting or not db.scalar(
+        select(ScheduledProject.project_id)
+        .where(ScheduledProject.scheduler_id == setting.id)
+        .limit(1)
+    ):
+        return
+    setting.next_run_at = finished_at + timedelta(
+        minutes=setting.interval_minutes
+    )
+    job.payload = {
+        **payload,
+        "scheduler_reanchored_at": finished_at.isoformat(),
+        "scheduler_next_run_at": setting.next_run_at.isoformat(),
+    }
+
+
 def _raise_if_cancelled(db, job: ScanRun) -> None:
     db.refresh(job, attribute_names=["status"])
     if job.status in {"CANCEL_REQUESTED", "CANCELLED"}:
         raise ScanCancelled()
+    job.heartbeat_at = datetime.now(timezone.utc)
     if not hasattr(job, "owner_id"):
         return
     owner = db.get(User, job.owner_id)
@@ -83,8 +121,11 @@ def _finish_cancelled_job(
         project_statuses[str(project_run.project_id)] = project_run.status
 
     report = _dedupe_report(report)
-    timestamp = datetime.now(timezone.utc).isoformat()
+    finished_at = datetime.now(timezone.utc)
+    timestamp = finished_at.isoformat()
     job.status = "CANCELLED"
+    job.finished_at = finished_at
+    job.heartbeat_at = finished_at
     job.error = "\n".join(failures) or None
     job.payload = {
         **payload,
@@ -104,6 +145,7 @@ def _finish_cancelled_job(
             "failed": len(failures),
         },
     }
+    _reanchor_scheduler_after_manual_projects(db, job, finished_at)
     db.commit()
 
 
@@ -393,19 +435,29 @@ def _change_report(
 def process_job(job_id: int) -> None:
     with SessionLocal() as db:
         job = db.get(ScanRun, job_id)
-        if not job or job.status != "QUEUED":
+        if not job or job.status not in {"QUEUED", "RUNNING"}:
             return
         owner = db.get(User, job.owner_id)
         if not owner or owner.status != "ACTIVE":
+            finished_at = datetime.now(timezone.utc)
             job.status = "CANCELLED"
+            job.finished_at = finished_at
+            job.heartbeat_at = finished_at
             job.payload = {
                 **(job.payload or {}),
-                "cancelled_at": datetime.now(timezone.utc).isoformat(),
+                "cancelled_at": finished_at.isoformat(),
                 "cancellation_reason": "ACCOUNT_INACTIVE",
             }
             db.commit()
             return
-        job.status = "RUNNING"
+        timestamp = datetime.now(timezone.utc)
+        if job.status == "QUEUED":
+            # Compatibility path for callers outside the durable worker loop.
+            # Desktop workers claim atomically before entering this function.
+            job.status = "RUNNING"
+            job.attempt_count = (job.attempt_count or 0) + 1
+        job.started_at = job.started_at or timestamp
+        job.heartbeat_at = timestamp
         db.commit()
         payload = job.payload or {}
         project_ids = list(dict.fromkeys(payload.get("project_ids") or []))
@@ -561,6 +613,9 @@ def process_job(job_id: int) -> None:
                                 incomplete=incomplete,
                             ):
                                 try:
+                                    # Browser I/O must not hold a SQLite write
+                                    # or read transaction open.
+                                    db.commit()
                                     detail = _read_verified_detail(
                                         page,
                                         row,
@@ -705,6 +760,7 @@ def process_job(job_id: int) -> None:
                                     "source": project.name,
                                     "list_text": "",
                                 }
+                                db.commit()
                                 detail = _read_verified_detail(
                                     page,
                                     missing_row,
@@ -901,6 +957,7 @@ def process_job(job_id: int) -> None:
                                     "source": project.name,
                                     "list_text": "",
                                 }
+                                db.commit()
                                 detail = _read_verified_detail(
                                     page,
                                     manual_row,
@@ -994,6 +1051,8 @@ def process_job(job_id: int) -> None:
             job.progress = 100
             job.error = "\n".join(failures) or None
             job.status = "SUCCEEDED" if not failures else ("PARTIAL" if successes else "FAILED")
+            job.finished_at = datetime.now(timezone.utc)
+            job.heartbeat_at = job.finished_at
             job.payload = {
                 **(job.payload or payload),
                 "report": report,
@@ -1007,6 +1066,11 @@ def process_job(job_id: int) -> None:
                     "failed": len(failures),
                 },
             }
+            _reanchor_scheduler_after_manual_projects(
+                db,
+                job,
+                job.finished_at,
+            )
             db.commit()
         except ScanCancelled:
             _finish_cancelled_job(
@@ -1020,6 +1084,8 @@ def process_job(job_id: int) -> None:
         except Exception as exc:
             report = _dedupe_report(report)
             job.status = "FAILED"
+            job.finished_at = datetime.now(timezone.utc)
+            job.heartbeat_at = job.finished_at
             job.error = f"{type(exc).__name__}: {exc}"
             job.payload = {
                 **(job.payload or payload),
@@ -1038,6 +1104,11 @@ def process_job(job_id: int) -> None:
                     "failed": len(failure_details) + 1,
                 },
             }
+            _reanchor_scheduler_after_manual_projects(
+                db,
+                job,
+                job.finished_at,
+            )
             db.commit()
 
 
@@ -1091,7 +1162,11 @@ def enqueue_scheduled() -> None:
                         owner_id=setting.user_id,
                         kind="PROJECTS",
                         status="QUEUED",
-                        payload={"project_ids": ids, "scheduled": True},
+                        payload={
+                            "project_ids": ids,
+                            "scheduled": True,
+                            "trigger": "AUTOMATIC",
+                        },
                     )
                 )
             setting.next_run_at = current + timedelta(
@@ -1099,23 +1174,15 @@ def enqueue_scheduled() -> None:
             )
 
 
-def run() -> None:
-    while True:
+def run(stop_event: Event | None = None) -> None:
+    worker_id = f"desktop-{uuid4().hex}"
+    while not (stop_event and stop_event.is_set()):
         enqueue_scheduled()
-        with SessionLocal() as db:
-            job = db.scalar(
-                select(ScanRun)
-                .join(User, User.id == ScanRun.owner_id)
-                .where(
-                    ScanRun.status == "QUEUED",
-                    User.status == "ACTIVE",
-                )
-                .order_by(ScanRun.created_at)
-                .with_for_update(skip_locked=True)
-            )
-            job_id = job.id if job else None
+        job_id = claim_next_job(engine, worker_id)
         if job_id:
             process_job(job_id)
+        elif stop_event:
+            stop_event.wait(settings.worker_poll_seconds)
         else:
             time.sleep(settings.worker_poll_seconds)
 

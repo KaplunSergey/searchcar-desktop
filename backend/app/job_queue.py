@@ -1,0 +1,136 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from sqlalchemy import Engine, bindparam, select, text, update
+from sqlalchemy.orm import Session
+
+from .db_types import UTCDateTime
+from .models import ProjectScanRun, ScanRun
+
+
+ACTIVE_SCAN_STATUSES = ("RUNNING", "CANCEL_REQUESTED")
+TERMINAL_SCAN_STATUSES = (
+    "SUCCEEDED",
+    "PARTIAL",
+    "FAILED",
+    "CANCELLED",
+    "INTERRUPTED",
+)
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def claim_next_job(
+    engine: Engine,
+    worker_id: str,
+    *,
+    now: datetime | None = None,
+) -> int | None:
+    """Atomically claim the oldest queued job for the only active worker."""
+
+    timestamp = now or utc_now()
+    statement = text(
+        """
+        UPDATE scan_runs
+        SET status = 'RUNNING',
+            worker_id = :worker_id,
+            attempt_count = COALESCE(attempt_count, 0) + 1,
+            started_at = COALESCE(started_at, :timestamp),
+            heartbeat_at = :timestamp,
+            finished_at = NULL,
+            updated_at = :timestamp
+        WHERE id = (
+            SELECT queued.id
+            FROM scan_runs AS queued
+            JOIN users AS owner ON owner.id = queued.owner_id
+            WHERE queued.status = 'QUEUED'
+              AND owner.status = 'ACTIVE'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM scan_runs AS active
+                  WHERE active.status IN ('RUNNING', 'CANCEL_REQUESTED')
+              )
+            ORDER BY queued.created_at, queued.id
+            LIMIT 1
+        )
+          AND status = 'QUEUED'
+        RETURNING id
+        """
+    ).bindparams(bindparam("timestamp", type_=UTCDateTime()))
+    with engine.begin() as connection:
+        return connection.execute(
+            statement,
+            {"worker_id": worker_id, "timestamp": timestamp},
+        ).scalar_one_or_none()
+
+
+def heartbeat_job(
+    engine: Engine,
+    job_id: int,
+    worker_id: str,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    timestamp = now or utc_now()
+    with engine.begin() as connection:
+        result = connection.execute(
+            update(ScanRun)
+            .where(
+                ScanRun.id == job_id,
+                ScanRun.worker_id == worker_id,
+                ScanRun.status.in_(ACTIVE_SCAN_STATUSES),
+            )
+            .values(heartbeat_at=timestamp, updated_at=timestamp)
+        )
+        return result.rowcount == 1
+
+
+def recover_interrupted_jobs(
+    engine: Engine,
+    *,
+    reason: str = "APPLICATION_RESTARTED",
+    now: datetime | None = None,
+) -> list[int]:
+    """Turn abandoned active work into a visible terminal history entry."""
+
+    timestamp = now or utc_now()
+    recovered_ids: list[int] = []
+    with Session(engine, expire_on_commit=False) as db:
+        jobs = list(
+            db.scalars(
+                select(ScanRun)
+                .where(ScanRun.status.in_(ACTIVE_SCAN_STATUSES))
+                .order_by(ScanRun.id)
+            )
+        )
+        for job in jobs:
+            payload = dict(job.payload or {})
+            payload.update(
+                {
+                    "current_project_id": None,
+                    "interrupted_at": timestamp.isoformat(),
+                    "interruption_reason": reason,
+                }
+            )
+            job.status = "INTERRUPTED"
+            job.payload = payload
+            job.error = job.error or "Application stopped before the scan finished"
+            job.finished_at = timestamp
+            job.heartbeat_at = timestamp
+            job.worker_id = None
+            recovered_ids.append(job.id)
+
+        if recovered_ids:
+            for project_run in db.scalars(
+                select(ProjectScanRun).where(
+                    ProjectScanRun.scan_run_id.in_(recovered_ids),
+                    ProjectScanRun.status.in_(("QUEUED", "RUNNING")),
+                )
+            ):
+                project_run.status = "INTERRUPTED"
+                project_run.error_code = project_run.error_code or "APP_INTERRUPTED"
+        db.commit()
+    return recovered_ids

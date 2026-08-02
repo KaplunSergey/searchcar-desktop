@@ -37,3 +37,12 @@ Search absence is project-local. It can produce `NOT_FOUND_IN_SEARCH` and later 
 Times are stored as UTC-aware timestamps. The browser formats them with the selected locale and local timezone. Scheduled settings persist in PostgreSQL; the worker calculates the first `next_run_at` from the chosen interval.
 
 The optional Sites deployment is a frontend preview. The complete operational system is the Docker Compose localhost deployment because Playwright, PostgreSQL and Python worker processes intentionally remain separate.
+
+In the desktop build, Tauri starts one compiled sidecar. That process owns the
+FastAPI server, the durable scan worker and the scheduler, backed by SQLite.
+The worker uses an atomic database claim instead of PostgreSQL
+`FOR UPDATE SKIP LOCKED`. Application restart recovery records an
+`INTERRUPTED` terminal run rather than leaving a permanent `RUNNING` state.
+Manual project refreshes absorb queued automatic work for the same projects;
+after a started manual run finishes, `next_run_at` is atomically recalculated
+from its finish time and the latest saved interval.

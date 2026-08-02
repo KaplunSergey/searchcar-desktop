@@ -548,7 +548,11 @@ def admin_patch_user(
                 ScanRun.status.in_(["QUEUED", "RUNNING", "CANCEL_REQUESTED"]),
             )
         ):
-            run.status = "CANCELLED" if run.status == "QUEUED" else "CANCEL_REQUESTED"
+            if run.status == "QUEUED":
+                run.status = "CANCELLED"
+                run.finished_at = datetime.now(timezone.utc)
+            else:
+                run.status = "CANCEL_REQUESTED"
     audit(
         db,
         "USER_UPDATED",
@@ -1508,12 +1512,51 @@ Encar URL: {record.url}"""
 def enqueue(kind: str, payload: dict, owner: User, db: Session) -> dict:
     requested_projects = set(payload.get("project_ids") or [])
     requested_cars = set(payload.get("car_ids") or [])
-    for active in db.scalars(
+    active_runs = list(db.scalars(
         select(ScanRun).where(
             ScanRun.owner_id == owner.id,
             ScanRun.status.in_(["QUEUED", "RUNNING", "CANCEL_REQUESTED"])
         )
-    ):
+    ))
+    if kind == "PROJECTS" and payload.get("trigger") == "MANUAL":
+        merged_at = datetime.now(timezone.utc)
+        for active in active_runs:
+            active_payload = dict(active.payload or {})
+            is_automatic = (
+                active.kind == "PROJECTS"
+                and (
+                    active_payload.get("trigger") == "AUTOMATIC"
+                    or active_payload.get("scheduled") is True
+                )
+            )
+            overlap = requested_projects & set(
+                active_payload.get("project_ids") or []
+            )
+            if not is_automatic or active.status != "QUEUED" or not overlap:
+                continue
+            remaining = [
+                project_id
+                for project_id in active_payload.get("project_ids") or []
+                if project_id not in overlap
+            ]
+            if remaining:
+                active.payload = {**active_payload, "project_ids": remaining}
+            else:
+                active.status = "CANCELLED"
+                active.finished_at = merged_at
+                active.payload = {
+                    **active_payload,
+                    "cancelled_at": merged_at.isoformat(),
+                    "cancellation_reason": "MERGED_INTO_MANUAL_RUN",
+                }
+        db.flush()
+        active_runs = [
+            active
+            for active in active_runs
+            if active.status in {"QUEUED", "RUNNING", "CANCEL_REQUESTED"}
+        ]
+
+    for active in active_runs:
         active_payload = active.payload or {}
         if requested_projects & set(active_payload.get("project_ids") or []):
             raise HTTPException(409, "project_scan_already_active")
@@ -1782,6 +1825,10 @@ def scan_out(run: ScanRun, db: Session) -> dict:
         "progress": run.progress,
         "payload": payload,
         "error": run.error,
+        "attempt_count": run.attempt_count,
+        "started_at": run.started_at,
+        "heartbeat_at": run.heartbeat_at,
+        "finished_at": run.finished_at,
         "created_at": run.created_at,
         "updated_at": run.updated_at,
     }
@@ -1806,7 +1853,12 @@ def scan_projects(
     )
     if existing != set(ids):
         raise HTTPException(404, "project_not_found")
-    return enqueue("PROJECTS", {"project_ids": ids}, current, db)
+    return enqueue(
+        "PROJECTS",
+        {"project_ids": ids, "trigger": "MANUAL"},
+        current,
+        db,
+    )
 
 
 @app.post("/api/scans/cars", status_code=202)
@@ -1887,11 +1939,13 @@ def cancel_scan(
     if run.status not in {"QUEUED", "RUNNING"}:
         raise HTTPException(409, "scan_already_finished")
 
-    timestamp = datetime.now(timezone.utc).isoformat()
+    cancellation_time = datetime.now(timezone.utc)
+    timestamp = cancellation_time.isoformat()
     payload = dict(run.payload or {})
     payload["cancellation_requested_at"] = timestamp
     if run.status == "QUEUED":
         run.status = "CANCELLED"
+        run.finished_at = cancellation_time
         payload.update(
             {
                 "cancelled_at": timestamp,

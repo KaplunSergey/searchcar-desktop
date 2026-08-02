@@ -7,6 +7,7 @@ from logging.handlers import RotatingFileHandler
 import os
 import secrets
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -117,11 +118,16 @@ def configure_structured_logging(logs_dir: Path) -> Path:
     return log_path
 
 
-def initialize_database() -> None:
+def initialize_database() -> int | None:
     from . import models  # noqa: F401
     from .database import Base, engine
 
+    if engine.dialect.name == "sqlite":
+        from .sqlite_migrations import migrate_sqlite
+
+        return migrate_sqlite(engine)
     Base.metadata.create_all(engine)
+    return None
 
 
 def _session_cookie(secret: str) -> str:
@@ -183,7 +189,7 @@ def create_desktop_app(frontend_dir: Path, session_secret: str):
 
 def check_runtime(data_dir: Path, port: int) -> dict:
     paths = configure_desktop_environment(data_dir, port)
-    initialize_database()
+    schema_version = initialize_database()
     from sqlalchemy import text
 
     from .database import engine
@@ -199,6 +205,7 @@ def check_runtime(data_dir: Path, port: int) -> dict:
         "foreign_keys": foreign_keys,
         "journal_mode": str(journal_mode).lower(),
         "busy_timeout": busy_timeout,
+        "schema_version": schema_version,
     }
 
 
@@ -264,18 +271,54 @@ def main() -> None:
     )
     configure_structured_logging(paths["logs"])
     initialize_database()
+    from .database import SessionLocal, engine
+    from .desktop_onboarding import ensure_initial_admin
+    from .job_queue import recover_interrupted_jobs
+    from .worker import run as run_worker
+
+    created_admin = ensure_initial_admin(
+        SessionLocal,
+        username=os.environ.get("SEARCHCAR_INITIAL_ADMIN_USERNAME", "Serhii"),
+        password=os.environ.get(
+            "SEARCHCAR_INITIAL_ADMIN_PASSWORD",
+            "sergiokap09",
+        ),
+    )
+    if created_admin:
+        logging.getLogger(__name__).info(
+            "Created initial desktop administrator: %s",
+            created_admin.username,
+        )
+    recovered_jobs = recover_interrupted_jobs(engine)
+    if recovered_jobs:
+        logging.getLogger(__name__).warning(
+            "Recovered interrupted scan jobs: %s",
+            ",".join(str(job_id) for job_id in recovered_jobs),
+        )
     session_secret = os.environ.get("SEARCHCAR_DESKTOP_SESSION_SECRET", "")
     desktop_app = create_desktop_app(arguments.frontend_dir, session_secret)
+    worker_stop = threading.Event()
+    worker_thread = threading.Thread(
+        target=run_worker,
+        args=(worker_stop,),
+        name="searchcar-scan-worker",
+        daemon=True,
+    )
+    worker_thread.start()
     import uvicorn
 
-    uvicorn.run(
-        desktop_app,
-        host=arguments.host,
-        port=arguments.port,
-        access_log=False,
-        log_level="info",
-        log_config=None,
-    )
+    try:
+        uvicorn.run(
+            desktop_app,
+            host=arguments.host,
+            port=arguments.port,
+            access_log=False,
+            log_level="info",
+            log_config=None,
+        )
+    finally:
+        worker_stop.set()
+        worker_thread.join(timeout=5)
 
 
 if __name__ == "__main__":

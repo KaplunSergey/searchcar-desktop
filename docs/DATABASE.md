@@ -15,7 +15,7 @@
 | `price_history` | Distinct extracted prices |
 | `car_events` | User and scraper event timeline |
 | `car_images` | Current image/screenshot paths and checksums |
-| `scan_runs` | User-owned durable queued/running/completed job and progress |
+| `scan_runs` | User-owned durable job, claim owner, attempt count, heartbeat, timing and progress |
 | `project_scan_runs` | Per-project outcome and technical error |
 | `scheduler_settings` | Per-user enabled state, interval and next run |
 | `scheduled_projects` | Projects included in automatic runs |
@@ -34,3 +34,13 @@ carry `integrity_status` and `integrity_reason`. Unreliable rows are preserved
 for audit as `INVALIDATED`, but are excluded from cards, price charts and
 reports. Orphan listings that were previously attached as an alias of another
 canonical car are kept as `QUARANTINED` and no longer participate in projects.
+
+The desktop database has an independent, versioned migration ledger in
+`desktop_schema_migrations`. Startup applies migrations under SQLite
+`BEGIN IMMEDIATE`, then reconciles abandoned `RUNNING` or `CANCEL_REQUESTED`
+runs to `INTERRUPTED`. Their progress and partial report remain available in
+history. A partial unique index and one atomic `UPDATE ... RETURNING` claim
+permit only one active scan worker even if two worker loops race.
+
+All mapped timestamps use `UTCDateTime`. PostgreSQL stores native aware values;
+SQLite stores normalized UTC values and restores the UTC timezone on read.

@@ -1,0 +1,349 @@
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from sqlalchemy import inspect, select, text
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.database import create_database_engine
+from app.desktop_onboarding import ensure_initial_admin
+from app.job_queue import claim_next_job, recover_interrupted_jobs
+from app.main import enqueue
+from app.models import (
+    Project,
+    ProjectScanRun,
+    ScanRun,
+    ScheduledProject,
+    SchedulerSetting,
+    User,
+)
+from app.sqlite_migrations import migrate_sqlite, sqlite_schema_version
+from app.worker import _reanchor_scheduler_after_manual_projects
+
+
+def sqlite_engine(tmp_path: Path):
+    return create_database_engine(
+        f"sqlite+pysqlite:///{(tmp_path / 'queue.sqlite3').as_posix()}"
+    )
+
+
+def add_user(db: Session, username: str = "owner") -> User:
+    user = User(
+        username=username,
+        username_key=username,
+        password_hash="test-only",
+        role="USER",
+        status="ACTIVE",
+        project_limit=1,
+    )
+    db.add(user)
+    db.flush()
+    return user
+
+
+def test_sqlite_migrations_are_versioned_and_idempotent(tmp_path: Path) -> None:
+    engine = sqlite_engine(tmp_path)
+
+    assert migrate_sqlite(engine) == 2
+    assert migrate_sqlite(engine) == 2
+    assert sqlite_schema_version(engine) == 2
+
+    with engine.connect() as connection:
+        columns = {
+            column["name"]
+            for column in inspect(connection).get_columns("scan_runs")
+        }
+        assert {
+            "worker_id",
+            "attempt_count",
+            "started_at",
+            "heartbeat_at",
+            "finished_at",
+        } <= columns
+        assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+        assert connection.execute(text("PRAGMA integrity_check")).scalar_one() == "ok"
+
+
+def test_pre_migration_desktop_database_is_adopted(tmp_path: Path) -> None:
+    engine = sqlite_engine(tmp_path)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, status VARCHAR(24))"
+        )
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE scan_runs (
+                id INTEGER PRIMARY KEY,
+                owner_id INTEGER NOT NULL,
+                kind VARCHAR(20) NOT NULL,
+                status VARCHAR(20) NOT NULL,
+                progress INTEGER DEFAULT 0,
+                payload JSON,
+                error TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(owner_id) REFERENCES users(id)
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE project_scan_runs (
+                id INTEGER PRIMARY KEY,
+                scan_run_id INTEGER,
+                project_id INTEGER,
+                status VARCHAR(20),
+                error_code VARCHAR(30)
+            )
+            """
+        )
+        connection.execute(text("INSERT INTO users (id, status) VALUES (1, 'ACTIVE')"))
+        connection.execute(
+            text(
+                """
+                INSERT INTO scan_runs (id, owner_id, kind, status)
+                VALUES (1, 1, 'PROJECTS', 'RUNNING')
+                """
+            )
+        )
+
+    assert migrate_sqlite(engine) == 2
+    with engine.connect() as connection:
+        row = connection.execute(
+            text(
+                """
+                SELECT status, attempt_count, finished_at
+                FROM scan_runs WHERE id = 1
+                """
+            )
+        ).one()
+        assert row.status == "INTERRUPTED"
+        assert row.attempt_count == 0
+        assert row.finished_at is not None
+
+
+def test_first_run_admin_is_created_only_once(tmp_path: Path) -> None:
+    engine = sqlite_engine(tmp_path)
+    migrate_sqlite(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    created = ensure_initial_admin(
+        factory,
+        username="Serhii",
+        password="sergiokap09",
+    )
+    repeated = ensure_initial_admin(
+        factory,
+        username="Another admin",
+        password="another-password",
+    )
+
+    assert created is not None
+    assert created.username == "Serhii"
+    assert created.role == "ADMIN"
+    assert created.must_change_password
+    assert repeated is None
+    with Session(engine) as db:
+        assert db.scalar(select(User).where(User.username_key == "serhii"))
+        assert len(list(db.scalars(select(User)))) == 1
+
+
+def test_two_workers_cannot_claim_jobs_at_the_same_time(tmp_path: Path) -> None:
+    engine = sqlite_engine(tmp_path)
+    migrate_sqlite(engine)
+    with Session(engine) as db:
+        user = add_user(db)
+        db.add_all(
+            [
+                ScanRun(owner_id=user.id, kind="PROJECTS", status="QUEUED"),
+                ScanRun(owner_id=user.id, kind="PROJECTS", status="QUEUED"),
+            ]
+        )
+        db.commit()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        claimed = list(
+            executor.map(
+                lambda worker: claim_next_job(engine, worker),
+                ("worker-a", "worker-b"),
+            )
+        )
+
+    assert sum(job_id is not None for job_id in claimed) == 1
+    with Session(engine) as db:
+        jobs = list(db.scalars(select(ScanRun).order_by(ScanRun.id)))
+        assert [job.status for job in jobs].count("RUNNING") == 1
+        assert [job.status for job in jobs].count("QUEUED") == 1
+        running = next(job for job in jobs if job.status == "RUNNING")
+        assert running.attempt_count == 1
+        assert running.started_at is not None
+        assert running.started_at.tzinfo == timezone.utc
+
+
+def test_startup_recovery_preserves_partial_payload(tmp_path: Path) -> None:
+    engine = sqlite_engine(tmp_path)
+    migrate_sqlite(engine)
+    with Session(engine) as db:
+        user = add_user(db)
+        project = Project(
+            owner_id=user.id,
+            name="Test project",
+            name_key="test project",
+            search_url="https://example.invalid/search",
+        )
+        db.add(project)
+        db.flush()
+        run = ScanRun(
+            owner_id=user.id,
+            kind="PROJECTS",
+            status="RUNNING",
+            progress=40,
+            payload={"project_ids": [project.id], "report": [{"car_id": 7}]},
+            worker_id="old-worker",
+            attempt_count=1,
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=2),
+        )
+        db.add(run)
+        db.flush()
+        db.add(
+            ProjectScanRun(
+                scan_run_id=run.id,
+                project_id=project.id,
+                status="RUNNING",
+            )
+        )
+        db.commit()
+        run_id = run.id
+
+    recovered_at = datetime(2026, 8, 2, 10, 30, tzinfo=timezone.utc)
+    assert recover_interrupted_jobs(engine, now=recovered_at) == [run_id]
+    assert recover_interrupted_jobs(engine, now=recovered_at) == []
+
+    with Session(engine) as db:
+        run = db.get(ScanRun, run_id)
+        project_run = db.scalar(
+            select(ProjectScanRun).where(ProjectScanRun.scan_run_id == run_id)
+        )
+        assert run.status == "INTERRUPTED"
+        assert run.progress == 40
+        assert run.payload["report"] == [{"car_id": 7}]
+        assert run.payload["interruption_reason"] == "APPLICATION_RESTARTED"
+        assert run.finished_at == recovered_at
+        assert project_run.status == "INTERRUPTED"
+        assert project_run.error_code == "APP_INTERRUPTED"
+
+
+def test_sqlite_datetime_round_trip_is_aware_utc(tmp_path: Path) -> None:
+    engine = sqlite_engine(tmp_path)
+    migrate_sqlite(engine)
+    supplied = datetime(2026, 8, 2, 14, 0, tzinfo=timezone(timedelta(hours=2)))
+    with Session(engine) as db:
+        user = add_user(db)
+        run = ScanRun(
+            owner_id=user.id,
+            kind="PROJECTS",
+            status="QUEUED",
+            started_at=supplied,
+        )
+        db.add(run)
+        db.commit()
+        run_id = run.id
+
+    with Session(engine) as db:
+        stored = db.get(ScanRun, run_id)
+        assert stored.started_at == datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc)
+        assert stored.started_at.tzinfo == timezone.utc
+
+
+def test_manual_project_run_absorbs_queued_automatic_run(tmp_path: Path) -> None:
+    engine = sqlite_engine(tmp_path)
+    migrate_sqlite(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        user = add_user(db)
+        project = Project(
+            owner_id=user.id,
+            name="Test project",
+            name_key="test project",
+            search_url="https://example.invalid/search",
+        )
+        db.add(project)
+        db.flush()
+        automatic = ScanRun(
+            owner_id=user.id,
+            kind="PROJECTS",
+            status="QUEUED",
+            payload={
+                "project_ids": [project.id],
+                "scheduled": True,
+                "trigger": "AUTOMATIC",
+            },
+        )
+        db.add(automatic)
+        db.commit()
+
+        result = enqueue(
+            "PROJECTS",
+            {"project_ids": [project.id], "trigger": "MANUAL"},
+            user,
+            db,
+        )
+
+        db.refresh(automatic)
+        assert automatic.status == "CANCELLED"
+        assert automatic.payload["cancellation_reason"] == "MERGED_INTO_MANUAL_RUN"
+        manual = db.get(ScanRun, result["id"])
+        assert manual.status == "QUEUED"
+        assert manual.payload["trigger"] == "MANUAL"
+
+
+def test_finished_manual_project_run_reanchors_scheduler(tmp_path: Path) -> None:
+    engine = sqlite_engine(tmp_path)
+    migrate_sqlite(engine)
+    with Session(engine) as db:
+        user = add_user(db)
+        project = Project(
+            owner_id=user.id,
+            name="Test project",
+            name_key="test project",
+            search_url="https://example.invalid/search",
+        )
+        db.add(project)
+        db.flush()
+        setting = SchedulerSetting(
+            user_id=user.id,
+            enabled=True,
+            interval_minutes=180,
+        )
+        db.add(setting)
+        db.flush()
+        db.add(
+            ScheduledProject(
+                scheduler_id=setting.id,
+                project_id=project.id,
+            )
+        )
+        run = ScanRun(
+            owner_id=user.id,
+            kind="PROJECTS",
+            status="SUCCEEDED",
+            payload={"project_ids": [project.id], "trigger": "MANUAL"},
+            started_at=datetime(2026, 8, 2, 9, 0, tzinfo=timezone.utc),
+        )
+        db.add(run)
+        db.flush()
+
+        finished_at = datetime(2026, 8, 2, 10, 27, tzinfo=timezone.utc)
+        _reanchor_scheduler_after_manual_projects(db, run, finished_at)
+        db.commit()
+
+        assert setting.next_run_at == datetime(
+            2026,
+            8,
+            2,
+            13,
+            27,
+            tzinfo=timezone.utc,
+        )
+        assert run.payload["scheduler_reanchored_at"] == finished_at.isoformat()

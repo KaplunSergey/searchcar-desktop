@@ -89,6 +89,14 @@ pilot larger, but installation does not depend on internet access or an
 existing WebView2 runtime. The application itself may still require internet
 for search and license checks.
 
+On a new local database the current pilot creates the agreed initial
+administrator `Serhii` with password `sergiokap09` and requires a password
+change after the first login.
+Development builds can override both bootstrap values with
+`SEARCHCAR_INITIAL_ADMIN_USERNAME` and `SEARCHCAR_INITIAL_ADMIN_PASSWORD`.
+This temporary bootstrap is replaced by licensed first-run onboarding in the
+licensing milestone.
+
 The workflow can be started manually from GitHub Actions. A successful CI build
 proves Windows Server runner compatibility; Windows 10 and Windows 11 pilot
 machines remain mandatory before customer release.
