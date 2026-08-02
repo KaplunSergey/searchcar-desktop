@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import select
 
@@ -18,6 +19,8 @@ from .parser import (
     material_changes,
     price_change,
 )
+from .database import settings
+from .storage_paths import portable_storage_path
 
 
 def now() -> datetime:
@@ -25,6 +28,7 @@ def now() -> datetime:
 
 
 def _image_record(db, car_id: int, kind: str, path: str | None, checksum: str | None) -> None:
+    path = portable_storage_path(path, Path(settings.storage_root))
     if not path:
         return
     existing = db.scalar(

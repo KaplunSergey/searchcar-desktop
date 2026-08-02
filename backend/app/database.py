@@ -4,6 +4,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 class Settings(BaseSettings):
+    app_version: str = "0.1.0"
     database_url: str = "postgresql+psycopg://encar:encar@localhost:5432/encar"
     storage_root: str = "/storage"
     worker_poll_seconds: float = 2

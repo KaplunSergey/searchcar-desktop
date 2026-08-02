@@ -56,8 +56,31 @@ Validation still required before M2 is complete:
 - stress long browser scans and confirm transactions stay short;
 - validate the PostgreSQL compatibility migration in Docker.
 
+## Milestone M3 — converter and backup foundation
+
+Implemented:
+
+- versioned `.searchcar-backup` format with manifest and SHA-256 checksums;
+- SQLite Online Backup API export and integrity/foreign-key validation;
+- cross-platform archive traversal and symlink protection;
+- maintenance lock that prevents searches from starting during export;
+- offline startup restore with a verified automatic rollback backup;
+- reset of authentication sessions and interruption of unfinished jobs;
+- read-only, consistent PostgreSQL-to-SQLite converter;
+- preserved IDs/JSON/relationships, UTC normalization and portable paths;
+- storage copy with source/target checksums and table-count comparison;
+- administrator Settings UI for backup, restore and migration staging;
+- command-line diagnostics and automated unit coverage.
+
+Validation still required before M3 is complete:
+
+- run the full Python suite in the desktop Python 3.12 dependency environment;
+- migrate a copy of the real PostgreSQL volume and review every count;
+- execute backup/restore from installed macOS and Windows applications;
+- rebuild and visually verify the Settings wizard in the native desktop shell;
+- simulate a restore failure and confirm the automatic rollback on both OSes.
+
 ## Next milestone
 
-Finish M2 runtime validation, including the native installed macOS Chromium
-check, then implement the read-only PostgreSQL-to-SQLite converter and the
-verified `.searchcar-backup` export/restore foundation.
+Complete M1–M3 native validation (including Chromium from the installed macOS
+application), then proceed to Phase 4 sidecar/Playwright packaging hardening.

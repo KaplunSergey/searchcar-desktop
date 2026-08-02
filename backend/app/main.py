@@ -1,11 +1,14 @@
 from datetime import datetime, timedelta, timezone
+import os
+import shutil
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlalchemy import and_, delete as sa_delete, func, or_, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from .auth import (
@@ -46,6 +49,7 @@ from .models import (
     User,
     UserCarState,
 )
+from .storage_paths import resolve_storage_path
 from .parser import (
     extract_car_id,
     material_changes,
@@ -70,11 +74,12 @@ from .schemas import (
     ScanCarsIn,
     ScanProjectsIn,
     SchedulerIn,
+    DesktopMigrationIn,
     RegistrationIn,
 )
 from .services import merge_reliable_detail
 
-app = FastAPI(title="SearchCar API", version="1.1.0")
+app = FastAPI(title="SearchCar API", version=settings.app_version)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -785,10 +790,12 @@ def image_payloads(car_id: int, db: Session) -> dict:
         payload = dict(image.payload or {})
         path = payload.get("path")
         if path:
-            try:
-                payload["url"] = f"/storage/{Path(path).relative_to(storage_path)}"
-            except ValueError:
-                payload["url"] = path if str(path).startswith("/storage/") else None
+            resolved_path = resolve_storage_path(path, storage_path)
+            payload["url"] = (
+                f"/storage/{resolved_path.relative_to(storage_path.resolve()).as_posix()}"
+                if resolved_path is not None
+                else None
+            )
         payload["stored_at"] = payload.get("updated_at") or image.created_at
         result[image.kind] = payload
     return result
@@ -849,7 +856,7 @@ def latest_price_change(record: Car, db: Session) -> dict | None:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"status": "ok"}
+    return {"status": "ok", "version": settings.app_version}
 
 
 @app.get("/storage/{file_path:path}")
@@ -1510,6 +1517,10 @@ Encar URL: {record.url}"""
 
 
 def enqueue(kind: str, payload: dict, owner: User, db: Session) -> dict:
+    from .maintenance import maintenance_active
+
+    if maintenance_active():
+        raise HTTPException(409, "desktop_maintenance_active")
     requested_projects = set(payload.get("project_ids") or [])
     requested_cars = set(payload.get("car_ids") or [])
     active_runs = list(db.scalars(
@@ -2070,3 +2081,192 @@ def commit_import(
     if admin.role != "ADMIN":
         raise HTTPException(403, "admin_required")
     return run_import(Path(path), True, owner_id=admin.id)
+
+
+def desktop_data_root() -> Path:
+    configured = os.environ.get("SEARCHCAR_DESKTOP_DATA_DIR")
+    if not configured:
+        raise HTTPException(404, "desktop_runtime_required")
+    return Path(configured).expanduser().resolve()
+
+
+def desktop_backup_path(name: str) -> Path:
+    if Path(name).name != name or not name.endswith(".searchcar-backup"):
+        raise HTTPException(400, "invalid_backup_name")
+    path = desktop_data_root() / "backups" / name
+    if path.is_symlink():
+        raise HTTPException(400, "backup_symlink_not_allowed")
+    return path
+
+
+@app.get("/api/desktop/data")
+def desktop_data_status(_: User = Depends(require_admin)) -> dict:
+    root = desktop_data_root()
+    backups = root / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    restore_result_path = root / "runtime" / "last-restore-result.json"
+    restore_result = None
+    if restore_result_path.is_file():
+        try:
+            import json
+
+            restore_result = json.loads(restore_result_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            restore_result = {"status": "unreadable"}
+    return {
+        "data_directory": str(root),
+        "backups": [
+            {
+                "name": backup.name,
+                "bytes": backup.stat().st_size,
+                "updated_at": datetime.fromtimestamp(
+                    backup.stat().st_mtime,
+                    tz=timezone.utc,
+                ),
+            }
+            for backup in sorted(
+                (
+                    item
+                    for item in backups.glob("*.searchcar-backup")
+                    if item.is_file() and not item.is_symlink()
+                ),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+        ],
+        "restore_result": restore_result,
+    }
+
+
+@app.post("/api/desktop/backups")
+def create_desktop_backup(
+    admin: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    if admin.role != "ADMIN":
+        raise HTTPException(403, "admin_required")
+    from .desktop_backup import BackupBusyError, export_backup
+
+    root = desktop_data_root()
+    backup_path = root / "backups" / (
+        "manual-"
+        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-"
+        f"{uuid4().hex[:8]}.searchcar-backup"
+    )
+    try:
+        result = export_backup(
+            root / "data" / "searchcar.sqlite3",
+            root / "storage",
+            backup_path,
+            app_version=app.version,
+        )
+    except BackupBusyError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    audit(
+        db,
+        action="DESKTOP_BACKUP_CREATED",
+        actor_user_id=admin.id,
+        entity_type="BACKUP",
+        entity_id=backup_path.name,
+    )
+    db.commit()
+    return result.as_dict()
+
+
+@app.post("/api/desktop/backups/{name}/validate")
+def validate_desktop_backup(
+    name: str,
+    _: User = Depends(require_admin),
+) -> dict:
+    from .desktop_backup import BackupValidationError, validate_backup
+
+    path = desktop_backup_path(name)
+    try:
+        return validate_backup(path).as_dict()
+    except BackupValidationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/desktop/backups/{name}/restore")
+def stage_desktop_restore(
+    name: str,
+    admin: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    if admin.role != "ADMIN":
+        raise HTTPException(403, "admin_required")
+    from .desktop_backup import BackupValidationError, validate_backup
+
+    source = desktop_backup_path(name)
+    try:
+        validation = validate_backup(source)
+    except BackupValidationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    runtime = desktop_data_root() / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    pending = runtime / "pending-restore.searchcar-backup"
+    temporary = runtime / f".{pending.name}.{uuid4().hex}.tmp"
+    try:
+        shutil.copy2(source, temporary)
+        os.replace(temporary, pending)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    (runtime / "last-restore-result.json").write_text(
+        '{"status":"pending"}\n',
+        encoding="utf-8",
+    )
+    audit(
+        db,
+        action="DESKTOP_RESTORE_STAGED",
+        actor_user_id=admin.id,
+        entity_type="BACKUP",
+        entity_id=name,
+    )
+    db.commit()
+    return {
+        "status": "restart_required",
+        "backup": validation.as_dict(),
+    }
+
+
+@app.post("/api/desktop/migrations")
+def migrate_desktop_database(
+    body: DesktopMigrationIn,
+    admin: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    if admin.role != "ADMIN":
+        raise HTTPException(403, "admin_required")
+    from .desktop_backup import BackupError
+    from .postgres_converter import ConversionError, convert_to_backup
+
+    root = desktop_data_root()
+    destination = root / "backups" / (
+        "migration-"
+        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-"
+        f"{uuid4().hex[:8]}.searchcar-backup"
+    )
+    try:
+        report = convert_to_backup(
+            body.source_database_url,
+            Path(body.source_storage_path),
+            destination,
+            app_version=app.version,
+        )
+    except (BackupError, ConversionError, OSError, SQLAlchemyError, ValueError) as exc:
+        raise HTTPException(400, f"desktop_migration_failed:{type(exc).__name__}") from exc
+    audit(
+        db,
+        action="DESKTOP_MIGRATION_CREATED",
+        actor_user_id=admin.id,
+        entity_type="BACKUP",
+        entity_id=destination.name,
+        payload={
+            "source_dialect": report.source_dialect,
+            "source_counts": report.source_counts,
+            "storage_files": report.storage_files,
+        },
+    )
+    db.commit()
+    return report.as_dict()

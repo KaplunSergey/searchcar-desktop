@@ -1113,6 +1113,10 @@ def process_job(job_id: int) -> None:
 
 
 def enqueue_scheduled() -> None:
+    from .maintenance import maintenance_active
+
+    if maintenance_active():
+        return
     with SessionLocal.begin() as db:
         current = datetime.now(timezone.utc)
         settings_to_check = list(

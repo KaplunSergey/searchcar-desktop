@@ -38,6 +38,9 @@ cd backend
 pytest
 ```
 
+Phase 3 backup, restore and PostgreSQL migration commands are documented in
+[`../docs/DATA_BACKUP_AND_MIGRATION.md`](../docs/DATA_BACKUP_AND_MIGRATION.md).
+
 The Tauri shell requires the free Rust toolchain and a generated sidecar binary
 in `desktop/src-tauri/binaries`. Build Chromium and the sidecar with the same
 Python environment used for `backend/requirements-desktop-build.txt`:

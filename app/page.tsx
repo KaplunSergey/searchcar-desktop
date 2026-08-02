@@ -203,6 +203,23 @@ type ImportSummary = {
   images_copied?: number;
   skipped_existing?: number;
 };
+type DesktopBackup = {
+  name: string;
+  bytes: number;
+  updated_at: string;
+};
+type DesktopDataStatus = {
+  data_directory: string;
+  backups: DesktopBackup[];
+  restore_result?: { status: string; error?: string } | null;
+};
+type DesktopMigrationReport = {
+  status: "converted";
+  backup: { path: string; files: number; bytes: number };
+  source_counts: Record<string, number>;
+  target_counts: Record<string, number>;
+  storage_files: number;
+};
 type ProjectForm = {
   name: string;
   search_url: string;
@@ -2877,6 +2894,16 @@ function Settings({
     queryFn: () => request("/import/legacy"),
     enabled: isAdmin,
   });
+  const desktopDataQuery = useQuery<DesktopDataStatus>({
+    queryKey: ["desktop-data"],
+    queryFn: () => request("/desktop/data"),
+    enabled: isAdmin,
+    retry: false,
+  });
+  const [migrationUrl, setMigrationUrl] = useState(
+    "postgresql+psycopg://encar:encar@127.0.0.1:5432/encar",
+  );
+  const [migrationStorage, setMigrationStorage] = useState("");
   const [schedulerDraft, setSchedulerDraft] = useState<SchedulerRecord | null>(null);
   const scheduler = schedulerDraft ??
     schedulerQuery.data ?? {
@@ -2910,6 +2937,40 @@ function Settings({
       void client.invalidateQueries({ queryKey: ["legacy-import"] });
     },
     onError: () => notify(t("importFailed")),
+  });
+  const backupMutation = useMutation({
+    mutationFn: () => request("/desktop/backups", { method: "POST" }),
+    onSuccess: () => {
+      notify(t("backupCreated"));
+      void client.invalidateQueries({ queryKey: ["desktop-data"] });
+    },
+    onError: () => notify(t("backupFailed")),
+  });
+  const restoreMutation = useMutation({
+    mutationFn: (name: string) =>
+      request(`/desktop/backups/${encodeURIComponent(name)}/restore`, {
+        method: "POST",
+      }),
+    onSuccess: () => {
+      notify(t("restoreRestartRequired"));
+      void client.invalidateQueries({ queryKey: ["desktop-data"] });
+    },
+    onError: () => notify(t("restoreFailed")),
+  });
+  const migrationMutation = useMutation({
+    mutationFn: () =>
+      request<DesktopMigrationReport>("/desktop/migrations", {
+        method: "POST",
+        body: JSON.stringify({
+          source_database_url: migrationUrl,
+          source_storage_path: migrationStorage,
+        }),
+      }),
+    onSuccess: () => {
+      notify(t("migrationCompleted"));
+      void client.invalidateQueries({ queryKey: ["desktop-data"] });
+    },
+    onError: () => notify(t("migrationFailed")),
   });
   const source = importMutation.data || importQuery.data;
   return (
@@ -3050,6 +3111,91 @@ function Settings({
           </Button>
         </div>
       </section> : null}
+      {isAdmin && desktopDataQuery.data ? (
+        <section className="panel settings import-panel desktop-data-panel">
+          <div className="setting-row">
+            <div>
+              <h3>{t("desktopData")}</h3>
+              <p>{t("desktopDataHelp")}</p>
+            </div>
+            <Button
+              kind="primary"
+              disabled={backupMutation.isPending}
+              onClick={() => backupMutation.mutate()}
+            >
+              {backupMutation.isPending ? t("backupCreating") : t("createBackup")}
+            </Button>
+          </div>
+          <p className="data-directory">
+            {t("dataFolder")}: <code>{desktopDataQuery.data.data_directory}</code>
+          </p>
+          {desktopDataQuery.data.restore_result ? (
+            <div className={`restore-result ${desktopDataQuery.data.restore_result.status}`}>
+              {t("lastRestore")}: {desktopDataQuery.data.restore_result.status}
+            </div>
+          ) : null}
+          <div className="backup-list">
+            {desktopDataQuery.data.backups.length ? (
+              desktopDataQuery.data.backups.map((backup) => (
+                <div key={backup.name}>
+                  <span>
+                    <b>{backup.name}</b>
+                    <small>
+                      {(backup.bytes / 1024 / 1024).toFixed(1)} MB · {formatDate(backup.updated_at, locale)}
+                    </small>
+                  </span>
+                  <Button
+                    disabled={restoreMutation.isPending}
+                    onClick={() => {
+                      if (window.confirm(t("restoreConfirm"))) {
+                        restoreMutation.mutate(backup.name);
+                      }
+                    }}
+                  >
+                    {t("restoreBackup")}
+                  </Button>
+                </div>
+              ))
+            ) : (
+              <p>{t("noBackups")}</p>
+            )}
+          </div>
+          <details className="migration-wizard">
+            <summary>{t("migrationWizard")}</summary>
+            <p>{t("migrationWizardHelp")}</p>
+            <label>
+              {t("sourceDatabase")}
+              <input
+                type="password"
+                value={migrationUrl}
+                onChange={(event) => setMigrationUrl(event.target.value)}
+              />
+            </label>
+            <label>
+              {t("sourceStorage")}
+              <input
+                placeholder={t("sourceStoragePlaceholder")}
+                value={migrationStorage}
+                onChange={(event) => setMigrationStorage(event.target.value)}
+              />
+            </label>
+            <div className="setting-footer">
+              <span>{t("migrationReadOnly")}</span>
+              <Button
+                kind="primary"
+                disabled={
+                  migrationMutation.isPending ||
+                  !migrationUrl.trim() ||
+                  !migrationStorage.trim()
+                }
+                onClick={() => migrationMutation.mutate()}
+              >
+                {migrationMutation.isPending ? t("migrationRunning") : t("startMigration")}
+              </Button>
+            </div>
+          </details>
+        </section>
+      ) : null}
     </>
   );
 }

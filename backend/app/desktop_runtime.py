@@ -82,6 +82,7 @@ def configure_desktop_environment(
     database_path = database_dir / "searchcar.sqlite3"
     os.environ["DATABASE_URL"] = _sqlite_url(database_path)
     os.environ["STORAGE_ROOT"] = str(storage_dir)
+    os.environ["SEARCHCAR_DESKTOP_DATA_DIR"] = str(data_dir)
     os.environ["AUTH_COOKIE_NAME"] = "searchcar_session"
     os.environ["AUTH_CSRF_COOKIE_NAME"] = "searchcar_csrf"
     os.environ["AUTH_HASH_SECRET"] = _persistent_secret(data_dir)
@@ -116,6 +117,55 @@ def configure_structured_logging(logs_dir: Path) -> Path:
     root_logger.addHandler(file_handler)
     root_logger.addHandler(stream_handler)
     return log_path
+
+
+def apply_pending_restore(paths: dict[str, Path]) -> dict | None:
+    pending = paths["root"] / "runtime" / "pending-restore.searchcar-backup"
+    if not pending.is_file():
+        return None
+    pending.parent.mkdir(parents=True, exist_ok=True)
+    result_path = pending.parent / "last-restore-result.json"
+    try:
+        initialize_database()
+        from .database import engine
+        from .desktop_backup import interrupt_unfinished_jobs, restore_backup
+
+        interrupt_unfinished_jobs(engine, reason="BACKUP_RESTORE_REQUESTED")
+        engine.dispose()
+        result = restore_backup(
+            pending,
+            paths["database"],
+            paths["storage"],
+            paths["root"] / "backups",
+        )
+        engine.dispose()
+        pending.unlink()
+        result_path.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return result
+    except Exception as exc:
+        failed = paths["root"] / "backups" / (
+            f"failed-restore-{_utc_filename()}.searchcar-backup"
+        )
+        failed.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(pending, failed)
+        result = {
+            "status": "failed",
+            "error": type(exc).__name__,
+            "backup": str(failed),
+        }
+        result_path.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        logging.getLogger(__name__).exception("Pending backup restore failed")
+        return result
+
+
+def _utc_filename() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 def initialize_database() -> int | None:
@@ -235,6 +285,50 @@ def check_browser(browser_dir: Path, output_path: Path) -> dict:
     }
 
 
+def backup_export(data_dir: Path, output_path: Path, port: int) -> dict:
+    from .desktop_backup import export_backup
+
+    paths = configure_desktop_environment(data_dir, port)
+    initialize_database()
+    return export_backup(
+        paths["database"],
+        paths["storage"],
+        output_path,
+    ).as_dict()
+
+
+def backup_validate(input_path: Path) -> dict:
+    from .desktop_backup import validate_backup
+
+    return validate_backup(input_path).as_dict()
+
+
+def backup_restore(data_dir: Path, input_path: Path, port: int) -> dict:
+    from .desktop_backup import restore_backup
+
+    paths = configure_desktop_environment(data_dir, port)
+    return restore_backup(
+        input_path,
+        paths["database"],
+        paths["storage"],
+        paths["root"] / "backups",
+    )
+
+
+def convert_database(
+    source_url: str,
+    source_storage: Path,
+    output_path: Path,
+) -> dict:
+    from .postgres_converter import convert_to_backup
+
+    return convert_to_backup(
+        source_url,
+        source_storage,
+        output_path,
+    ).as_dict()
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="SearchCar Desktop sidecar")
     commands = result.add_subparsers(dest="command", required=True)
@@ -247,6 +341,32 @@ def parser() -> argparse.ArgumentParser:
     )
     browser_check.add_argument("--browser-dir", type=Path, required=True)
     browser_check.add_argument("--output", type=Path, required=True)
+    export = commands.add_parser(
+        "backup-export",
+        help="Create and verify a portable desktop backup",
+    )
+    export.add_argument("--data-dir", type=Path, required=True)
+    export.add_argument("--output", type=Path, required=True)
+    export.add_argument("--port", type=int, default=8765)
+    validate = commands.add_parser(
+        "backup-validate",
+        help="Validate a portable desktop backup without restoring it",
+    )
+    validate.add_argument("--input", type=Path, required=True)
+    restore = commands.add_parser(
+        "backup-restore",
+        help="Restore a backup while the desktop application is stopped",
+    )
+    restore.add_argument("--data-dir", type=Path, required=True)
+    restore.add_argument("--input", type=Path, required=True)
+    restore.add_argument("--port", type=int, default=8765)
+    convert = commands.add_parser(
+        "convert-database",
+        help="Read a PostgreSQL/SQLite source and create a desktop backup",
+    )
+    convert.add_argument("--source-url", required=True)
+    convert.add_argument("--source-storage", type=Path, required=True)
+    convert.add_argument("--output", type=Path, required=True)
     serve = commands.add_parser("serve", help="Run the local desktop backend")
     serve.add_argument("--data-dir", type=Path, required=True)
     serve.add_argument("--frontend-dir", type=Path, required=True)
@@ -264,12 +384,47 @@ def main() -> None:
     if arguments.command == "browser-check":
         print(json.dumps(check_browser(arguments.browser_dir, arguments.output)))
         return
+    if arguments.command == "backup-export":
+        print(
+            json.dumps(
+                backup_export(arguments.data_dir, arguments.output, arguments.port),
+                ensure_ascii=False,
+            )
+        )
+        return
+    if arguments.command == "backup-validate":
+        print(json.dumps(backup_validate(arguments.input), ensure_ascii=False))
+        return
+    if arguments.command == "backup-restore":
+        print(
+            json.dumps(
+                backup_restore(arguments.data_dir, arguments.input, arguments.port),
+                ensure_ascii=False,
+            )
+        )
+        return
+    if arguments.command == "convert-database":
+        print(
+            json.dumps(
+                convert_database(
+                    arguments.source_url,
+                    arguments.source_storage,
+                    arguments.output,
+                ),
+                ensure_ascii=False,
+            )
+        )
+        return
     paths = configure_desktop_environment(
         arguments.data_dir,
         arguments.port,
         arguments.browser_dir,
     )
     configure_structured_logging(paths["logs"])
+    from .maintenance import clear_stale_maintenance_lock
+
+    clear_stale_maintenance_lock()
+    apply_pending_restore(paths)
     initialize_database()
     from .database import SessionLocal, engine
     from .desktop_onboarding import ensure_initial_admin

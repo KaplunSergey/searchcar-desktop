@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from .db_types import UTCDateTime
 from .models import ProjectScanRun, ScanRun
+from .maintenance import maintenance_active
 
 
 ACTIVE_SCAN_STATUSES = ("RUNNING", "CANCEL_REQUESTED")
@@ -30,6 +31,9 @@ def claim_next_job(
     now: datetime | None = None,
 ) -> int | None:
     """Atomically claim the oldest queued job for the only active worker."""
+
+    if maintenance_active():
+        return None
 
     timestamp = now or utc_now()
     statement = text(
