@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 class Settings(BaseSettings):
@@ -17,7 +18,26 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 settings = Settings()
-engine = create_engine(settings.database_url, pool_pre_ping=True)
+
+
+def create_database_engine(database_url: str) -> Engine:
+    is_sqlite = database_url.startswith("sqlite")
+    engine_options: dict = {"pool_pre_ping": True}
+    if is_sqlite:
+        engine_options["connect_args"] = {"check_same_thread": False}
+    created_engine = create_engine(database_url, **engine_options)
+    if is_sqlite:
+        @event.listens_for(created_engine, "connect")
+        def configure_sqlite(dbapi_connection, _connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.close()
+    return created_engine
+
+
+engine = create_database_engine(settings.database_url)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 class Base(DeclarativeBase):
