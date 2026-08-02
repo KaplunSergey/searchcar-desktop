@@ -1,0 +1,22 @@
+# Acceptance checklist
+
+- [x] Four-process Docker Compose topology
+- [x] PostgreSQL schema and Alembic migration for all required entities
+- [x] Canonical ID, alias, price, mileage, year/month, fuel, drivetrain, evidence and fingerprint parsers
+- [x] FAST, ACCURATE and individual refresh paths
+- [x] Project-local absence/relisting rules; search misses never imply a sale
+- [x] Cross-listing identity rejection and two-read price confirmation
+- [x] CAPTCHA separated from listing statuses
+- [x] Queue and progress polling API
+- [x] Scheduler with delayed first run
+- [x] Project CRUD, bulk refresh, favorite and viewed endpoints
+- [x] Global comment, rating, exclusion, event, price and prompt endpoints
+- [x] Idempotent legacy importer with dry-run/commit
+- [x] RU/UK translation dictionaries and locale switch
+- [x] Projects, project details, car details, scan history and settings pages
+- [x] Per-project first-page or complete paginated Encar search
+- [x] Price chart, evidence state, rating, comment and prompt-copy toast
+- [x] Parser assertions and production frontend build
+- [x] Live Encar FAST scan through Docker worker against an imported project
+- [x] Legacy source mounted read-only, imported, and verified idempotent
+- [x] Project create, edit, permanent delete, and 404-after-delete verified through API

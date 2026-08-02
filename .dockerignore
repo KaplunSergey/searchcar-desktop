@@ -1,0 +1,7 @@
+node_modules
+dist
+.git
+.wrangler
+storage
+legacy-data
+backend/__pycache__

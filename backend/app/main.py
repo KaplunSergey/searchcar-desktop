@@ -1,0 +1,2018 @@
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from sqlalchemy import and_, delete as sa_delete, func, or_, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from .auth import (
+    AuthContext,
+    audit,
+    create_session,
+    get_auth_context,
+    hash_password,
+    normalize_username,
+    now_utc,
+    request_ip_hash,
+    require_admin,
+    require_csrf,
+    require_user,
+    revoke_user_sessions,
+    sync_csrf_cookie,
+    verify_password,
+    verify_request_origin,
+)
+from .database import get_db, settings
+from .importer import inspect_source, run as run_import
+from .models import (
+    Car,
+    CarAlias,
+    CarEvent,
+    CarImage,
+    CarSnapshot,
+    AuthAttempt,
+    AuthSession,
+    AuditLog,
+    PriceHistory,
+    Project,
+    ProjectCar,
+    ProjectScanRun,
+    ScanRun,
+    ScheduledProject,
+    SchedulerSetting,
+    User,
+    UserCarState,
+)
+from .parser import (
+    extract_car_id,
+    material_changes,
+    parse_condition,
+    parse_contract_status,
+    parse_new_car_price_percent,
+    parse_options,
+    parse_vehicle_fields,
+)
+from .schemas import (
+    BoolPatch,
+    AdminPasswordResetIn,
+    AdminUserIn,
+    AdminUserPatch,
+    CommentPatch,
+    LoginIn,
+    PasswordChangeIn,
+    ProfilePatch,
+    ProjectIn,
+    ProjectPatch,
+    RatingPatch,
+    ScanCarsIn,
+    ScanProjectsIn,
+    SchedulerIn,
+    RegistrationIn,
+)
+from .services import merge_reliable_detail
+
+app = FastAPI(title="Encar Projects API", version="1.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        origin.strip()
+        for origin in settings.allowed_origins.split(",")
+        if origin.strip()
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+storage_path = Path(settings.storage_root)
+storage_path.mkdir(parents=True, exist_ok=True)
+
+
+def user_out(user: User, db: Session, *, include_usage: bool = True) -> dict:
+    result = {
+        "id": user.id,
+        "username": user.username,
+        "role": user.role,
+        "status": user.status,
+        "project_limit": user.project_limit,
+        "must_change_password": user.must_change_password,
+        "preferred_locale": user.preferred_locale,
+        "created_at": user.created_at,
+        "updated_at": user.updated_at,
+        "last_login_at": user.last_login_at,
+        "last_activity_at": user.last_activity_at,
+    }
+    if include_usage:
+        result["project_count"] = (
+            db.scalar(
+                select(func.count())
+                .select_from(Project)
+                .where(Project.owner_id == user.id)
+            )
+            or 0
+        )
+        result["car_count"] = (
+            db.scalar(
+                select(func.count(func.distinct(ProjectCar.car_id)))
+                .select_from(ProjectCar)
+                .join(Project, Project.id == ProjectCar.project_id)
+                .where(
+                    Project.owner_id == user.id,
+                    ProjectCar.tracking_enabled.is_(True),
+                )
+            )
+            or 0
+        )
+        result["scan_count"] = (
+            db.scalar(
+                select(func.count())
+                .select_from(ScanRun)
+                .where(ScanRun.owner_id == user.id)
+            )
+            or 0
+        )
+    return result
+
+
+def owned_project(project_id: int, user: User, db: Session) -> Project:
+    project = db.scalar(
+        select(Project).where(
+            Project.id == project_id,
+            Project.owner_id == user.id,
+        )
+    )
+    if not project:
+        raise HTTPException(404, "project_not_found")
+    return project
+
+
+def user_car_state(user_id: int, car_id: int, db: Session) -> UserCarState:
+    state = db.get(UserCarState, {"user_id": user_id, "car_id": car_id})
+    if not state:
+        state = UserCarState(user_id=user_id, car_id=car_id)
+        db.add(state)
+        db.flush()
+    return state
+
+
+def accessible_car_relation(
+    car_id: int,
+    user: User,
+    db: Session,
+    project_id: int | None = None,
+    *,
+    require_tracking: bool = True,
+) -> ProjectCar:
+    query = (
+        select(ProjectCar)
+        .join(Project, Project.id == ProjectCar.project_id)
+        .where(
+            ProjectCar.car_id == car_id,
+            Project.owner_id == user.id,
+        )
+    )
+    if project_id is not None:
+        query = query.where(ProjectCar.project_id == project_id)
+    if require_tracking:
+        query = query.where(ProjectCar.tracking_enabled.is_(True))
+    relation_record = db.scalar(query.order_by(Project.updated_at.desc()))
+    if not relation_record:
+        raise HTTPException(404, "project_car_not_found")
+    return relation_record
+
+
+@app.post("/api/auth/login")
+def login(
+    body: LoginIn,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+) -> dict:
+    verify_request_origin(request)
+    username_key = normalize_username(body.username)
+    ip_hash = request_ip_hash(request)
+    cutoff = now_utc() - timedelta(minutes=15)
+    username_failures = (
+        db.scalar(
+            select(func.count())
+            .select_from(AuthAttempt)
+            .where(
+                AuthAttempt.username_key == username_key,
+                AuthAttempt.success.is_(False),
+                AuthAttempt.created_at >= cutoff,
+            )
+        )
+        or 0
+    )
+    ip_failures = (
+        db.scalar(
+            select(func.count())
+            .select_from(AuthAttempt)
+            .where(
+                AuthAttempt.ip_hash == ip_hash,
+                AuthAttempt.success.is_(False),
+                AuthAttempt.created_at >= cutoff,
+            )
+        )
+        or 0
+    )
+    if username_failures >= 5 or ip_failures >= 10:
+        raise HTTPException(429, "too_many_login_attempts")
+
+    user = db.scalar(select(User).where(User.username_key == username_key))
+    password_valid = verify_password(
+        body.password,
+        user.password_hash if user else "!unknown-user",
+    )
+    success = bool(user and password_valid and user.status == "ACTIVE")
+    db.add(
+        AuthAttempt(
+            username_key=username_key,
+            ip_hash=ip_hash,
+            success=success,
+        )
+    )
+    if not success:
+        audit(
+            db,
+            "LOGIN_FAILED",
+            target_user_id=user.id if user else None,
+            outcome="FAILED",
+            payload={"username_key": username_key, "ip_hash": ip_hash},
+        )
+        db.commit()
+        raise HTTPException(401, "invalid_username_or_password")
+
+    token, _, session = create_session(db, user, request)
+    csrf_token, _ = sync_csrf_cookie(request, response, session)
+    user.last_login_at = now_utc()
+    user.last_activity_at = user.last_login_at
+    audit(
+        db,
+        "LOGIN_SUCCEEDED",
+        actor_user_id=user.id,
+        target_user_id=user.id,
+        entity_type="USER",
+        entity_id=user.id,
+    )
+    db.commit()
+    response.set_cookie(
+        settings.auth_cookie_name,
+        token,
+        httponly=True,
+        secure=settings.auth_cookie_secure,
+        samesite="lax",
+        max_age=settings.auth_session_days * 24 * 60 * 60,
+        path="/",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return {"user": user_out(user, db), "csrf_token": csrf_token}
+
+
+@app.get("/api/auth/me")
+def auth_me(
+    request: Request,
+    response: Response,
+    context: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
+    csrf_token, rotated = sync_csrf_cookie(
+        request,
+        response,
+        context.session,
+    )
+    if rotated:
+        db.commit()
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "user": user_out(context.user, db),
+        "csrf_token": csrf_token,
+        "registration_enabled": settings.registration_enabled,
+    }
+
+
+@app.post("/api/auth/logout", status_code=204)
+def logout(
+    response: Response,
+    context: AuthContext = Depends(get_auth_context),
+    _: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> Response:
+    context.session.revoked_at = now_utc()
+    audit(
+        db,
+        "LOGOUT",
+        actor_user_id=context.user.id,
+        target_user_id=context.user.id,
+    )
+    db.commit()
+    response.delete_cookie(settings.auth_cookie_name, path="/")
+    response.delete_cookie(settings.auth_csrf_cookie_name, path="/")
+    response.headers["Cache-Control"] = "no-store"
+    response.status_code = 204
+    return response
+
+
+@app.post("/api/auth/change-password")
+def change_password(
+    body: PasswordChangeIn,
+    context: AuthContext = Depends(get_auth_context),
+    _: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    if not verify_password(body.current_password, context.user.password_hash):
+        raise HTTPException(400, "current_password_invalid")
+    if body.current_password == body.new_password:
+        raise HTTPException(422, "new_password_must_differ")
+    context.user.password_hash = hash_password(body.new_password)
+    context.user.must_change_password = False
+    revoke_user_sessions(
+        db,
+        context.user.id,
+        except_session_id=context.session.id,
+    )
+    audit(
+        db,
+        "PASSWORD_CHANGED",
+        actor_user_id=context.user.id,
+        target_user_id=context.user.id,
+    )
+    db.commit()
+    return {"must_change_password": False}
+
+
+@app.patch("/api/auth/profile")
+def update_profile(
+    body: ProfilePatch,
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    current.preferred_locale = body.preferred_locale
+    audit(
+        db,
+        "USER_PROFILE_UPDATED",
+        actor_user_id=current.id,
+        target_user_id=current.id,
+        entity_type="USER",
+        entity_id=current.id,
+        payload={"preferred_locale": current.preferred_locale},
+    )
+    db.commit()
+    return user_out(current, db)
+
+
+@app.post("/api/auth/register", status_code=202)
+def register(
+    body: RegistrationIn,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    verify_request_origin(request)
+    if not settings.registration_enabled:
+        raise HTTPException(404, "registration_disabled")
+    username_key = normalize_username(body.username)
+    if db.scalar(select(User.id).where(User.username_key == username_key)):
+        return {"status": "PENDING_APPROVAL"}
+    user = User(
+        username=body.username.strip(),
+        username_key=username_key,
+        password_hash=hash_password(body.password),
+        role="USER",
+        status="PENDING_APPROVAL",
+        project_limit=1,
+        must_change_password=False,
+    )
+    db.add(user)
+    db.flush()
+    audit(
+        db,
+        "REGISTRATION_REQUESTED",
+        target_user_id=user.id,
+        entity_type="USER",
+        entity_id=user.id,
+    )
+    db.commit()
+    return {"status": "PENDING_APPROVAL"}
+
+
+@app.get("/api/admin/users")
+def admin_users(
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    return [
+        user_out(user, db)
+        for user in db.scalars(select(User).order_by(User.created_at.desc()))
+    ]
+
+
+@app.post("/api/admin/users", status_code=201)
+def admin_create_user(
+    body: AdminUserIn,
+    admin: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    if admin.role != "ADMIN":
+        raise HTTPException(403, "admin_required")
+    username_key = normalize_username(body.username)
+    if db.scalar(select(User.id).where(User.username_key == username_key)):
+        raise HTTPException(409, "username_exists")
+    user = User(
+        username=body.username.strip(),
+        username_key=username_key,
+        password_hash=hash_password(body.password),
+        role=body.role,
+        status=body.status,
+        project_limit=None if body.role == "ADMIN" else body.project_limit,
+        must_change_password=body.must_change_password,
+    )
+    db.add(user)
+    db.flush()
+    audit(
+        db,
+        "USER_CREATED",
+        actor_user_id=admin.id,
+        target_user_id=user.id,
+        entity_type="USER",
+        entity_id=user.id,
+        payload={"role": user.role, "status": user.status},
+    )
+    db.commit()
+    return user_out(user, db)
+
+
+def ensure_not_last_admin(db: Session, user: User, changes: dict) -> None:
+    removing_admin = user.role == "ADMIN" and (
+        changes.get("role", user.role) != "ADMIN"
+        or changes.get("status", user.status) != "ACTIVE"
+    )
+    if not removing_admin:
+        return
+    active_admins = (
+        db.scalar(
+            select(func.count())
+            .select_from(User)
+            .where(User.role == "ADMIN", User.status == "ACTIVE")
+        )
+        or 0
+    )
+    if active_admins <= 1:
+        raise HTTPException(409, "last_active_admin")
+
+
+def delete_user_account_data(db: Session, user: User, admin: User) -> dict:
+    project_count = (
+        db.scalar(
+            select(func.count())
+            .select_from(Project)
+            .where(Project.owner_id == user.id)
+        )
+        or 0
+    )
+    scan_count = (
+        db.scalar(
+            select(func.count())
+            .select_from(ScanRun)
+            .where(ScanRun.owner_id == user.id)
+        )
+        or 0
+    )
+    audit(
+        db,
+        "USER_DELETED",
+        actor_user_id=admin.id,
+        entity_type="USER",
+        entity_id=user.id,
+        payload={
+            "username": user.username,
+            "role": user.role,
+            "status": user.status,
+            "projects_deleted": project_count,
+            "scans_deleted": scan_count,
+        },
+    )
+    db.execute(
+        sa_delete(SchedulerSetting).where(SchedulerSetting.user_id == user.id)
+    )
+    db.execute(sa_delete(ScanRun).where(ScanRun.owner_id == user.id))
+    db.execute(sa_delete(Project).where(Project.owner_id == user.id))
+    db.delete(user)
+    return {
+        "projects_deleted": project_count,
+        "scans_deleted": scan_count,
+    }
+
+
+@app.patch("/api/admin/users/{user_id}")
+def admin_patch_user(
+    user_id: int,
+    body: AdminUserPatch,
+    admin: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    if admin.role != "ADMIN":
+        raise HTTPException(403, "admin_required")
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "user_not_found")
+    changes = body.model_dump(exclude_unset=True)
+    if user.id == admin.id and (
+        changes.get("status", user.status) != "ACTIVE"
+        or changes.get("role", user.role) != "ADMIN"
+    ):
+        raise HTTPException(409, "cannot_restrict_self")
+    ensure_not_last_admin(db, user, changes)
+    if "username" in changes:
+        username_key = normalize_username(changes["username"])
+        existing = db.scalar(
+            select(User.id).where(
+                User.username_key == username_key,
+                User.id != user.id,
+            )
+        )
+        if existing:
+            raise HTTPException(409, "username_exists")
+        user.username = changes.pop("username").strip()
+        user.username_key = username_key
+    for key, value in changes.items():
+        setattr(user, key, value)
+    if user.role == "ADMIN":
+        user.project_limit = None
+    if user.status != "ACTIVE":
+        revoke_user_sessions(db, user.id)
+        for run in db.scalars(
+            select(ScanRun).where(
+                ScanRun.owner_id == user.id,
+                ScanRun.status.in_(["QUEUED", "RUNNING", "CANCEL_REQUESTED"]),
+            )
+        ):
+            run.status = "CANCELLED" if run.status == "QUEUED" else "CANCEL_REQUESTED"
+    audit(
+        db,
+        "USER_UPDATED",
+        actor_user_id=admin.id,
+        target_user_id=user.id,
+        entity_type="USER",
+        entity_id=user.id,
+        payload={key: value for key, value in changes.items() if key != "password_hash"},
+    )
+    db.commit()
+    return user_out(user, db)
+
+
+@app.delete("/api/admin/users/{user_id}", status_code=204)
+def admin_delete_user(
+    user_id: int,
+    admin: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> Response:
+    if admin.role != "ADMIN":
+        raise HTTPException(403, "admin_required")
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "user_not_found")
+    if user.id == admin.id:
+        raise HTTPException(409, "cannot_delete_self")
+    if user.role == "ADMIN" and user.status == "ACTIVE":
+        active_admins = (
+            db.scalar(
+                select(func.count())
+                .select_from(User)
+                .where(User.role == "ADMIN", User.status == "ACTIVE")
+            )
+            or 0
+        )
+        if active_admins <= 1:
+            raise HTTPException(409, "last_active_admin")
+    active_scans = (
+        db.scalar(
+            select(func.count())
+            .select_from(ScanRun)
+            .where(
+                ScanRun.owner_id == user.id,
+                ScanRun.status.in_(["QUEUED", "RUNNING", "CANCEL_REQUESTED"]),
+            )
+        )
+        or 0
+    )
+    if active_scans:
+        raise HTTPException(409, "user_has_active_scans")
+    revoke_user_sessions(db, user.id)
+    delete_user_account_data(db, user, admin)
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.post("/api/admin/users/{user_id}/reset-password")
+def admin_reset_password(
+    user_id: int,
+    body: AdminPasswordResetIn,
+    admin: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    if admin.role != "ADMIN":
+        raise HTTPException(403, "admin_required")
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "user_not_found")
+    user.password_hash = hash_password(body.password)
+    user.must_change_password = body.must_change_password
+    revoke_user_sessions(db, user.id)
+    audit(
+        db,
+        "PASSWORD_RESET_BY_ADMIN",
+        actor_user_id=admin.id,
+        target_user_id=user.id,
+        entity_type="USER",
+        entity_id=user.id,
+    )
+    db.commit()
+    return {"must_change_password": user.must_change_password}
+
+
+@app.get("/api/admin/stats")
+def admin_stats(
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    cutoff = now_utc() - timedelta(days=30)
+    return {
+        "users": db.scalar(select(func.count()).select_from(User)) or 0,
+        "active_users": db.scalar(
+            select(func.count()).select_from(User).where(User.status == "ACTIVE")
+        )
+        or 0,
+        "pending_users": db.scalar(
+            select(func.count())
+            .select_from(User)
+            .where(User.status == "PENDING_APPROVAL")
+        )
+        or 0,
+        "blocked_users": db.scalar(
+            select(func.count()).select_from(User).where(User.status == "BLOCKED")
+        )
+        or 0,
+        "projects": db.scalar(select(func.count()).select_from(Project)) or 0,
+        "cars": db.scalar(select(func.count()).select_from(Car)) or 0,
+        "scans_30d": db.scalar(
+            select(func.count())
+            .select_from(ScanRun)
+            .where(ScanRun.created_at >= cutoff)
+        )
+        or 0,
+        "failed_scans_30d": db.scalar(
+            select(func.count())
+            .select_from(ScanRun)
+            .where(
+                ScanRun.created_at >= cutoff,
+                ScanRun.status.in_(["FAILED", "PARTIAL", "CAPTCHA"]),
+            )
+        )
+        or 0,
+    }
+
+
+@app.get("/api/admin/audit")
+def admin_audit(
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    return [
+        {
+            "id": item.id,
+            "actor_user_id": item.actor_user_id,
+            "target_user_id": item.target_user_id,
+            "action": item.action,
+            "entity_type": item.entity_type,
+            "entity_id": item.entity_id,
+            "outcome": item.outcome,
+            "payload": item.payload,
+            "created_at": item.created_at,
+        }
+        for item in db.scalars(
+            select(AuditLog).order_by(AuditLog.created_at.desc()).limit(200)
+        )
+    ]
+
+
+def project_out(project: Project, db: Session) -> dict:
+    cars = (
+        db.scalar(
+            select(func.count())
+            .select_from(ProjectCar)
+            .join(Car, Car.id == ProjectCar.car_id)
+            .outerjoin(
+                UserCarState,
+                and_(
+                    UserCarState.user_id == project.owner_id,
+                    UserCarState.car_id == ProjectCar.car_id,
+                ),
+            )
+            .where(
+                ProjectCar.project_id == project.id,
+                ProjectCar.tracking_enabled.is_(True),
+                Car.excluded.is_(False),
+                or_(
+                    UserCarState.user_id.is_(None),
+                    UserCarState.excluded.is_(False),
+                ),
+            )
+        )
+        or 0
+    )
+    last_run = db.execute(
+        select(ProjectScanRun, ScanRun)
+        .join(ScanRun, ScanRun.id == ProjectScanRun.scan_run_id)
+        .where(ProjectScanRun.project_id == project.id)
+        .order_by(ScanRun.created_at.desc())
+        .limit(1)
+    ).first()
+    return {
+        "id": project.id,
+        "name": project.name,
+        "search_url": project.search_url,
+        "telegram_url": project.telegram_url,
+        "scan_mode": project.scan_mode,
+        "search_page_mode": project.search_page_mode,
+        "auto_update": project.auto_update,
+        "cars": cars,
+        "created_at": project.created_at,
+        "updated_at": project.updated_at,
+        "latest_scan": (
+            {
+                "id": last_run.ScanRun.id,
+                "status": last_run.ProjectScanRun.status,
+                "error": last_run.ProjectScanRun.error_code,
+                "created_at": last_run.ScanRun.created_at,
+            }
+            if last_run
+            else None
+        ),
+    }
+
+
+def get_car_or_404(car_id: int, db: Session) -> Car:
+    car = db.get(Car, car_id)
+    if not car:
+        raise HTTPException(404, "car_not_found")
+    return car
+
+
+def effective_status(record: Car, relation: ProjectCar | None) -> str:
+    if relation is None or not relation.tracking_enabled:
+        return "REMOVED_FROM_SEARCH"
+    if record.status == "SOLD":
+        return "SOLD"
+    if relation.search_status == "NOT_FOUND_IN_SEARCH":
+        return "NOT_FOUND_IN_SEARCH"
+    return record.status
+
+
+def image_payloads(car_id: int, db: Session) -> dict:
+    result = {}
+    for image in db.scalars(
+        select(CarImage).where(
+            CarImage.car_id == car_id,
+            CarImage.integrity_status == "VALID",
+        )
+    ):
+        payload = dict(image.payload or {})
+        path = payload.get("path")
+        if path:
+            try:
+                payload["url"] = f"/storage/{Path(path).relative_to(storage_path)}"
+            except ValueError:
+                payload["url"] = path if str(path).startswith("/storage/") else None
+        payload["stored_at"] = payload.get("updated_at") or image.created_at
+        result[image.kind] = payload
+    return result
+
+
+def enriched_details(record: Car) -> dict:
+    details = dict(record.details or {})
+    raw = details.get("raw_text_excerpt") or ""
+    if raw:
+        fields = parse_vehicle_fields(raw, record.title or "")
+        condition, condition_summary = parse_condition(raw)
+        parsed = {
+            **{key: value for key, value in fields.items() if value is not None},
+            "new_car_price_percent": (
+                details.get("new_car_price_percent")
+                or parse_new_car_price_percent(raw)
+            ),
+            "under_contract": details.get("under_contract")
+            or parse_contract_status(raw),
+            "options": parse_options(raw),
+            "condition": condition,
+            "condition_summary": condition_summary,
+        }
+        details = merge_reliable_detail(details, parsed)
+    return details
+
+
+def latest_price_change(record: Car, db: Session) -> dict | None:
+    values: list[int] = []
+    if record.current_price:
+        values.append(record.current_price)
+    for point in db.scalars(
+        select(PriceHistory)
+        .where(
+            PriceHistory.car_id == record.id,
+            PriceHistory.integrity_status == "VALID",
+        )
+        .order_by(PriceHistory.created_at.desc())
+        .limit(30)
+    ):
+        value = int((point.payload or {}).get("price_krw") or 0)
+        if value and value not in values:
+            values.append(value)
+        if len(values) == 2:
+            break
+    if len(values) < 2 or values[0] == values[1]:
+        return None
+    current, previous = values
+    difference = current - previous
+    return {
+        "direction": "DOWN" if difference < 0 else "UP",
+        "previous": previous,
+        "current": current,
+        "difference": abs(difference),
+        "percent": round(abs(difference) / previous * 100, 2),
+    }
+
+
+@app.get("/api/health")
+def health() -> dict:
+    return {"status": "ok"}
+
+
+@app.get("/storage/{file_path:path}")
+def storage_file(
+    file_path: str,
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    requested = (storage_path / file_path).resolve()
+    root = storage_path.resolve()
+    try:
+        relative = requested.relative_to(root)
+    except ValueError:
+        raise HTTPException(404, "file_not_found")
+    if not requested.is_file() or len(relative.parts) < 3 or relative.parts[0] != "cars":
+        raise HTTPException(404, "file_not_found")
+    encar_id = relative.parts[1]
+    car_id = db.scalar(
+        select(Car.id).where(Car.canonical_encar_id == encar_id)
+    )
+    if not car_id:
+        raise HTTPException(404, "file_not_found")
+    accessible_car_relation(
+        car_id,
+        current,
+        db,
+        require_tracking=False,
+    )
+    return FileResponse(requested)
+
+
+@app.get("/api/projects")
+def projects(
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    return [
+        project_out(project, db)
+        for project in db.scalars(
+            select(Project)
+            .where(Project.owner_id == current.id)
+            .order_by(Project.updated_at.desc())
+        )
+    ]
+
+
+@app.post("/api/projects", status_code=201)
+def create_project(
+    body: ProjectIn,
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    locked_user = db.scalar(
+        select(User).where(User.id == current.id).with_for_update()
+    )
+    project_count = (
+        db.scalar(
+            select(func.count())
+            .select_from(Project)
+            .where(Project.owner_id == current.id)
+        )
+        or 0
+    )
+    if (
+        locked_user
+        and locked_user.project_limit is not None
+        and project_count >= locked_user.project_limit
+    ):
+        raise HTTPException(403, "project_limit_reached")
+    project = Project(
+        owner_id=current.id,
+        name=body.name.strip(),
+        name_key=body.name.strip().casefold(),
+        search_url=body.search_url,
+        telegram_url=body.telegram_url,
+        scan_mode=body.scan_mode,
+        search_page_mode=body.search_page_mode,
+        auto_update=body.auto_update,
+    )
+    db.add(project)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "project_name_or_url_exists")
+    audit(
+        db,
+        "PROJECT_CREATED",
+        actor_user_id=current.id,
+        entity_type="PROJECT",
+        entity_id=project.id,
+    )
+    db.commit()
+    return project_out(project, db)
+
+
+@app.get("/api/projects/{project_id}")
+def get_project(
+    project_id: int,
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    project = owned_project(project_id, current, db)
+    return project_out(project, db)
+
+
+@app.patch("/api/projects/{project_id}")
+def patch_project(
+    project_id: int,
+    body: ProjectPatch,
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    project = owned_project(project_id, current, db)
+    changes = body.model_dump(exclude_unset=True)
+    for key, value in changes.items():
+        setattr(
+            project,
+            key,
+            value.strip() if key in {"name", "telegram_url"} and value else value,
+        )
+    if body.name:
+        project.name_key = body.name.strip().casefold()
+    project.updated_at = datetime.now(timezone.utc)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "project_name_or_url_exists")
+    audit(
+        db,
+        "PROJECT_UPDATED",
+        actor_user_id=current.id,
+        entity_type="PROJECT",
+        entity_id=project.id,
+        payload={"fields": sorted(changes)},
+    )
+    db.commit()
+    return project_out(project, db)
+
+
+@app.delete("/api/projects/{project_id}", status_code=204)
+def delete_project(
+    project_id: int,
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> Response:
+    project = owned_project(project_id, current, db)
+    audit(
+        db,
+        "PROJECT_DELETED",
+        actor_user_id=current.id,
+        entity_type="PROJECT",
+        entity_id=project.id,
+        payload={"name": project.name},
+    )
+    db.delete(project)
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.get("/api/projects/{project_id}/cars")
+def project_cars(
+    project_id: int,
+    favorite: bool | None = None,
+    status: str | None = None,
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    owned_project(project_id, current, db)
+    query = (
+        select(ProjectCar, Car)
+        .join(Car, Car.id == ProjectCar.car_id)
+        .outerjoin(
+            UserCarState,
+            and_(
+                UserCarState.user_id == current.id,
+                UserCarState.car_id == Car.id,
+            ),
+        )
+        .where(
+            ProjectCar.project_id == project_id,
+            ProjectCar.tracking_enabled.is_(True),
+            Car.excluded.is_(False),
+            or_(
+                UserCarState.user_id.is_(None),
+                UserCarState.excluded.is_(False),
+            ),
+        )
+    )
+    if favorite is not None:
+        query = query.where(ProjectCar.favorite == favorite)
+    if status:
+        if status in {"UNAVAILABLE", "NOT_FOUND_IN_SEARCH"}:
+            query = query.where(
+                ProjectCar.search_status == "NOT_FOUND_IN_SEARCH"
+            )
+        else:
+            query = query.where(Car.status == status)
+    result = []
+    for relation, car in db.execute(query.order_by(Car.updated_at.desc())):
+        details = enriched_details(car)
+        result.append(
+            {
+                "id": car.id,
+                "encar_id": car.canonical_encar_id,
+                "url": car.url,
+                "title": car.title,
+                "price": car.current_price,
+                "status": effective_status(car, relation),
+                "details": details,
+                "favorite": relation.favorite,
+                "viewed": relation.viewed,
+                "missing_scans": relation.consecutive_missing_scans,
+                "updated_at": car.updated_at,
+                "first_seen_at": relation.first_seen_at,
+                "image": (image_payloads(car.id, db).get("MAIN") or {}).get("url"),
+                "price_change": latest_price_change(car, db),
+            }
+        )
+    return result
+
+
+@app.get("/api/favorites")
+def favorite_cars(
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    result = []
+    rows = db.execute(
+        select(ProjectCar, Car, Project)
+        .join(Car, Car.id == ProjectCar.car_id)
+        .join(Project, Project.id == ProjectCar.project_id)
+        .outerjoin(
+            UserCarState,
+            and_(
+                UserCarState.user_id == current.id,
+                UserCarState.car_id == Car.id,
+            ),
+        )
+        .where(
+            Project.owner_id == current.id,
+            ProjectCar.favorite.is_(True),
+            ProjectCar.tracking_enabled.is_(True),
+            Car.excluded.is_(False),
+            or_(
+                UserCarState.user_id.is_(None),
+                UserCarState.excluded.is_(False),
+            ),
+        )
+        .order_by(Car.updated_at.desc())
+    ).all()
+    for relation, car, project in rows:
+        result.append(
+            {
+                "id": car.id,
+                "project_id": project.id,
+                "project_name": project.name,
+                "encar_id": car.canonical_encar_id,
+                "url": car.url,
+                "title": car.title,
+                "price": car.current_price,
+                "status": effective_status(car, relation),
+                "details": enriched_details(car),
+                "favorite": relation.favorite,
+                "viewed": relation.viewed,
+                "missing_scans": relation.consecutive_missing_scans,
+                "updated_at": car.updated_at,
+                "first_seen_at": relation.first_seen_at,
+                "image": (image_payloads(car.id, db).get("MAIN") or {}).get("url"),
+                "price_change": latest_price_change(car, db),
+            }
+        )
+    return result
+
+
+@app.get("/api/car-lookup")
+def lookup_car(
+    q: str = Query(min_length=1, max_length=500),
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    value = q.strip()
+    encar_id = extract_car_id(value) or (value if value.isdigit() and len(value) >= 6 else None)
+    if not encar_id:
+        return {"found": False, "reason": "invalid_encar_url"}
+    record = db.scalar(select(Car).where(Car.canonical_encar_id == encar_id))
+    if not record:
+        record = db.scalar(
+            select(Car)
+            .join(CarAlias, CarAlias.car_id == Car.id)
+            .where(CarAlias.alias_id == encar_id)
+        )
+    if not record:
+        return {"found": False, "encar_id": encar_id, "reason": "not_in_database"}
+    project_rows = db.execute(
+        select(ProjectCar, Project)
+        .join(Project, ProjectCar.project_id == Project.id)
+        .where(
+            ProjectCar.car_id == record.id,
+            Project.owner_id == current.id,
+        )
+        .order_by(Project.updated_at.desc())
+    ).all()
+    if not project_rows:
+        return {"found": False, "encar_id": encar_id, "reason": "not_in_database"}
+    projects = [
+        {"id": row.Project.id, "name": row.Project.name}
+        for row in project_rows
+        if row.ProjectCar.tracking_enabled
+    ]
+    lookup_relation = project_rows[0].ProjectCar if project_rows else None
+    state = db.get(UserCarState, {"user_id": current.id, "car_id": record.id})
+    return {
+        "found": True,
+        "encar_id": encar_id,
+        "project_id": (
+            projects[0]["id"]
+            if projects
+            else lookup_relation.project_id if lookup_relation else None
+        ),
+        "projects": projects,
+        "car": {
+            "id": record.id,
+            "encar_id": record.canonical_encar_id,
+            "url": record.url,
+            "title": record.title,
+            "price": record.current_price,
+            "status": effective_status(record, lookup_relation),
+            "details": enriched_details(record),
+            "image": (image_payloads(record.id, db).get("MAIN") or {}).get("url"),
+            "price_change": latest_price_change(record, db),
+            "excluded": bool(state and state.excluded),
+            "integrity_status": record.integrity_status,
+            "integrity_reason": record.integrity_reason,
+        },
+    }
+
+
+def relation(
+    project_id: int,
+    car_id: int,
+    user: User,
+    db: Session,
+    *,
+    require_tracking: bool = True,
+) -> ProjectCar:
+    return accessible_car_relation(
+        car_id,
+        user,
+        db,
+        project_id,
+        require_tracking=require_tracking,
+    )
+
+
+@app.delete("/api/projects/{project_id}/cars/{car_id}", status_code=204)
+def remove_car_from_project(
+    project_id: int,
+    car_id: int,
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> Response:
+    project_car = relation(project_id, car_id, current, db)
+    project_car.tracking_enabled = False
+    project_car.search_status = "REMOVED_FROM_PROJECT"
+    project_car.favorite = False
+    db.add(
+        CarEvent(
+            car_id=car_id,
+            kind="REMOVED_FROM_PROJECT",
+            user_id=current.id,
+            project_id=project_id,
+            payload={"project_id": project_id},
+        )
+    )
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.patch("/api/projects/{project_id}/cars/{car_id}/favorite")
+def favorite(
+    project_id: int,
+    car_id: int,
+    body: BoolPatch,
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    project_car = relation(project_id, car_id, current, db)
+    project_car.favorite = body.value
+    db.add(
+        CarEvent(
+            car_id=car_id,
+            kind="FAVORITE_ADDED" if body.value else "FAVORITE_REMOVED",
+            user_id=current.id,
+            project_id=project_id,
+            payload={"project_id": project_id},
+        )
+    )
+    db.commit()
+    return {"favorite": project_car.favorite}
+
+
+@app.patch("/api/projects/{project_id}/cars/{car_id}/viewed")
+def viewed(
+    project_id: int,
+    car_id: int,
+    body: BoolPatch,
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    project_car = relation(project_id, car_id, current, db)
+    if project_car.viewed == body.value:
+        return {"viewed": project_car.viewed}
+    project_car.viewed = body.value
+    project_car.viewed_at = datetime.now(timezone.utc) if body.value else None
+    db.add(
+        CarEvent(
+            car_id=car_id,
+            kind="USER_VIEWED",
+            user_id=current.id,
+            project_id=project_id,
+            payload={"project_id": project_id, "value": body.value},
+        )
+    )
+    db.commit()
+    return {"viewed": project_car.viewed}
+
+
+@app.get("/api/cars/{car_id}")
+def car(
+    car_id: int,
+    project_id: int | None = Query(None),
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    record = get_car_or_404(car_id, db)
+    project_car = accessible_car_relation(
+        car_id,
+        current,
+        db,
+        project_id,
+        require_tracking=False,
+    )
+    state = user_car_state(current.id, car_id, db)
+    return {
+        "id": record.id,
+        "encar_id": record.canonical_encar_id,
+        "url": record.url,
+        "title": record.title,
+        "price": record.current_price,
+        "status": effective_status(record, project_car),
+        "details": enriched_details(record),
+        "comment": state.comment,
+        "comment_updated_at": state.comment_updated_at,
+        "rating": state.rating,
+        "images": image_payloads(record.id, db),
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+        "first_seen_at": project_car.first_seen_at if project_car else record.created_at,
+        "last_seen_at": project_car.last_seen_at if project_car else None,
+        "favorite": project_car.favorite if project_car else False,
+        "viewed": project_car.viewed if project_car else False,
+        "excluded": state.excluded,
+        "integrity_status": record.integrity_status,
+        "integrity_reason": record.integrity_reason,
+    }
+
+
+@app.patch("/api/cars/{car_id}/comment")
+def comment(
+    car_id: int,
+    body: CommentPatch,
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    accessible_car_relation(car_id, current, db, require_tracking=False)
+    state = user_car_state(current.id, car_id, db)
+    state.comment = body.comment
+    state.comment_updated_at = now_utc()
+    db.add(
+        CarEvent(
+            car_id=car_id,
+            kind="COMMENT_UPDATED",
+            user_id=current.id,
+            payload={},
+        )
+    )
+    db.commit()
+    return {"comment": state.comment, "comment_updated_at": state.comment_updated_at}
+
+
+@app.patch("/api/cars/{car_id}/rating")
+def rating(
+    car_id: int,
+    body: RatingPatch,
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    accessible_car_relation(car_id, current, db, require_tracking=False)
+    state = user_car_state(current.id, car_id, db)
+    state.rating = body.rating
+    db.add(
+        CarEvent(
+            car_id=car_id,
+            kind="RATING_UPDATED",
+            user_id=current.id,
+            payload={"rating": body.rating},
+        )
+    )
+    db.commit()
+    return {"rating": state.rating}
+
+
+@app.post("/api/cars/{car_id}/refresh", status_code=202)
+def refresh_car(
+    car_id: int,
+    project_id: int | None = Query(None),
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    get_car_or_404(car_id, db)
+    if project_id is not None:
+        relation(
+            project_id,
+            car_id,
+            current,
+            db,
+            require_tracking=False,
+        )
+    else:
+        accessible_car_relation(
+            car_id,
+            current,
+            db,
+            require_tracking=False,
+        )
+    return enqueue(
+        "CARS",
+        {"car_ids": [car_id], "project_id": project_id},
+        current,
+        db,
+    )
+
+
+@app.post("/api/cars/{car_id}/exclude")
+def exclude(
+    car_id: int,
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    accessible_car_relation(car_id, current, db, require_tracking=False)
+    state = user_car_state(current.id, car_id, db)
+    state.excluded = True
+    for project_car in db.scalars(
+        select(ProjectCar)
+        .join(Project, Project.id == ProjectCar.project_id)
+        .where(
+            ProjectCar.car_id == car_id,
+            Project.owner_id == current.id,
+        )
+    ):
+        project_car.tracking_enabled = False
+        project_car.search_status = "REMOVED_FROM_PROJECT"
+        project_car.favorite = False
+    db.add(
+        CarEvent(
+            car_id=car_id,
+            kind="USER_EXCLUDED",
+            user_id=current.id,
+            payload={},
+        )
+    )
+    db.commit()
+    return {"excluded": True}
+
+
+@app.get("/api/cars/{car_id}/events")
+def events(
+    car_id: int,
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    accessible_car_relation(car_id, current, db, require_tracking=False)
+    owned_project_ids = select(Project.id).where(Project.owner_id == current.id)
+    return [
+        {"kind": event.kind, "payload": event.payload, "created_at": event.created_at}
+        for event in db.scalars(
+            select(CarEvent)
+            .where(
+                CarEvent.car_id == car_id,
+                CarEvent.integrity_status == "VALID",
+                or_(
+                    CarEvent.user_id == current.id,
+                    CarEvent.project_id.in_(owned_project_ids),
+                    and_(
+                        CarEvent.user_id.is_(None),
+                        CarEvent.project_id.is_(None),
+                    ),
+                ),
+            )
+            .order_by(CarEvent.created_at.desc())
+        )
+    ]
+
+
+def price_history_out(car_id: int, db: Session) -> list[dict]:
+    return [
+        {
+            "price": point.payload.get("price_krw"),
+            "at": point.payload.get("checked_at") or point.created_at,
+        }
+        for point in db.scalars(
+            select(PriceHistory)
+            .where(
+                PriceHistory.car_id == car_id,
+                PriceHistory.integrity_status == "VALID",
+            )
+            .order_by(PriceHistory.created_at)
+        )
+    ]
+
+
+@app.get("/api/cars/{car_id}/price-history")
+def prices(
+    car_id: int,
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    accessible_car_relation(car_id, current, db, require_tracking=False)
+    return price_history_out(car_id, db)
+
+
+@app.get("/api/cars/{car_id}/chatgpt-prompt")
+def prompt(
+    car_id: int,
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    accessible_car_relation(car_id, current, db, require_tracking=False)
+    record = get_car_or_404(car_id, db)
+    history = price_history_out(car_id, db)
+    details = record.details or {}
+    return {
+        "prompt": f"""Analyze this Encar Korea listing. Do not invent missing data. Explain Korean terms, assess accident and repair risks, identify everything unverified, and finish with a concise verdict.
+
+Vehicle: {record.title}
+Current price: {record.current_price} KRW
+Mileage: {details.get('mileage_km')}
+Fuel: {details.get('fuel') or details.get('fuel_text_detected')}
+Drivetrain: {details.get('drivetrain')}
+Insurance/accident evidence: {details.get('accident') or details.get('accident_lines')}
+Options: {details.get('options') or details.get('options_detected')}
+Original Korean lines: {details.get('raw_korean_lines') or details.get('accident_lines')}
+Price history: {history}
+Encar URL: {record.url}"""
+    }
+
+
+def enqueue(kind: str, payload: dict, owner: User, db: Session) -> dict:
+    requested_projects = set(payload.get("project_ids") or [])
+    requested_cars = set(payload.get("car_ids") or [])
+    for active in db.scalars(
+        select(ScanRun).where(
+            ScanRun.owner_id == owner.id,
+            ScanRun.status.in_(["QUEUED", "RUNNING", "CANCEL_REQUESTED"])
+        )
+    ):
+        active_payload = active.payload or {}
+        if requested_projects & set(active_payload.get("project_ids") or []):
+            raise HTTPException(409, "project_scan_already_active")
+        if requested_cars & set(active_payload.get("car_ids") or []):
+            raise HTTPException(409, "car_scan_already_active")
+    run = ScanRun(
+        owner_id=owner.id,
+        kind=kind,
+        status="QUEUED",
+        payload=payload,
+    )
+    db.add(run)
+    audit(
+        db,
+        "SCAN_QUEUED",
+        actor_user_id=owner.id,
+        entity_type="SCAN",
+        payload={"kind": kind},
+    )
+    db.commit()
+    return {"id": run.id, "status": run.status}
+
+
+def _legacy_project_error(
+    raw_error: str | None,
+    project_name: str,
+    other_project_names: list[str],
+) -> str:
+    if not raw_error:
+        return ""
+    marker = f"{project_name}:"
+    start = raw_error.find(marker)
+    if start < 0:
+        return raw_error[:4000]
+    end = len(raw_error)
+    for other_name in other_project_names:
+        if other_name == project_name:
+            continue
+        position = raw_error.find(f"\n{other_name}:", start + len(marker))
+        if position >= 0:
+            end = min(end, position)
+    return raw_error[start:end][:4000]
+
+
+def _report_change_details(item: dict, db: Session) -> dict:
+    enriched = dict(item)
+    car_id = enriched.get("car_id")
+    if enriched.get("change") != "MATERIAL_UPDATE" or enriched.get("changes"):
+        return enriched
+    before_id = enriched.get("before_snapshot_id")
+    after_id = enriched.get("after_snapshot_id")
+    if before_id and after_id and before_id != after_id:
+        before = db.get(CarSnapshot, before_id)
+        after = db.get(CarSnapshot, after_id)
+        if (
+            before
+            and after
+            and before.car_id == car_id
+            and after.car_id == car_id
+            and before.integrity_status == "VALID"
+            and after.integrity_status == "VALID"
+        ):
+            enriched["changes"] = material_changes(
+                before.payload or {},
+                after.payload or {},
+            )
+            if enriched["changes"]:
+                return enriched
+    updated_at = enriched.get("updated_at")
+    if not car_id or not updated_at:
+        enriched["details_unavailable"] = True
+        return enriched
+    try:
+        cutoff = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+    except ValueError:
+        enriched["details_unavailable"] = True
+        return enriched
+    snapshots = list(
+        db.scalars(
+            select(CarSnapshot)
+            .where(
+                CarSnapshot.car_id == car_id,
+                CarSnapshot.integrity_status == "VALID",
+                CarSnapshot.created_at <= cutoff + timedelta(minutes=1),
+            )
+            .order_by(CarSnapshot.created_at.desc())
+            .limit(2)
+        )
+    )
+    if len(snapshots) >= 2:
+        enriched["changes"] = material_changes(
+            snapshots[1].payload or {},
+            snapshots[0].payload or {},
+        )
+    if not enriched.get("changes"):
+        enriched["details_unavailable"] = True
+    return enriched
+
+
+def scan_out(run: ScanRun, db: Session) -> dict:
+    payload = dict(run.payload or {})
+    raw_report = list(payload.get("report") or [])
+    invalidated_report = [
+        item
+        for item in raw_report
+        if item.get("integrity_status") == "INVALIDATED"
+    ]
+    raw_report = [
+        item
+        for item in raw_report
+        if item.get("integrity_status") != "INVALIDATED"
+        and item.get("change") != "RELISTED"
+    ]
+    payload["invalidated_report_count"] = len(invalidated_report)
+    candidate_pairs = {
+        (item.get("project_id"), item.get("car_id"))
+        for item in raw_report
+        if item.get("project_id") and item.get("car_id")
+    }
+    active_pairs = (
+        {
+            (project_id, car_id)
+            for project_id, car_id in db.execute(
+                select(ProjectCar.project_id, ProjectCar.car_id).where(
+                    ProjectCar.tracking_enabled.is_(True),
+                    ProjectCar.project_id.in_(
+                        {project_id for project_id, _ in candidate_pairs}
+                    ),
+                    ProjectCar.car_id.in_({car_id for _, car_id in candidate_pairs}),
+                )
+            ).all()
+        }
+        if candidate_pairs
+        else set()
+    )
+    raw_report = [
+        item
+        for item in raw_report
+        if not item.get("project_id")
+        or not item.get("car_id")
+        or (item.get("project_id"), item.get("car_id")) in active_pairs
+    ]
+    report_project_ids = {
+        item.get("project_id") for item in raw_report if item.get("project_id")
+    }
+    report_car_ids = {item.get("car_id") for item in raw_report if item.get("car_id")}
+    favorite_pairs = (
+        {
+            (project_id, car_id)
+            for project_id, car_id in db.execute(
+                select(ProjectCar.project_id, ProjectCar.car_id).where(
+                    ProjectCar.favorite.is_(True),
+                    ProjectCar.tracking_enabled.is_(True),
+                    ProjectCar.project_id.in_(report_project_ids),
+                    ProjectCar.car_id.in_(report_car_ids),
+                )
+            ).all()
+        }
+        if report_project_ids and report_car_ids
+        else set()
+    )
+    projects = {
+        project.id: project.name
+        for project in db.scalars(
+            select(Project).where(
+                Project.id.in_(
+                    list(
+                        dict.fromkeys(
+                            [
+                                *(payload.get("project_ids") or []),
+                                *[
+                                    item.get("project_id")
+                                    for item in payload.get("report") or []
+                                    if item.get("project_id")
+                                ],
+                            ]
+                        )
+                    )
+                )
+            )
+        )
+    }
+    report = [
+        _report_change_details(
+            {
+                **item,
+                "project_name": item.get("project_name")
+                or projects.get(item.get("project_id")),
+                "favorite": (item.get("project_id"), item.get("car_id"))
+                in favorite_pairs,
+            },
+            db,
+        )
+        for item in raw_report
+    ]
+    def report_priority(item: dict) -> int:
+        if item.get("change") == "NEW":
+            return 0
+        if item.get("favorite"):
+            return 1
+        return {
+            "PRICE_DROP": 2,
+            "PRICE_INCREASE": 2,
+            "MATERIAL_UPDATE": 3,
+        }.get(item.get("change"), 9)
+
+    unique_report: dict[tuple[int | None, int | None], dict] = {}
+    for item in report:
+        key = (item.get("project_id"), item.get("car_id"))
+        current = unique_report.get(key)
+        if current is None or report_priority(item) < report_priority(current):
+            unique_report[key] = item
+    payload["report"] = sorted(
+        unique_report.values(),
+        key=lambda item: (
+            report_priority(item),
+            item.get("updated_at") or "",
+        ),
+    )
+    if payload.get("summary"):
+        payload["summary"] = {
+            **payload["summary"],
+            "changed": len(payload["report"]),
+            "new": sum(item.get("change") == "NEW" for item in payload["report"]),
+            "price_changes": sum(
+                item.get("change") in {"PRICE_DROP", "PRICE_INCREASE"}
+                for item in payload["report"]
+            ),
+        }
+    failures = list(payload.get("failures") or [])
+    if not failures:
+        project_runs = db.execute(
+            select(ProjectScanRun, Project)
+            .join(Project, Project.id == ProjectScanRun.project_id)
+            .where(
+                ProjectScanRun.scan_run_id == run.id,
+                ProjectScanRun.status == "FAILED",
+            )
+        ).all()
+        project_names = [row.Project.name for row in project_runs]
+        for row in project_runs:
+            technical = _legacy_project_error(
+                run.error,
+                row.Project.name,
+                project_names,
+            )
+            code = row.ProjectScanRun.error_code or "READ_ERROR"
+            if "ERR_TIMED_OUT" in technical or "Timeout" in technical:
+                code = "TIMEOUT"
+            failures.append(
+                {
+                    "scope": "PROJECT",
+                    "project_id": row.Project.id,
+                    "project_name": row.Project.name,
+                    "car_id": None,
+                    "encar_id": None,
+                    "code": code,
+                    "technical": technical,
+                }
+            )
+    payload["failures"] = failures
+    return {
+        "id": run.id,
+        "kind": run.kind,
+        "status": run.status,
+        "progress": run.progress,
+        "payload": payload,
+        "error": run.error,
+        "created_at": run.created_at,
+        "updated_at": run.updated_at,
+    }
+
+
+@app.post("/api/scans/projects", status_code=202)
+def scan_projects(
+    body: ScanProjectsIn,
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    ids = list(dict.fromkeys(body.project_ids))
+    if not ids:
+        raise HTTPException(422, "project_ids_required")
+    existing = set(
+        db.scalars(
+            select(Project.id).where(
+                Project.id.in_(ids),
+                Project.owner_id == current.id,
+            )
+        )
+    )
+    if existing != set(ids):
+        raise HTTPException(404, "project_not_found")
+    return enqueue("PROJECTS", {"project_ids": ids}, current, db)
+
+
+@app.post("/api/scans/cars", status_code=202)
+def scan_cars(
+    body: ScanCarsIn,
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    car_ids = list(dict.fromkeys(body.car_ids))
+    if not car_ids:
+        raise HTTPException(422, "car_ids_required")
+    for car_id in car_ids:
+        accessible_car_relation(
+            car_id,
+            current,
+            db,
+            body.project_id,
+            require_tracking=False,
+        )
+    return enqueue(
+        "CARS",
+        {"car_ids": car_ids, "project_id": body.project_id},
+        current,
+        db,
+    )
+
+
+@app.get("/api/scans")
+def scans(
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    return [
+        scan_out(run, db)
+        for run in db.scalars(
+            select(ScanRun)
+            .where(ScanRun.owner_id == current.id)
+            .order_by(ScanRun.created_at.desc())
+            .limit(100)
+        )
+    ]
+
+
+@app.get("/api/scans/{scan_id}")
+@app.get("/api/scans/{scan_id}/progress")
+def scan(
+    scan_id: int,
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    run = db.scalar(
+        select(ScanRun).where(
+            ScanRun.id == scan_id,
+            ScanRun.owner_id == current.id,
+        )
+    )
+    if not run:
+        raise HTTPException(404, "scan_not_found")
+    return scan_out(run, db)
+
+
+@app.post("/api/scans/{scan_id}/cancel", status_code=202)
+def cancel_scan(
+    scan_id: int,
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    run = db.scalar(
+        select(ScanRun).where(
+            ScanRun.id == scan_id,
+            ScanRun.owner_id == current.id,
+        )
+    )
+    if not run:
+        raise HTTPException(404, "scan_not_found")
+    if run.status in {"CANCELLED", "CANCEL_REQUESTED"}:
+        return {"id": run.id, "status": run.status}
+    if run.status not in {"QUEUED", "RUNNING"}:
+        raise HTTPException(409, "scan_already_finished")
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    payload = dict(run.payload or {})
+    payload["cancellation_requested_at"] = timestamp
+    if run.status == "QUEUED":
+        run.status = "CANCELLED"
+        payload.update(
+            {
+                "cancelled_at": timestamp,
+                "current_project_id": None,
+                "report": list(payload.get("report") or []),
+                "failures": list(payload.get("failures") or []),
+                "summary": payload.get("summary")
+                or {
+                    "changed": 0,
+                    "new": 0,
+                    "price_changes": 0,
+                    "failed": 0,
+                },
+            }
+        )
+    else:
+        run.status = "CANCEL_REQUESTED"
+    run.payload = payload
+    audit(
+        db,
+        "SCAN_CANCEL_REQUESTED",
+        actor_user_id=current.id,
+        entity_type="SCAN",
+        entity_id=run.id,
+    )
+    db.commit()
+    return {"id": run.id, "status": run.status}
+
+
+def scheduler_out(user_id: int, db: Session) -> dict:
+    setting = db.scalar(
+        select(SchedulerSetting).where(SchedulerSetting.user_id == user_id)
+    )
+    if not setting:
+        return {
+            "enabled": False,
+            "interval_minutes": 180,
+            "project_ids": [],
+            "next_run_at": None,
+        }
+    project_ids = list(
+        db.scalars(
+            select(ScheduledProject.project_id).where(
+                ScheduledProject.scheduler_id == setting.id
+            )
+        )
+    )
+    return {
+        "enabled": setting.enabled and bool(project_ids),
+        "interval_minutes": setting.interval_minutes,
+        "project_ids": project_ids,
+        "next_run_at": setting.next_run_at if project_ids else None,
+    }
+
+
+@app.get("/api/scheduler")
+@app.get("/api/settings")
+def scheduler(
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    return scheduler_out(current.id, db)
+
+
+@app.put("/api/scheduler")
+@app.put("/api/settings")
+def set_scheduler(
+    body: SchedulerIn,
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    project_ids = list(dict.fromkeys(body.project_ids))
+    existing_ids = set(
+        db.scalars(
+            select(Project.id).where(
+                Project.id.in_(project_ids),
+                Project.owner_id == current.id,
+            )
+        )
+    )
+    if existing_ids != set(project_ids):
+        raise HTTPException(404, "project_not_found")
+    if body.enabled and not project_ids:
+        raise HTTPException(422, "scheduled_projects_required")
+    setting = db.scalar(
+        select(SchedulerSetting).where(SchedulerSetting.user_id == current.id)
+    ) or SchedulerSetting(user_id=current.id)
+    db.add(setting)
+    db.flush()
+    setting.enabled = body.enabled
+    setting.interval_minutes = body.interval_minutes
+    setting.next_run_at = (
+        datetime.now(timezone.utc) + timedelta(minutes=body.interval_minutes)
+        if body.enabled
+        else None
+    )
+    db.query(ScheduledProject).filter_by(scheduler_id=setting.id).delete()
+    for project_id in project_ids:
+        db.add(
+            ScheduledProject(
+                scheduler_id=setting.id, project_id=project_id
+            )
+        )
+    db.commit()
+    return scheduler_out(current.id, db)
+
+
+@app.get("/api/import/legacy")
+@app.post("/api/import/legacy/validate")
+def validate_import(
+    path: str = Query("/legacy"),
+    _: User = Depends(require_admin),
+) -> dict:
+    return inspect_source(Path(path))
+
+
+@app.post("/api/import/legacy/run")
+def commit_import(
+    path: str = Query("/legacy"),
+    admin: User = Depends(require_csrf),
+) -> dict:
+    if admin.role != "ADMIN":
+        raise HTTPException(403, "admin_required")
+    return run_import(Path(path), True, owner_id=admin.id)
