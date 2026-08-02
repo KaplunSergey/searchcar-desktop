@@ -2,12 +2,29 @@ import argparse
 import hashlib
 import hmac
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 import secrets
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 DESKTOP_COOKIE_NAME = "searchcar_desktop_session"
+
+
+class JsonLogFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
 
 
 def _sqlite_url(database_path: Path) -> str:
@@ -27,7 +44,34 @@ def _persistent_secret(data_dir: Path) -> str:
     return value
 
 
-def configure_desktop_environment(data_dir: Path, port: int) -> dict[str, Path]:
+def configure_playwright_environment(browser_dir: Path) -> Path:
+    browser_dir = browser_dir.expanduser().resolve()
+    if not browser_dir.is_dir():
+        raise FileNotFoundError(f"playwright_browser_directory_not_found: {browser_dir}")
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_dir)
+    os.environ["PLAYWRIGHT_SKIP_BROWSER_GC"] = "1"
+    return browser_dir
+
+
+def bundled_headless_chromium(browser_dir: Path) -> Path:
+    executable_names = {"headless_shell", "headless_shell.exe"}
+    candidates = sorted(
+        path
+        for path in browser_dir.rglob("*")
+        if path.is_file() and path.name in executable_names
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            f"playwright_chromium_executable_not_found: {browser_dir}"
+        )
+    return candidates[0]
+
+
+def configure_desktop_environment(
+    data_dir: Path,
+    port: int,
+    browser_dir: Path | None = None,
+) -> dict[str, Path]:
     data_dir = data_dir.expanduser().resolve()
     database_dir = data_dir / "data"
     storage_dir = data_dir / "storage"
@@ -41,12 +85,36 @@ def configure_desktop_environment(data_dir: Path, port: int) -> dict[str, Path]:
     os.environ["AUTH_CSRF_COOKIE_NAME"] = "searchcar_csrf"
     os.environ["AUTH_HASH_SECRET"] = _persistent_secret(data_dir)
     os.environ["ALLOWED_ORIGINS"] = f"http://127.0.0.1:{port}"
-    return {
+    paths = {
         "root": data_dir,
         "database": database_path,
         "storage": storage_dir,
         "logs": logs_dir,
     }
+    if browser_dir is not None:
+        paths["browsers"] = configure_playwright_environment(browser_dir)
+    return paths
+
+
+def configure_structured_logging(logs_dir: Path) -> Path:
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    log_path = logs_dir / "searchcar-core.jsonl"
+    formatter = JsonLogFormatter()
+    file_handler = RotatingFileHandler(
+        log_path,
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    stream_handler = logging.StreamHandler(sys.stderr)
+    stream_handler.setFormatter(formatter)
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(stream_handler)
+    return log_path
 
 
 def initialize_database() -> None:
@@ -134,15 +202,48 @@ def check_runtime(data_dir: Path, port: int) -> dict:
     }
 
 
+def check_browser(browser_dir: Path, output_path: Path) -> dict:
+    browser_dir = configure_playwright_environment(browser_dir)
+    output_path = output_path.expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    from playwright.sync_api import sync_playwright
+
+    executable_path = bundled_headless_chromium(browser_dir)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 960, "height": 540})
+            page.set_content(
+                "<main style='font:32px system-ui;padding:48px'>"
+                "SearchCar Desktop browser check</main>"
+            )
+            page.screenshot(path=str(output_path))
+        finally:
+            browser.close()
+    return {
+        "status": "ok",
+        "browser_directory": str(browser_dir),
+        "executable": str(executable_path),
+        "screenshot": str(output_path),
+    }
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="SearchCar Desktop sidecar")
     commands = result.add_subparsers(dest="command", required=True)
     check = commands.add_parser("check", help="Initialize and verify local SQLite")
     check.add_argument("--data-dir", type=Path, required=True)
     check.add_argument("--port", type=int, default=8765)
+    browser_check = commands.add_parser(
+        "browser-check",
+        help="Launch bundled Chromium and save a diagnostic screenshot",
+    )
+    browser_check.add_argument("--browser-dir", type=Path, required=True)
+    browser_check.add_argument("--output", type=Path, required=True)
     serve = commands.add_parser("serve", help="Run the local desktop backend")
     serve.add_argument("--data-dir", type=Path, required=True)
     serve.add_argument("--frontend-dir", type=Path, required=True)
+    serve.add_argument("--browser-dir", type=Path)
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, required=True)
     return result
@@ -153,7 +254,15 @@ def main() -> None:
     if arguments.command == "check":
         print(json.dumps(check_runtime(arguments.data_dir, arguments.port)))
         return
-    configure_desktop_environment(arguments.data_dir, arguments.port)
+    if arguments.command == "browser-check":
+        print(json.dumps(check_browser(arguments.browser_dir, arguments.output)))
+        return
+    paths = configure_desktop_environment(
+        arguments.data_dir,
+        arguments.port,
+        arguments.browser_dir,
+    )
+    configure_structured_logging(paths["logs"])
     initialize_database()
     session_secret = os.environ.get("SEARCHCAR_DESKTOP_SESSION_SECRET", "")
     desktop_app = create_desktop_app(arguments.frontend_dir, session_secret)
@@ -165,6 +274,7 @@ def main() -> None:
         port=arguments.port,
         access_log=False,
         log_level="info",
+        log_config=None,
     )
 
 

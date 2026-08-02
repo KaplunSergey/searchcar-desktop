@@ -2,6 +2,7 @@
 
 # dependencies
 /node_modules
+/.desktop-build-venv/
 /.pnp
 .pnp.*
 .yarn/*
@@ -53,11 +54,14 @@ next-env.d.ts
 **/src-tauri/target/
 /desktop/src-tauri/gen/schemas/
 /desktop/src-tauri/binaries/searchcar-core-*
+/desktop/runtime/browsers/*
+!/desktop/runtime/browsers/.gitkeep
 /artifacts/
 /desktop-dist/
 *.build/
 *.dist/
 *.onefile-build/
+nuitka-*-report.xml
 .playwright/
 ms-playwright/
 *.sqlite

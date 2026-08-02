@@ -7,6 +7,8 @@ This directory contains the first desktop implementation milestone:
 - a localhost sidecar lifecycle and health gate;
 - platform data directories and a one-time browser session secret;
 - a SQLite runtime with foreign keys, WAL and a busy timeout.
+- a Nuitka build path for a single platform-specific backend binary;
+- a bundled Chromium headless shell managed outside the Python binary.
 
 ## Current milestone commands
 
@@ -37,6 +39,15 @@ pytest
 ```
 
 The Tauri shell requires the free Rust toolchain and a generated sidecar binary
-in `desktop/src-tauri/binaries`. Nuitka packaging and installer automation are
-the next implementation step; customers will not need Rust, Python, Node,
-Docker or these commands.
+in `desktop/src-tauri/binaries`. Build Chromium and the sidecar with the same
+Python environment used for `backend/requirements-desktop-build.txt`:
+
+```bash
+python scripts/prepare_desktop_browser.py
+python scripts/build_desktop_sidecar.py --mode standalone
+python scripts/build_desktop_sidecar.py --mode onefile
+```
+
+The standalone build is the diagnostic form recommended before onefile. The
+onefile command writes the target-suffixed binary expected by Tauri. Customers
+will not need Rust, Python, Node, Docker or these commands.

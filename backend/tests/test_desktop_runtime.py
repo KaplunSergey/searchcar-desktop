@@ -4,7 +4,11 @@ from pathlib import Path
 from sqlalchemy import text
 
 from app.database import create_database_engine
-from app.desktop_runtime import configure_desktop_environment
+from app.desktop_runtime import (
+    bundled_headless_chromium,
+    configure_desktop_environment,
+    configure_playwright_environment,
+)
 
 
 def test_sqlite_engine_enables_desktop_safety_pragmas(tmp_path: Path) -> None:
@@ -27,3 +31,36 @@ def test_desktop_environment_uses_platform_data_directory(
     assert paths["logs"].is_dir()
     assert os.environ["DATABASE_URL"].startswith("sqlite+pysqlite:///")
     assert os.environ["ALLOWED_ORIGINS"] == "http://127.0.0.1:43123"
+
+
+def test_desktop_environment_configures_bundled_browser(
+    tmp_path: Path,
+) -> None:
+    browser_dir = tmp_path / "browsers"
+    browser_dir.mkdir()
+    paths = configure_desktop_environment(
+        tmp_path / "SearchCar",
+        43123,
+        browser_dir,
+    )
+
+    assert paths["browsers"] == browser_dir.resolve()
+    assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(browser_dir.resolve())
+    assert os.environ["PLAYWRIGHT_SKIP_BROWSER_GC"] == "1"
+
+
+def test_missing_bundled_browser_directory_is_rejected(tmp_path: Path) -> None:
+    try:
+        configure_playwright_environment(tmp_path / "missing")
+    except FileNotFoundError as error:
+        assert "playwright_browser_directory_not_found" in str(error)
+    else:
+        raise AssertionError("missing browser directory was accepted")
+
+
+def test_bundled_headless_chromium_is_discovered(tmp_path: Path) -> None:
+    executable = tmp_path / "chromium_headless_shell-1" / "headless_shell"
+    executable.parent.mkdir()
+    executable.write_bytes(b"test")
+
+    assert bundled_headless_chromium(tmp_path) == executable

@@ -11,17 +11,23 @@ Implemented:
 - per-user application data, storage and log directories;
 - SQLite runtime with foreign keys, WAL and a busy timeout;
 - backend runtime check and automated SQLite tests;
-- native macOS Apple Silicon Rust compilation check.
+- native macOS Apple Silicon Rust compilation check;
+- reproducible Nuitka standalone and onefile sidecar build scripts;
+- compiled macOS Apple Silicon backend verified against SQLite and the SPA;
+- Playwright Chromium headless-shell download and resource manifest;
+- browser launch/screenshot smoke test in the Linux Playwright runtime;
+- unsigned macOS debug `.app` bundle containing UI, backend and Chromium.
 
 Still required before M1 is complete:
 
-- compile the complete Python backend into the target-specific Nuitka sidecar;
-- bundle Chromium and validate Playwright from an installed application;
+- validate Chromium launch from the native macOS `.app` outside the Codex
+  process sandbox;
 - run the complete desktop window flow against the compiled sidecar;
 - add Windows x64 build and smoke-test automation;
 - generate unsigned `.dmg` and `.exe` installers and document OS warnings.
 
 ## Next milestone
 
-Package the backend sidecar, then run the existing application end-to-end from
-Tauri without requiring Python, Node.js, Rust or Docker on the customer device.
+Run the complete bundled macOS application flow, then reproduce the same
+sidecar/browser/app build on Windows x64 without requiring development tools on
+the customer device.

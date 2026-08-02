@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.searchcar.desktop",
   "build": {
-    "beforeDevCommand": "pnpm --dir ../.. desktop:frontend:dev",
-    "beforeBuildCommand": "pnpm --dir ../.. desktop:frontend:build",
+    "beforeDevCommand": "pnpm --dir .. desktop:frontend:dev",
+    "beforeBuildCommand": "pnpm --dir .. desktop:frontend:build",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../dist"
   },
@@ -20,7 +20,8 @@
     "targets": "all",
     "externalBin": ["binaries/searchcar-core"],
     "resources": {
-      "../dist/": "desktop-ui/"
+      "../dist/": "desktop-ui/",
+      "../runtime/browsers/": "browsers/"
     }
   }
 }

@@ -82,6 +82,7 @@ pub fn run() {
                 .collect();
             let data_dir = app.path().app_data_dir()?;
             let frontend_dir = app.path().resource_dir()?.join("desktop-ui");
+            let browser_dir = app.path().resource_dir()?.join("browsers");
             std::fs::create_dir_all(&data_dir)?;
 
             let command = app
@@ -97,6 +98,8 @@ pub fn run() {
                     data_dir.to_string_lossy().into_owned(),
                     "--frontend-dir".to_string(),
                     frontend_dir.to_string_lossy().into_owned(),
+                    "--browser-dir".to_string(),
+                    browser_dir.to_string_lossy().into_owned(),
                 ])
                 .env("SEARCHCAR_DESKTOP_SESSION_SECRET", &secret);
             let (mut events, child) = command.spawn()?;
