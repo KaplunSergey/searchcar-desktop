@@ -74,7 +74,7 @@ from .schemas import (
 )
 from .services import merge_reliable_detail
 
-app = FastAPI(title="Encar Projects API", version="1.1.0")
+app = FastAPI(title="SearchCar API", version="1.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[

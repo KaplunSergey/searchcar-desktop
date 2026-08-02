@@ -506,7 +506,7 @@ function App({
     <div className="app-shell">
       <aside>
         <button className="brand" onClick={() => navigate("projects")}>
-          <span>E</span> Encar Projects
+          <span>S</span> SearchCar
         </button>
         <p className="eyebrow">{t("workspace")}</p>
         <nav>
@@ -775,7 +775,7 @@ function AuthRoot() {
       <div className="auth-page">
         <div className="auth-card auth-loading">
           <span className="auth-logo">E</span>
-          <b>Encar Projects</b>
+          <b>SearchCar</b>
         </div>
       </div>
     );
@@ -816,7 +816,7 @@ function LoginScreen({ retry }: { retry: () => void }) {
         <div className="auth-heading">
           <span className="auth-logo">E</span>
           <div>
-            <h1>Encar Projects</h1>
+            <h1>SearchCar</h1>
             <p>
               {locale === "uk"
                 ? "Увійдіть у свій робочий простір"

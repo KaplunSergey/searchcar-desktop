@@ -1,6 +1,6 @@
-# План реализации Encar Projects Desktop
+# План реализации SearchCar Desktop
 
-Версия плана: 1.0
+Версия плана: 1.1
 
 Дата: 2 августа 2026 года
 
@@ -8,7 +8,7 @@
 
 ## 1. Цель
 
-Преобразовать работающий localhost-first web-проект Encar Projects в
+Преобразовать работающий localhost-first web-проект SearchCar в
 устанавливаемое локальное приложение для Windows и macOS, которое:
 
 - запускается без Docker, PostgreSQL, Node.js и Python у клиента;
@@ -17,6 +17,8 @@
 - скрывает исходный Python-код наиболее ценной логики;
 - поддерживает trial и продлеваемые лицензии, привязанные к одному компьютеру;
 - использует бесплатную онлайн-инфраструктуру лицензирования;
+- выполняет ручные и фоновые автоматические поиски по расписанию, пока
+  приложение работает в окне или системном tray;
 - допускает безопасный просмотр и экспорт данных после окончания подписки;
 - устанавливается, обновляется, резервируется и переносится по инструкции,
   понятной человеку без технической подготовки;
@@ -31,7 +33,7 @@
 ```text
 2026-07-23/
 ├── files-mentioned-by-the-user-monitor/   # существующая web-версия
-└── encar-projects-desktop/                # новая desktop-ветка продукта
+└── searchcar-desktop/                     # новая desktop-ветка продукта
 ```
 
 В новую копию намеренно не перенесены:
@@ -52,8 +54,8 @@
 Рекомендуемая структура GitHub:
 
 ```text
-KaplunSergey/EncarProjectsDesktop           # private, весь исходный код
-KaplunSergey/EncarProjectsDesktop-Releases  # public, только бинарники/manifest
+KaplunSergey/SearchCarDesktop           # private, весь исходный код
+KaplunSergey/SearchCarDesktop-Releases  # public, только бинарники/manifest
 ```
 
 Публичный releases-only репозиторий не содержит product source, CI scripts,
@@ -83,6 +85,11 @@ KaplunSergey/EncarProjectsDesktop-Releases  # public, только бинарн�
 - Playwright Chromium внутри поставки;
 - SQLite и локальное файловое хранилище;
 - ручной поиск проектов и ручное индивидуальное обновление авто;
+- scheduler с выбором проектов, периодичности и режима поиска;
+- фоновые scans при свёрнутом/скрытом окне;
+- system tray, обратный отсчёт до следующего запуска и отмена текущего scan;
+- опциональный автозапуск с ОС, выключенный по умолчанию;
+- контролируемый catch-up пропущенного запуска после сна/перезапуска;
 - текущая многопользовательская локальная авторизация;
 - бесплатный 30-дневный trial;
 - ключи 1/3/6/12 месяцев и бессрочный;
@@ -100,8 +107,8 @@ KaplunSergey/EncarProjectsDesktop-Releases  # public, только бинарн�
 - Intel Mac;
 - Linux;
 - Microsoft Store и Mac App Store;
-- фоновые автоматические поиски и scheduler;
-- запуск вместе с операционной системой;
+- отдельная системная служба, продолжающая работу после команды `Выйти`;
+- выполнение scan, когда компьютер выключен, находится в sleep или не имеет сети;
 - merge двух независимых клиентских баз;
 - синхронизация автомобильных данных между компьютерами;
 - удалённое хранение проектов и изображений;
@@ -118,8 +125,11 @@ flowchart LR
     U["Пользователь"] --> T["Tauri desktop"]
     T --> UI["React UI"]
     T --> LC["Rust license coordinator"]
-    T --> C["encar-core sidecar"]
+    T --> TR["Tray + optional autostart"]
+    T --> C["searchcar-core sidecar"]
     C --> API["FastAPI localhost"]
+    C --> S["Persistent scheduler"]
+    S --> W
     C --> W["Worker + Playwright"]
     C --> DB["SQLite"]
     C --> FS["Images and screenshots"]
@@ -132,7 +142,7 @@ flowchart LR
 
 ### 4.1 Процессы клиента
 
-`Encar Projects Desktop` запускает один `encar-core` sidecar. Sidecar имеет
+`SearchCar Desktop` запускает один `searchcar-core` sidecar. Sidecar имеет
 подкоманды или внутренние режимы `serve`, `worker`, `migrate`, `backup` и
 `diagnose`, но клиент их не запускает вручную.
 
@@ -144,16 +154,40 @@ flowchart LR
 4. Sidecar применяет SQLite migrations и выполняет health check.
 5. FastAPI раздаёт статический frontend и `/api` с одного origin.
 6. Tauri открывает окно только после готовности backend.
-7. При закрытии отправляет graceful shutdown, закрывает Chromium и помечает
-   незавершённые jobs как `INTERRUPTED`.
+7. Если scheduler включён, обычное закрытие окна скрывает его в system tray,
+   сохраняя sidecar и расписание активными.
+8. Команда `Выйти` предупреждает об активном scan, выполняет graceful shutdown,
+   закрывает Chromium и помечает незавершённые jobs как `INTERRUPTED`.
 
-### 4.2 Каталоги данных
+### 4.2 Фоновый lifecycle и scheduler
+
+- scheduler живёт внутри единственного `searchcar-core`, а не в отдельной
+  системной службе;
+- настройки и `next_run_at` хранятся в SQLite в UTC;
+- UI позволяет выбрать проекты, интервал, включение и политику пропущенного
+  запуска; режим/page depth продолжают браться из каждого проекта;
+- одновременно выполняется только один scan run, остальные получают `QUEUED`;
+- перед запуском проверяются лицензия, сеть, состояние очереди и отсутствие
+  выполняющегося обновления приложения;
+- между автоматическими запросами применяется небольшой безопасный jitter и
+  существующие backoff/retry ограничения, чтобы не создавать одинаковый
+  машинный ритм запросов;
+- после sleep/wake время пересчитывается: пропущенный scan запускается один раз,
+  а не по одному разу за каждый пропущенный интервал;
+- при полном выходе scheduler не работает; если он включён, пользователь видит
+  предупреждение и время следующего пропуска;
+- опция `Запускать вместе с системой` использует Tauri autostart plugin и
+  включается только явным действием пользователя;
+- завершение, ошибка, captcha и отмена отражаются в истории и, при разрешении,
+  системным уведомлением.
+
+### 4.3 Каталоги данных
 
 Windows:
 
 ```text
-%LOCALAPPDATA%/EncarProjects/
-├── data/encar.sqlite3
+%LOCALAPPDATA%/SearchCar/
+├── data/searchcar.sqlite3
 ├── storage/cars/...
 ├── logs/...
 ├── backups/...
@@ -163,8 +197,8 @@ Windows:
 macOS:
 
 ```text
-~/Library/Application Support/EncarProjects/
-├── data/encar.sqlite3
+~/Library/Application Support/SearchCar/
+├── data/searchcar.sqlite3
 ├── storage/cars/...
 ├── logs/...
 ├── backups/...
@@ -174,7 +208,7 @@ macOS:
 В БД хранятся только относительные файловые пути. Каталог установки считается
 read-only и не используется для пользовательских данных.
 
-### 4.3 Планируемая структура исходников
+### 4.4 Планируемая структура исходников
 
 ```text
 apps/
@@ -229,7 +263,8 @@ Docker-конфигурация baseline сохраняется для разр�
 - после окончания доступен экран ввода ключа;
 - существующие страницы, фильтры, комментарии, избранное и рейтинг работают;
 - разрешены backup, restore, export и открытие сохранённых файлов;
-- запрещены project scan, global scan и individual car refresh;
+- запрещены project scan, global scan, individual car refresh и постановка
+  scheduler jobs; уже ожидающие автоматические jobs получают `SKIPPED_LICENSE`;
 - API возвращает единый код `LICENSE_SEARCH_DISABLED`, переводимый UI без
   технического текста.
 
@@ -248,7 +283,7 @@ Docker-конфигурация baseline сохраняется для разр�
 
 Нормальный сценарий:
 
-1. На старом компьютере создаётся проверенный `.encar-backup`.
+1. На старом компьютере создаётся проверенный `.searchcar-backup`.
 2. На новом компьютере приложение создаёт device key и одноразовый transfer
    request со сроком действия около 30 минут.
 3. Пользователь передаёт короткий код владельцу.
@@ -256,7 +291,7 @@ Docker-конфигурация baseline сохраняется для разр�
 5. После второго подтверждения D1-транзакция деактивирует старую привязку,
    создаёт новую, сохраняет срок и увеличивает activation count.
 6. Новый компьютер получает lease; старый перестаёт получать новые lease.
-7. Пользователь восстанавливает `.encar-backup`.
+7. Пользователь восстанавливает `.searchcar-backup`.
 
 Если старое устройство потеряно, шаг backup возможен только из ранее созданной
 копии, но администратор всё равно может перепривязать лицензию. Перенос не
@@ -265,6 +300,32 @@ Docker-конфигурация baseline сохраняется для разр�
 Из-за ежедневной модели старый компьютер может работать до окончания последнего
 lease, максимум около 48 часов. Мгновенное отключение потребовало бы онлайн-
 проверки перед каждым поиском и не входит в текущие решения.
+
+### 5.6 Автоматический поиск по расписанию
+
+1. Пользователь открывает `Настройки → Планировщик`.
+2. Включает scheduler, выбирает периодичность и проекты.
+3. Для каждого проекта сохраняются его точный/быстрый режим и первая/все
+   страницы; scheduler не подменяет эти настройки.
+4. Экран показывает точное время следующего запуска и обратный отсчёт.
+5. В момент запуска все выбранные проекты получают `Ожидает`, текущий —
+   `Обновление`, завершённый — `Обновлено` независимо от остальных.
+6. Запуски выполняются последовательно через общую очередь. Повторный timer не
+   создаёт дубликат, пока предыдущий run выполняется.
+7. Отчёт и история создаются так же, как при ручном запуске; доступна отмена.
+8. Закрытие окна оставляет приложение в tray. Из tray можно открыть окно,
+   временно приостановить scheduler или полностью выйти.
+9. Если компьютер спал, при пробуждении выполняется максимум один catch-up run,
+   если эта политика включена. Если компьютер был выключен, проверка выполняется
+   после следующего запуска приложения.
+10. Перед автоматическим run backend проверяет действующую лицензию. При
+    истечении срока поиск не начинается, а пользователь получает уведомление.
+11. Ошибка сети/captcha использует ограниченный retry/backoff и не запускает
+    бесконечный цикл.
+
+Опциональный автозапуск с Windows/macOS нужен только для тех, кому важно не
+открывать приложение вручную после входа в систему. Он выключен по умолчанию и
+может быть отключён одной настройкой.
 
 ## 6. Локальная база и перенос существующих данных
 
@@ -309,7 +370,7 @@ baseline migration, соответствующая актуальной схем
 ### 6.3 Формат backup
 
 ```text
-backup.encar-backup
+backup.searchcar-backup
 ├── manifest.json
 ├── database.sqlite3
 ├── storage/cars/...
@@ -422,15 +483,78 @@ authentication, rate limiting, короткие sessions и recovery codes. Ко
 
 ### 9.1 Update model
 
-- Tauri Updater;
-- обязательная Ed25519-подпись artifacts;
-- source repo private;
-- release artifacts в отдельном public releases-only repo;
-- `latest.json` для Windows x64 и macOS arm64;
-- автоматическая проверка при запуске не чаще заданного интервала;
-- download/install только после согласия пользователя;
-- rollback installer предыдущей версии сохраняется владельцем;
-- incompatible database downgrade запрещается с понятным сообщением.
+Используется Tauri Updater и отдельный публичный releases-only репозиторий. В
+нём находятся только установочные artifacts, подписи, release notes и
+`latest.json`; source repo остаётся private.
+
+Текущая версия имеет один источник истины и синхронизируется CI между Tauri,
+Rust и frontend build metadata. Она отображается:
+
+- компактно в нижней части sidebar, например `v1.2.0`;
+- полностью в `Настройки → О приложении`;
+- в диагностическом пакете;
+- в лицензионной админке как версия последней проверки устройства.
+
+Проверка выполняется:
+
+- после успешного запуска приложения;
+- затем не чаще одного раза в 6 часов, пока приложение работает;
+- вручную по кнопке `Проверить обновления`;
+- независимо от состояния подписки, чтобы истёкший клиент тоже мог обновиться.
+
+Tauri/Rust, а не frontend JavaScript, загружает по HTTPS `latest.json` из
+последнего стабильного GitHub Release и сравнивает SemVer. Draft/prerelease не
+показываются пользователям stable-канала.
+
+Пример updater manifest:
+
+```json
+{
+  "version": "1.3.0",
+  "notes": "Исправления поиска и новая история обновлений",
+  "pub_date": "2026-08-20T12:00:00Z",
+  "platforms": {
+    "windows-x86_64": {
+      "url": "https://github.com/.../SearchCar_1.3.0_x64-setup.nsis.zip",
+      "signature": "BASE64_ED25519_SIGNATURE"
+    },
+    "darwin-aarch64": {
+      "url": "https://github.com/.../SearchCar.app.tar.gz",
+      "signature": "BASE64_ED25519_SIGNATURE"
+    }
+  }
+}
+```
+
+Если `latest.version > current.version`, интерфейс показывает заметную, но не
+блокирующую кнопку `Обновить до v1.3.0` и краткие release notes. Если версия
+актуальна, отображается `Установлена последняя версия`.
+
+После нажатия `Обновить`:
+
+1. UI проверяет активный scan. Пользователь может дождаться завершения либо
+   явно отменить его; scheduler временно ставится на паузу.
+2. Создаётся автоматический pre-update backup SQLite и manifest текущей версии.
+3. Tauri скачивает artifact и показывает прогресс `0–100%`.
+4. Встроенный публичный updater key проверяет обязательную Ed25519-подпись.
+   Несовпадение подписи полностью отменяет установку.
+5. После проверки приложение останавливает sidecar и Chromium.
+6. Tauri устанавливает платформенный update и перезапускает приложение.
+7. Новый sidecar проверяет backup, применяет SQLite migrations и запускает
+   health checks до открытия основного окна.
+8. При успехе pre-update backup сохраняется ограниченное время, scheduler
+   возобновляется и показывается `Обновлено до v1.3.0`.
+
+Состояния кнопки: `Проверка`, `Доступно`, `Загрузка N%`, `Проверка подписи`,
+`Установка`, `Перезапуск`, `Ошибка — повторить`. Ошибка сети или GitHub не
+мешает работе текущей версии. Ошибка до установки оставляет текущую версию без
+изменений. При ошибке migration данные восстанавливаются из pre-update backup,
+а пользователю предлагается диагностический пакет и сохранённый предыдущий
+installer. Автоматический downgrade БД не выполняется.
+
+Update signing key не является сертификатом Windows/macOS и не требует платной
+подписки. Private updater key хранится только в GitHub Secrets/offline backup;
+в приложение встраивается только public key.
 
 ### 9.2 CI без платной подписки
 
@@ -510,6 +634,8 @@ Windows pilot может показывать SmartScreen; macOS build полу�
 - заменить `FOR UPDATE`/`SKIP LOCKED`;
 - сократить транзакции вокруг Playwright;
 - восстановление interrupted jobs;
+- перенос существующих scheduler settings и scheduled-project relations;
+- атомарное вычисление/сохранение `next_run_at`;
 - тесты concurrency, constraints, cascade и timezone;
 - seed/onboarding без CLI.
 
@@ -523,7 +649,7 @@ Windows pilot может показывать SmartScreen; macOS build полу�
 - read-only PostgreSQL → SQLite converter;
 - относительные storage paths;
 - counts/integrity/file validation;
-- `.encar-backup` export/restore library;
+- `.searchcar-backup` export/restore library;
 - rollback backup;
 - cross-platform path tests;
 - UI wizard для миграции текущей локальной установки.
@@ -535,7 +661,7 @@ checksums совпадают; backup восстанавливается в чи�
 
 Задачи:
 
-- единый `encar-core` entrypoint;
+- единый `searchcar-core` entrypoint;
 - Nuitka build matrix;
 - включить совместимый Chromium/headless shell;
 - направить browser paths на bundled resources;
@@ -545,9 +671,32 @@ checksums совпадают; backup восстанавливается в чи�
 - оценить размер и время установки.
 
 Критерий: машина без Python/Node/Docker запускает backend и выполняет полный
-ручной поиск с изображениями и скриншотом.
+ручной поиск с изображениями и скриншотом; sidecar продолжает работу при
+скрытом окне.
 
-### Фаза 5. Cloudflare license service — 4–7 дней
+### Фаза 5. Scheduler, tray и фоновые scans — 4–6 дней
+
+Задачи:
+
+- адаптировать существующий scheduler к единственному desktop sidecar;
+- экран enabled/interval/projects/catch-up/autostart;
+- system tray: открыть, пауза, следующий запуск, выйти;
+- закрытие окна в tray при включённом scheduler;
+- Tauri autostart plugin, выключенный по умолчанию;
+- wake/resume detection и один catch-up run;
+- единая очередь без overlapping scans и duplicate timers;
+- countdown и актуальные project statuses;
+- cancel/pause/resume;
+- license/network/captcha guards;
+- bounded retry, backoff и безопасный jitter;
+- системные уведомления и полная история автоматических запусков;
+- тесты сна, смены timezone/DST, перезапуска и долгого scan.
+
+Критерий: выбранные проекты обновляются в фоне при скрытом окне, пропущенный
+интервал не создаёт дубликаты, полное `Выйти` останавливает процессы, а после
+пробуждения выполняется не более одного разрешённого catch-up run.
+
+### Фаза 6. Cloudflare license service — 4–7 дней
 
 Задачи:
 
@@ -564,7 +713,7 @@ checksums совпадают; backup восстанавливается в чи�
 Критерий: duplicate code redemption невозможен; clock comes only from server;
 перенос атомарен; API восстанавливается из documented backup.
 
-### Фаза 6. Клиентское enforcement — 4–6 дней
+### Фаза 7. Клиентское enforcement — 4–6 дней
 
 Задачи:
 
@@ -573,6 +722,7 @@ checksums совпадают; backup восстанавливается в чи�
 - Rust lease verification;
 - trusted time state;
 - backend entitlement guard;
+- entitlement guard перед каждым scheduler enqueue/start;
 - banner/expiry/redeem UI;
 - read-only safe mode;
 - perpetual flow;
@@ -582,7 +732,7 @@ checksums совпадают; backup восстанавливается в чи�
 Критерий: UI/API обход не запускает scanner без entitlement; перевод времени и
 копирование backup не продлевают доступ; просмотр данных после expiry работает.
 
-### Фаза 7. Лицензионная админка — 4–6 дней
+### Фаза 8. Лицензионная админка — 4–6 дней
 
 Задачи:
 
@@ -599,7 +749,7 @@ checksums совпадают; backup восстанавливается в чи�
 Критерий: нетехнический владелец самостоятельно создаёт trial, выдаёт ключ,
 проверяет срок и переносит устройство без терминала.
 
-### Фаза 8. Полный backup и перенос устройства — 3–5 дней
+### Фаза 9. Полный backup и перенос устройства — 3–5 дней
 
 Задачи:
 
@@ -615,22 +765,30 @@ checksums совпадают; backup восстанавливается в чи�
 Критерий: полный сценарий Mac → Windows и Windows → Mac проходит по инструкции;
 license state не копируется; old device не получает новый lease.
 
-### Фаза 9. Updater и release automation — 4–7 дней
+### Фаза 10. Updater, версия и release automation — 5–8 дней
 
 Задачи:
 
 - release-only repo;
 - Tauri signing keys и offline recovery copy;
 - GitHub Actions matrix;
-- version injection в client/license check;
-- update prompt/download/install;
+- единый источник версии и синхронизация Tauri/Rust/UI;
+- отображение версии в sidebar/settings/diagnostics/admin;
+- генерация и публикация signed `latest.json`;
+- SemVer check при старте, каждые 6 часов и вручную;
+- кнопка `Обновить до vX.Y.Z`, release notes и progress states;
+- координация update с активным scan и scheduler pause;
+- pre-update database backup;
+- download, Ed25519 verification, install, restart и migrations;
+- retry/manual-download fallback;
 - rollback procedure;
 - release notes и one-click owner workflow.
 
 Критерий: старая пилотная сборка видит новую, проверяет подпись, обновляется и
-сохраняет данные; изменённый artifact отклоняется.
+сохраняет данные; изменённый artifact отклоняется; недоступный GitHub не мешает
+текущей версии; scheduler не стартует во время update.
 
-### Фаза 10. Installers и nontechnical documentation — 4–7 дней
+### Фаза 11. Installers и nontechnical documentation — 4–7 дней
 
 Задачи:
 
@@ -646,7 +804,7 @@ license state не копируется; old device не получает нов
 Критерий: тестовый пользователь без навыков разработки проходит installation,
 trial, scan, backup, renewal и transfer только по документации.
 
-### Фаза 11. Security, reliability и pilot — 5–10 дней
+### Фаза 12. Security, reliability и pilot — 6–12 дней
 
 Задачи:
 
@@ -654,6 +812,7 @@ trial, scan, backup, renewal и transfer только по документац�
 - dependency/license/SBOM review;
 - parser regression against known fixtures;
 - long scan cancellation and crash recovery;
+- scheduler/tray/autostart/sleep/wake/DST simulations;
 - network/captcha/server outage simulations;
 - D1 backup restore drill;
 - corrupted backup/update tests;
@@ -664,7 +823,7 @@ trial, scan, backup, renewal и transfer только по документац�
 Критерий: все acceptance scenarios ниже пройдены, critical defects отсутствуют,
 rollback и disaster recovery проверены практикой.
 
-### Фаза 12. Коммерческая подпись — отложена
+### Фаза 13. Коммерческая подпись — отложена
 
 После успешного бесплатного пилота:
 
@@ -683,8 +842,23 @@ rollback и disaster recovery проверены практикой.
 - macOS 13+ Apple Silicon;
 - первый запуск без Docker/Node/Python;
 - второй экземпляр не запускается;
+- закрытие окна при scheduler скрывает приложение в tray;
+- команда `Выйти` полностью останавливает sidecar;
 - закрытие во время scan не повреждает БД;
 - restart восстанавливает понятный статус.
+
+### Scheduler и фоновые scans
+
+- можно выбрать периодичность и набор проектов;
+- countdown совпадает с сохранённым `next_run_at`;
+- окно можно закрыть, scan продолжается в tray;
+- опциональный autostart включается и отключается из UI;
+- два timer events не создают overlapping runs;
+- после sleep выполняется максимум один catch-up run;
+- после полного выхода scan не выполняется и UI предупреждает об этом;
+- expired license не позволяет scheduler поставить/запустить job;
+- update ставит scheduler на паузу;
+- отменённый автоматический run корректно отражается в истории.
 
 ### Данные
 
@@ -706,6 +880,7 @@ rollback и disaster recovery проверены практикой.
 - perpetual не истекает, но проверяет device binding;
 - один день outage grace;
 - реальный expiry сразу блокирует search;
+- scheduler не обходит expiry и entitlement checks;
 - local data остаются доступны;
 - copied DB не активирует другой компьютер;
 - transfer сохраняет срок и отключает old binding;
@@ -716,8 +891,13 @@ rollback и disaster recovery проверены практикой.
 - корректно подписанное обновление устанавливается;
 - изменённое/неподписанное отклоняется;
 - данные сохраняются;
-- failed update возвращает предыдущую рабочую версию;
-- app version видна в admin UI.
+- current version видна в sidebar, settings, diagnostics и admin UI;
+- при отсутствии новой версии кнопка обновления не показывается;
+- при более новой stable-версии появляется `Обновить до vX.Y.Z`;
+- progress и ошибки понятны без терминала;
+- active scan требует дождаться или подтвердить отмену;
+- failed download/verification оставляет текущую версию;
+- migration failure восстанавливает pre-update data backup.
 
 ### UX без технических навыков
 
@@ -736,6 +916,8 @@ rollback и disaster recovery проверены практикой.
 | SQLite lock во время долгого scan | Высокое | Короткие транзакции, один worker, WAL, busy timeout, stress tests |
 | PostgreSQL migration теряет связи/файлы | Высокое | Read-only source, counts, FK/integrity checks, rollback report |
 | Закрытие приложения оставляет job RUNNING | Высокое | Graceful shutdown + startup reconciliation + cancellation tests |
+| Пользователь закрыл окно и ожидает scheduler | Высокое | Tray lifecycle, индикатор фоновой работы и отдельная команда `Выйти` |
+| Сон/смена времени создаёт серию дубликатов | Высокое | UTC next-run, monotonic guards, один catch-up, idempotency tests |
 | Cloudflare free terms меняются | Среднее | Малый portable API, D1 exports, endpoint configuration, provider migration doc |
 | License server недоступен | Среднее | Подписанный outage lease, status page, backup/redeploy runbook |
 | Потерян signing key | Критическое | Две offline-копии, owner checklist, recovery drill |
@@ -810,16 +992,18 @@ Actions или инструкцию со скриншотами. Клиентс�
 
 1. исходный web-репозиторий остаётся рабочим и неизменённым;
 2. `.exe` и `.dmg` устанавливают самодостаточное приложение;
-3. ручной Encar scan воспроизводит текущую функциональность;
+3. ручной и scheduled scan сайта Encar воспроизводят текущую функциональность;
 4. PostgreSQL-данные переносятся в SQLite с проверяемым отчётом;
 5. trial, renewal, expiry, perpetual и transfer проходят acceptance tests;
 6. после expiry блокируется только поиск/обновление;
-7. `.encar-backup` переносит данные между поддерживаемыми ОС;
-8. обновления проверяются криптографической подписью;
+7. `.searchcar-backup` переносит данные между поддерживаемыми ОС;
+8. версия видна в приложении, новая stable-версия создаёт кнопку обновления, а
+   скачанный update проверяется криптографической подписью;
 9. владелец управляет лицензиями через отдельную админку;
 10. установка и регулярные операции документированы для нетехнического человека;
 11. D1 и ключи восстановлены в тестовом disaster drill;
-12. пилот успешно отработал минимум на Windows 10, Windows 11 и Apple Silicon Mac.
+12. scheduler стабильно работает в tray, после sleep и при optional autostart;
+13. пилот успешно отработал минимум на Windows 10, Windows 11 и Apple Silicon Mac.
 
 ## 16. Первый следующий шаг после утверждения
 

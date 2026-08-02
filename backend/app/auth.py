@@ -264,7 +264,7 @@ def bootstrap_admin(username: str, password: str, must_change_password: bool) ->
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Manage Encar Projects authentication")
+    parser = argparse.ArgumentParser(description="Manage SearchCar authentication")
     subparsers = parser.add_subparsers(dest="command", required=True)
     bootstrap = subparsers.add_parser("bootstrap-admin")
     bootstrap.add_argument("--username", default="Serhii")

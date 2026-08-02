@@ -1,1 +1,1 @@
-"""Encar Projects backend."""
+"""SearchCar backend."""

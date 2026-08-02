@@ -1,4 +1,4 @@
-"""initial Encar Projects schema"""
+"""initial SearchCar schema"""
 from alembic import op
 import sqlalchemy as sa
 

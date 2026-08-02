@@ -1,6 +1,6 @@
-# Encar Projects Desktop
+# SearchCar Desktop
 
-This repository is an isolated copy of the working Encar Projects web
+This repository is an isolated copy of the working SearchCar web
 application and is reserved for its desktop productization. The original
 `SearchCar` repository is not modified by work performed here.
 
