@@ -19,6 +19,14 @@
     "active": true,
     "targets": "all",
     "externalBin": ["binaries/searchcar-core"],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
     "resources": {
       "../dist/": "desktop-ui/",
       "../runtime/browsers/": "browsers/"

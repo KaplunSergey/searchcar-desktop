@@ -16,18 +16,26 @@ Implemented:
 - compiled macOS Apple Silicon backend verified against SQLite and the SPA;
 - Playwright Chromium headless-shell download and resource manifest;
 - browser launch/screenshot smoke test in the Linux Playwright runtime;
-- unsigned macOS debug `.app` bundle containing UI, backend and Chromium.
+- unsigned macOS debug `.app` bundle containing UI, backend and Chromium;
+- Windows x64 GitHub Actions build and compiled-runtime smoke-test workflow;
+- offline WebView2 NSIS configuration for installation without network access.
 
 Still required before M1 is complete:
 
 - validate Chromium launch from the native macOS `.app` outside the Codex
   process sandbox;
 - run the complete desktop window flow against the compiled sidecar;
-- add Windows x64 build and smoke-test automation;
+- obtain the first successful Windows x64 CI artifact and run it on Windows 10
+  and Windows 11 pilot machines;
 - generate unsigned `.dmg` and `.exe` installers and document OS warnings.
+
+## Current stage
+
+The Windows x64 build pipeline is ready for its first run in GitHub Actions.
+Milestone M1 remains open until the generated installer is exercised on clean
+Windows 10 and Windows 11 pilot machines.
 
 ## Next milestone
 
-Run the complete bundled macOS application flow, then reproduce the same
-sidecar/browser/app build on Windows x64 without requiring development tools on
-the customer device.
+Introduce versioned SQLite migrations, a persistent update-job queue and
+recovery rules for searches interrupted by an application or system restart.

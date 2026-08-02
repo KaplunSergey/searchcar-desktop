@@ -60,7 +60,7 @@ The script detects the current target and writes the final executable into
 ```bash
 pnpm install --frozen-lockfile
 pnpm desktop:frontend:build
-pnpm desktop:tauri:build -- --debug --bundles app --no-sign
+pnpm desktop:tauri:build --debug --bundles app --no-sign
 ```
 
 The pilot build is intentionally unsigned. Production release automation will
@@ -76,3 +76,19 @@ add platform signing and updater signatures in a later milestone.
 
 Windows and macOS artifacts must be tested on clean machines without Python,
 Node.js, Rust, Docker or a separately installed browser before release.
+
+## Automated Windows pilot
+
+`.github/workflows/windows-desktop.yml` performs the Windows x64 build on a
+native GitHub-hosted runner. It compiles standalone and onefile sidecars, runs
+the compiled Chromium and protected-session smoke tests, creates an unsigned
+NSIS installer and uploads the installer plus checksums for 14 days.
+
+The Windows installer includes the offline WebView2 installer. This makes the
+pilot larger, but installation does not depend on internet access or an
+existing WebView2 runtime. The application itself may still require internet
+for search and license checks.
+
+The workflow can be started manually from GitHub Actions. A successful CI build
+proves Windows Server runner compatibility; Windows 10 and Windows 11 pilot
+machines remain mandatory before customer release.
