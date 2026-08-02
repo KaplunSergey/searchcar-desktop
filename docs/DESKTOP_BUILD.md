@@ -74,6 +74,13 @@ add platform signing and updater signatures in a later milestone.
 - Tauri bundle contains `searchcar-core`, `desktop-ui` and `browsers`;
 - closing the desktop process also terminates the sidecar.
 
+The current validation step also requires launching the installed macOS
+`.app`, signing in and completing a real scan with its bundled Chromium. This
+specific native launch cannot be executed inside Codex because the macOS system
+sandbox blocks it. The browser discovery, launch and screenshot logic has
+already passed in an allowed environment; the installed application flow must
+therefore be checked manually outside Codex.
+
 Windows and macOS artifacts must be tested on clean machines without Python,
 Node.js, Rust, Docker or a separately installed browser before release.
 

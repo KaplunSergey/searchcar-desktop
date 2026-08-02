@@ -22,8 +22,9 @@ Implemented:
 
 Still required before M1 is complete:
 
-- validate Chromium launch from the native macOS `.app` outside the Codex
-  process sandbox;
+- validate Chromium launch from the installed native macOS `.app` outside the
+  Codex process sandbox. macOS blocks that native launch inside Codex, while
+  the same browser logic has already passed in an allowed environment;
 - run the complete desktop window flow against the compiled sidecar;
 - obtain the first successful Windows x64 CI artifact and run it on Windows 10
   and Windows 11 pilot machines;
@@ -46,6 +47,9 @@ Implemented:
 
 Validation still required before M2 is complete:
 
+- run the installed macOS `.app` manually and verify that its bundled Chromium
+  completes an actual application scan; this is part of the current validation
+  step because the Codex macOS sandbox cannot perform the native launch;
 - run the complete Python suite when the dependency environment or Docker
   daemon is available (network installation is unavailable in this sandbox);
 - exercise process-crash recovery against a compiled sidecar;
@@ -54,5 +58,6 @@ Validation still required before M2 is complete:
 
 ## Next milestone
 
-Finish M2 runtime validation, then implement the read-only PostgreSQL-to-SQLite
-converter and the verified `.searchcar-backup` export/restore foundation.
+Finish M2 runtime validation, including the native installed macOS Chromium
+check, then implement the read-only PostgreSQL-to-SQLite converter and the
+verified `.searchcar-backup` export/restore foundation.
