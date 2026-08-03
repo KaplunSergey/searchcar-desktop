@@ -9,9 +9,13 @@ use std::{
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
+struct SidecarProcess {
+    child: CommandChild,
+    port: u16,
+    secret: String,
+}
 
-struct SidecarState(Mutex<Option<CommandChild>>);
-
+struct SidecarState(Mutex<Option<SidecarProcess>>);
 
 fn available_port() -> Result<u16, String> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| error.to_string())?;
@@ -20,7 +24,6 @@ fn available_port() -> Result<u16, String> {
         .map(|address| address.port())
         .map_err(|error| error.to_string())
 }
-
 
 fn health_is_ready(port: u16) -> bool {
     let Ok(mut stream) = TcpStream::connect_timeout(
@@ -40,7 +43,6 @@ fn health_is_ready(port: u16) -> bool {
     stream.read_to_string(&mut response).is_ok() && response.contains(" 200 ")
 }
 
-
 fn wait_for_health(port: u16, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -52,15 +54,40 @@ fn wait_for_health(port: u16, timeout: Duration) -> bool {
     false
 }
 
+fn request_sidecar_shutdown(port: u16, secret: &str) -> bool {
+    let Ok(mut stream) = TcpStream::connect_timeout(
+        &format!("127.0.0.1:{port}").parse().expect("valid loopback address"),
+        Duration::from_millis(500),
+    ) else {
+        return false;
+    };
+    let request = format!(
+        "POST /desktop/shutdown?token={secret} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut response = String::new();
+    stream.read_to_string(&mut response).is_ok() && response.contains(" 202 ")
+}
 
 fn stop_sidecar(app: &tauri::AppHandle) {
     let state = app.state::<SidecarState>();
     let process = state.0.lock().ok().and_then(|mut child| child.take());
     if let Some(process) = process {
-        let _ = process.kill();
+        if request_sidecar_shutdown(process.port, &process.secret) {
+            let deadline = Instant::now() + Duration::from_secs(40);
+            while Instant::now() < deadline && health_is_ready(process.port) {
+                thread::sleep(Duration::from_millis(150));
+            }
+            if !health_is_ready(process.port) {
+                return;
+            }
+        }
+        let _ = process.child.kill();
     }
 }
-
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -103,7 +130,12 @@ pub fn run() {
                 ])
                 .env("SEARCHCAR_DESKTOP_SESSION_SECRET", &secret);
             let (mut events, child) = command.spawn()?;
-            *app.state::<SidecarState>().0.lock().expect("sidecar state") = Some(child);
+            *app.state::<SidecarState>().0.lock().expect("sidecar state") =
+                Some(SidecarProcess {
+                    child,
+                    port,
+                    secret: secret.clone(),
+                });
 
             tauri::async_runtime::spawn(async move {
                 while events.recv().await.is_some() {}
@@ -116,9 +148,8 @@ pub fn run() {
                     app_handle.exit(1);
                     return;
                 }
-                let target = format!(
-                    "http://127.0.0.1:{port}/desktop/bootstrap?token={secret}"
-                );
+                let target =
+                    format!("http://127.0.0.1:{port}/desktop/bootstrap?token={secret}");
                 let window_handle = app_handle.clone();
                 let _ = app_handle.run_on_main_thread(move || {
                     let _ = WebviewWindowBuilder::new(

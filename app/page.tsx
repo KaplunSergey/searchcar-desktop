@@ -280,6 +280,19 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function openExternalUrl(url: string) {
+  try {
+    await request("/desktop/open-external", {
+      method: "POST",
+      body: JSON.stringify({ url }),
+    });
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  }
+}
+
 function useProjects() {
   return useQuery<ProjectRecord[]>({
     queryKey: ["projects"],
@@ -1909,6 +1922,14 @@ function CarListRow({
       </div>
       <div className="row-actions">
         <button
+          className="external-car-link"
+          aria-label={t("openEncar")}
+          title={t("openEncar")}
+          onClick={() => void openExternalUrl(car.url)}
+        >
+          🌐
+        </button>
+        <button
           className={`favorite-star ${car.favorite ? "active" : ""}`}
           aria-label={t(car.favorite ? "removeFavorite" : "addFavorite")}
           title={t(car.favorite ? "removeFavorite" : "addFavorite")}
@@ -2143,7 +2164,7 @@ function Project({
             </Button>
           )}
           {project.telegram_url ? (
-            <Button onClick={() => window.open(project.telegram_url || "", "_blank", "noopener,noreferrer")}>
+            <Button onClick={() => void openExternalUrl(project.telegram_url || "")}>
               <span className="telegram-icon" aria-hidden="true">✈</span> Telegram
             </Button>
           ) : null}
@@ -2537,7 +2558,7 @@ function Car({
               </Button>
             )
           ) : null}
-          <Button onClick={() => window.open(car.url, "_blank")}>{t("openEncar")} ↗</Button>
+          <Button onClick={() => void openExternalUrl(car.url)}>{t("openEncar")} ↗</Button>
         </div>
       </div>
       <section className="vehicle-hero panel">
@@ -2587,7 +2608,7 @@ function Car({
           </>
         ) : null}
         <Button onClick={() => void copyPrompt()}>{t("copyPrompt")}</Button>
-        <Button onClick={() => window.open(car.url, "_blank")}>{t("openEncar")} ↗</Button>
+        <Button onClick={() => void openExternalUrl(car.url)}>{t("openEncar")} ↗</Button>
         {projectId ? (
           <Button
             kind="danger"

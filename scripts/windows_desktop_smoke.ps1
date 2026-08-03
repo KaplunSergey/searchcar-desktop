@@ -64,6 +64,7 @@ $sessionSecret = [Convert]::ToHexString(
 $previousSecret = $env:SEARCHCAR_DESKTOP_SESSION_SECRET
 $env:SEARCHCAR_DESKTOP_SESSION_SECRET = $sessionSecret
 $sidecarProcess = $null
+$startedAt = Get-Date
 
 try {
     $sidecarProcess = Start-Process `
@@ -130,14 +131,30 @@ try {
         throw "Desktop SPA response is invalid"
     }
 
+    $shutdown = Invoke-WebRequest `
+        -Method Post `
+        -Uri "$baseUrl/desktop/shutdown?token=$sessionSecret" `
+        -TimeoutSec 5 `
+        -SkipHttpErrorCheck
+    if ($shutdown.StatusCode -ne 202) {
+        throw "Desktop sidecar rejected graceful shutdown"
+    }
+    if (-not $sidecarProcess.WaitForExit(45000)) {
+        throw "Desktop sidecar did not stop gracefully"
+    }
+
     $summary = [ordered]@{
         status = "ok"
         target = "x86_64-pc-windows-msvc"
         database = "ok"
         browser = "ok"
         protected_session = "ok"
+        graceful_shutdown = "ok"
         sidecar_bytes = (Get-Item $sidecarPath).Length
+        browser_bytes = (Get-ChildItem $browserPath -File -Recurse | Measure-Object -Property Length -Sum).Sum
+        frontend_bytes = (Get-ChildItem $frontendPath -File -Recurse | Measure-Object -Property Length -Sum).Sum
         screenshot_bytes = (Get-Item $screenshotPath).Length
+        elapsed_seconds = [math]::Round(((Get-Date) - $startedAt).TotalSeconds, 2)
     }
     $summary | ConvertTo-Json | Set-Content `
         (Join-Path $outputPath.FullName "compiled-smoke.json") `

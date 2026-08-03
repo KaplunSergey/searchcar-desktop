@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import os
 import shutil
+import webbrowser
 from pathlib import Path
 from uuid import uuid4
 
@@ -75,6 +76,7 @@ from .schemas import (
     ScanProjectsIn,
     SchedulerIn,
     DesktopMigrationIn,
+    ExternalUrlIn,
     RegistrationIn,
 )
 from .services import merge_reliable_detail
@@ -2088,6 +2090,23 @@ def desktop_data_root() -> Path:
     if not configured:
         raise HTTPException(404, "desktop_runtime_required")
     return Path(configured).expanduser().resolve()
+
+
+@app.post("/api/desktop/open-external", status_code=202)
+def open_desktop_external_url(
+    body: ExternalUrlIn,
+    _: User = Depends(require_csrf),
+) -> dict:
+    from .external_links import validated_external_url
+
+    desktop_data_root()
+    try:
+        url = validated_external_url(body.url)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not webbrowser.open_new_tab(url):
+        raise HTTPException(503, "system_browser_unavailable")
+    return {"status": "opened"}
 
 
 def desktop_backup_path(name: str) -> Path:

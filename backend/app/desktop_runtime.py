@@ -9,10 +9,13 @@ import secrets
 import sys
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 DESKTOP_COOKIE_NAME = "searchcar_desktop_session"
+BROWSER_MANIFEST_NAME = "searchcar-browser-manifest.json"
+BUNDLED_CHROMIUM_ENV = "SEARCHCAR_CHROMIUM_EXECUTABLE"
+GRACEFUL_SHUTDOWN_SECONDS = 35
 
 
 class JsonLogFormatter(logging.Formatter):
@@ -45,16 +48,71 @@ def _persistent_secret(data_dir: Path) -> str:
     return value
 
 
+def _browser_manifest_executable(browser_dir: Path) -> Path:
+    manifest_path = browser_dir / BROWSER_MANIFEST_NAME
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"playwright_browser_manifest_not_found: {manifest_path}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("playwright_browser_manifest_invalid") from exc
+    relative_value = manifest.get("chromium_headless_shell")
+    if not isinstance(relative_value, str) or not relative_value:
+        raise ValueError("playwright_browser_manifest_executable_missing")
+    relative = PurePosixPath(relative_value)
+    windows_relative = PureWindowsPath(relative_value)
+    if (
+        "\\" in relative_value
+        or relative.is_absolute()
+        or windows_relative.is_absolute()
+        or windows_relative.drive
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise ValueError("playwright_browser_manifest_path_unsafe")
+    executable = browser_dir.joinpath(*relative.parts).resolve()
+    try:
+        executable.relative_to(browser_dir)
+    except ValueError as exc:
+        raise ValueError("playwright_browser_manifest_path_unsafe") from exc
+    if not executable.is_file():
+        raise FileNotFoundError(
+            f"playwright_chromium_executable_not_found: {executable}"
+        )
+    expected_bytes = manifest.get("chromium_headless_shell_bytes")
+    if expected_bytes is not None and (
+        not isinstance(expected_bytes, int)
+        or expected_bytes < 1
+        or executable.stat().st_size != expected_bytes
+    ):
+        raise ValueError("playwright_browser_manifest_size_mismatch")
+    expected_sha256 = manifest.get("chromium_headless_shell_sha256")
+    if expected_sha256 is not None:
+        if not isinstance(expected_sha256, str) or len(expected_sha256) != 64:
+            raise ValueError("playwright_browser_manifest_checksum_invalid")
+        digest = hashlib.sha256()
+        with executable.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        if not hmac.compare_digest(digest.hexdigest(), expected_sha256.lower()):
+            raise ValueError("playwright_browser_manifest_checksum_mismatch")
+    return executable
+
+
 def configure_playwright_environment(browser_dir: Path) -> Path:
     browser_dir = browser_dir.expanduser().resolve()
     if not browser_dir.is_dir():
         raise FileNotFoundError(f"playwright_browser_directory_not_found: {browser_dir}")
+    executable = _browser_manifest_executable(browser_dir)
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_dir)
     os.environ["PLAYWRIGHT_SKIP_BROWSER_GC"] = "1"
+    os.environ[BUNDLED_CHROMIUM_ENV] = str(executable)
     return browser_dir
 
 
 def bundled_headless_chromium(browser_dir: Path) -> Path:
+    browser_dir = browser_dir.expanduser().resolve()
+    if (browser_dir / BROWSER_MANIFEST_NAME).is_file():
+        return _browser_manifest_executable(browser_dir)
     executable_names = {"headless_shell", "headless_shell.exe"}
     candidates = sorted(
         path
@@ -184,7 +242,11 @@ def _session_cookie(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
-def create_desktop_app(frontend_dir: Path, session_secret: str):
+def create_desktop_app(
+    frontend_dir: Path,
+    session_secret: str,
+    shutdown_handler=None,
+):
     if len(session_secret) < 32:
         raise ValueError("desktop_session_secret_too_short")
     frontend_dir = frontend_dir.expanduser().resolve()
@@ -203,7 +265,11 @@ def create_desktop_app(frontend_dir: Path, session_secret: str):
 
     class DesktopSessionMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
-            if request.url.path in {"/api/health", "/desktop/bootstrap"}:
+            if request.url.path in {
+                "/api/health",
+                "/desktop/bootstrap",
+                "/desktop/shutdown",
+            }:
                 return await call_next(request)
             supplied = request.cookies.get(DESKTOP_COOKIE_NAME, "")
             if not hmac.compare_digest(supplied, expected_cookie):
@@ -233,8 +299,72 @@ def create_desktop_app(frontend_dir: Path, session_secret: str):
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.post("/desktop/shutdown", include_in_schema=False, status_code=202)
+    def desktop_shutdown(token: str):
+        if not hmac.compare_digest(token, session_secret):
+            raise HTTPException(403, "invalid_desktop_session")
+        if shutdown_handler is None:
+            raise HTTPException(503, "desktop_shutdown_unavailable")
+        return shutdown_handler()
+
     app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="desktop-ui")
     return app
+
+
+class GracefulShutdownController:
+    def __init__(self, worker_stop: threading.Event, worker_thread: threading.Thread):
+        self.worker_stop = worker_stop
+        self.worker_thread = worker_thread
+        self.server = None
+        self.lock = threading.Lock()
+        self.requested = False
+        self.result: dict = {"status": "not_requested"}
+
+    def attach_server(self, server) -> None:
+        self.server = server
+
+    def request(self) -> dict:
+        with self.lock:
+            if self.requested:
+                return self.result
+            self.requested = True
+            self.worker_stop.set()
+            try:
+                from .database import engine
+                from .job_queue import request_shutdown_cancellation
+
+                cancellation = request_shutdown_cancellation(engine)
+                self.result = {
+                    "status": "shutdown_requested",
+                    **cancellation,
+                }
+            except Exception as exc:
+                logging.getLogger(__name__).exception(
+                    "Could not persist graceful scan cancellation"
+                )
+                self.result = {
+                    "status": "shutdown_requested",
+                    "cancelled": [],
+                    "cancel_requested": [],
+                    "warning": type(exc).__name__,
+                }
+            waiter = threading.Thread(
+                target=self._finish,
+                name="searchcar-graceful-shutdown",
+                daemon=True,
+            )
+            waiter.start()
+            return self.result
+
+    def _finish(self) -> None:
+        self.worker_thread.join(timeout=GRACEFUL_SHUTDOWN_SECONDS)
+        if self.worker_thread.is_alive():
+            logging.getLogger(__name__).warning(
+                "Worker did not stop within %s seconds",
+                GRACEFUL_SHUTDOWN_SECONDS,
+            )
+        if self.server is not None:
+            self.server.should_exit = True
 
 
 def check_runtime(data_dir: Path, port: int) -> dict:
@@ -267,7 +397,10 @@ def check_browser(browser_dir: Path, output_path: Path) -> dict:
 
     executable_path = bundled_headless_chromium(browser_dir)
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
+        browser = playwright.chromium.launch(
+            headless=True,
+            executable_path=str(executable_path),
+        )
         try:
             page = browser.new_page(viewport={"width": 960, "height": 540})
             page.set_content(
@@ -450,8 +583,6 @@ def main() -> None:
             "Recovered interrupted scan jobs: %s",
             ",".join(str(job_id) for job_id in recovered_jobs),
         )
-    session_secret = os.environ.get("SEARCHCAR_DESKTOP_SESSION_SECRET", "")
-    desktop_app = create_desktop_app(arguments.frontend_dir, session_secret)
     worker_stop = threading.Event()
     worker_thread = threading.Thread(
         target=run_worker,
@@ -460,20 +591,30 @@ def main() -> None:
         daemon=True,
     )
     worker_thread.start()
+    shutdown_controller = GracefulShutdownController(worker_stop, worker_thread)
+    session_secret = os.environ.get("SEARCHCAR_DESKTOP_SESSION_SECRET", "")
+    desktop_app = create_desktop_app(
+        arguments.frontend_dir,
+        session_secret,
+        shutdown_controller.request,
+    )
     import uvicorn
 
+    config = uvicorn.Config(
+        desktop_app,
+        host=arguments.host,
+        port=arguments.port,
+        access_log=False,
+        log_level="info",
+        log_config=None,
+    )
+    server = uvicorn.Server(config)
+    shutdown_controller.attach_server(server)
     try:
-        uvicorn.run(
-            desktop_app,
-            host=arguments.host,
-            port=arguments.port,
-            access_log=False,
-            log_level="info",
-            log_config=None,
-        )
+        server.run()
     finally:
-        worker_stop.set()
-        worker_thread.join(timeout=5)
+        shutdown_controller.request()
+        worker_thread.join(timeout=GRACEFUL_SHUTDOWN_SECONDS)
 
 
 if __name__ == "__main__":

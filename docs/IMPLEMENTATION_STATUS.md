@@ -80,7 +80,43 @@ Validation still required before M3 is complete:
 - rebuild and visually verify the Settings wizard in the native desktop shell;
 - simulate a restore failure and confirm the automatic rollback on both OSes.
 
+## Milestone M4 — sidecar and browser packaging hardening
+
+Implemented:
+
+- generated browser manifest with the exact relative executable path, byte
+  length and SHA-256 checksum;
+- startup validation that rejects a missing, modified or path-traversing
+  bundled Chromium executable;
+- explicit Playwright launch through the validated packaged executable instead
+  of host-browser discovery;
+- authenticated graceful-shutdown endpoint used by the Tauri lifecycle;
+- cooperative cancellation of queued and running scans before the sidecar
+  exits, preserving work already written to the report;
+- bounded graceful wait with a force-kill fallback in the native shell;
+- allowlisted Encar and Telegram links opened by the operating-system browser;
+- compact globe action for opening a listing directly from each car row;
+- macOS and Windows compiled-runtime smoke scripts covering SQLite, bundled
+  Chromium, protected bootstrap session and graceful shutdown;
+- compiled sidecar/browser/frontend size and smoke-duration reporting;
+- Windows CI smoke artifacts include the packaging measurements.
+
+Validation still required before M4 is complete:
+
+- run `scripts/macos_desktop_smoke.sh` against a newly compiled sidecar outside
+  the Codex macOS sandbox; native Chromium process creation is blocked inside
+  that sandbox;
+- complete one real project scan from the installed `.app`, including images
+  and a listing screenshot;
+- obtain a green Windows x64 workflow artifact and repeat the real scan on
+  clean Windows 10 and Windows 11 machines;
+- measure installer size, installed size and cold/warm startup time on the
+  three pilot systems;
+- run the complete backend suite in the Python 3.12 build environment.
+
 ## Next milestone
 
-Complete M1–M3 native validation (including Chromium from the installed macOS
-application), then proceed to Phase 4 sidecar/Playwright packaging hardening.
+Complete the M4 native validation matrix, then proceed to Phase 5 scheduler,
+tray and background scans. The Phase 5 implementation must retain the new
+graceful shutdown path for explicit `Exit`, while ordinary window closing can
+hide the application and leave the scheduler sidecar running.

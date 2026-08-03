@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -17,6 +18,14 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 ENTRYPOINT = REPOSITORY_ROOT / "backend" / "searchcar_core.py"
 WORK_ROOT = REPOSITORY_ROOT / "work" / "nuitka"
 BINARY_ROOT = REPOSITORY_ROOT / "desktop" / "src-tauri" / "binaries"
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def rust_target_triple() -> str:
@@ -34,7 +43,7 @@ def output_name(target: str) -> str:
     return f"searchcar-core-{target}{suffix}"
 
 
-def build(mode: str) -> dict[str, str]:
+def build(mode: str) -> dict[str, object]:
     target = rust_target_triple()
     work_dir = WORK_ROOT / target / mode
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -81,6 +90,8 @@ def build(mode: str) -> dict[str, str]:
         "mode": mode,
         "target": target,
         "compiled": str(compiled),
+        "compiled_bytes": compiled.stat().st_size,
+        "compiled_sha256": sha256_file(compiled),
     }
     if mode == "onefile":
         BINARY_ROOT.mkdir(parents=True, exist_ok=True)
@@ -88,6 +99,8 @@ def build(mode: str) -> dict[str, str]:
         shutil.copy2(compiled, destination)
         destination.chmod(destination.stat().st_mode | 0o111)
         result["tauri_sidecar"] = str(destination)
+        result["tauri_sidecar_bytes"] = destination.stat().st_size
+        result["tauri_sidecar_sha256"] = sha256_file(destination)
     return result
 
 

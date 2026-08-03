@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -17,7 +18,15 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BROWSER_DIR = REPOSITORY_ROOT / "desktop" / "runtime" / "browsers"
 
 
-def prepare(browser_dir: Path) -> dict[str, str]:
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def prepare(browser_dir: Path) -> dict[str, object]:
     browser_dir = browser_dir.expanduser().resolve()
     browser_dir.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
@@ -54,10 +63,15 @@ def prepare(browser_dir: Path) -> dict[str, str]:
     if not candidates:
         raise FileNotFoundError(f"chromium headless shell not found: {browser_dir}")
     executable = candidates[0]
+    files = [path for path in browser_dir.rglob("*") if path.is_file()]
 
     persisted_manifest = {
         "playwright_version": version("playwright"),
         "chromium_headless_shell": executable.relative_to(browser_dir).as_posix(),
+        "chromium_headless_shell_bytes": executable.stat().st_size,
+        "chromium_headless_shell_sha256": sha256_file(executable),
+        "bundle_files": len(files),
+        "bundle_bytes": sum(path.stat().st_size for path in files),
     }
     (browser_dir / "searchcar-browser-manifest.json").write_text(
         json.dumps(persisted_manifest, ensure_ascii=False, indent=2) + "\n",

@@ -138,3 +138,54 @@ def recover_interrupted_jobs(
                 project_run.error_code = project_run.error_code or "APP_INTERRUPTED"
         db.commit()
     return recovered_ids
+
+
+def request_shutdown_cancellation(
+    engine: Engine,
+    *,
+    now: datetime | None = None,
+) -> dict[str, list[int]]:
+    """Stop queued work and ask the active worker to finish cooperatively."""
+
+    timestamp = now or utc_now()
+    cancelled: list[int] = []
+    requested: list[int] = []
+    with Session(engine, expire_on_commit=False) as db:
+        jobs = list(
+            db.scalars(
+                select(ScanRun)
+                .where(ScanRun.status.in_(("QUEUED", "RUNNING")))
+                .order_by(ScanRun.id)
+            )
+        )
+        for job in jobs:
+            payload = dict(job.payload or {})
+            payload.update(
+                {
+                    "shutdown_requested_at": timestamp.isoformat(),
+                    "cancellation_reason": "APPLICATION_SHUTDOWN",
+                }
+            )
+            job.payload = payload
+            if job.status == "QUEUED":
+                job.status = "CANCELLED"
+                job.finished_at = timestamp
+                job.heartbeat_at = timestamp
+                job.worker_id = None
+                cancelled.append(job.id)
+            else:
+                job.status = "CANCEL_REQUESTED"
+                job.heartbeat_at = timestamp
+                requested.append(job.id)
+
+        if cancelled:
+            for project_run in db.scalars(
+                select(ProjectScanRun).where(
+                    ProjectScanRun.scan_run_id.in_(cancelled),
+                    ProjectScanRun.status.in_(("QUEUED", "RUNNING")),
+                )
+            ):
+                project_run.status = "CANCELLED"
+                project_run.error_code = None
+        db.commit()
+    return {"cancelled": cancelled, "cancel_requested": requested}

@@ -74,3 +74,6 @@ class SchedulerIn(BaseModel):
 class DesktopMigrationIn(BaseModel):
     source_database_url:str=Field(min_length=8,max_length=2048)
     source_storage_path:str=Field(min_length=1,max_length=2048)
+
+class ExternalUrlIn(BaseModel):
+    url:str=Field(min_length=8,max_length=2048)

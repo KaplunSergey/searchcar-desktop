@@ -1,4 +1,6 @@
+import hashlib
 import os
+import json
 from pathlib import Path
 
 from sqlalchemy import text
@@ -38,6 +40,15 @@ def test_desktop_environment_configures_bundled_browser(
 ) -> None:
     browser_dir = tmp_path / "browsers"
     browser_dir.mkdir()
+    executable = browser_dir / "chromium-1" / "headless_shell"
+    executable.parent.mkdir()
+    executable.write_bytes(b"browser")
+    (browser_dir / "searchcar-browser-manifest.json").write_text(
+        json.dumps(
+            {"chromium_headless_shell": "chromium-1/headless_shell"}
+        ),
+        encoding="utf-8",
+    )
     paths = configure_desktop_environment(
         tmp_path / "SearchCar",
         43123,
@@ -47,6 +58,7 @@ def test_desktop_environment_configures_bundled_browser(
     assert paths["browsers"] == browser_dir.resolve()
     assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(browser_dir.resolve())
     assert os.environ["PLAYWRIGHT_SKIP_BROWSER_GC"] == "1"
+    assert os.environ["SEARCHCAR_CHROMIUM_EXECUTABLE"] == str(executable.resolve())
 
 
 def test_missing_bundled_browser_directory_is_rejected(tmp_path: Path) -> None:
@@ -64,3 +76,45 @@ def test_bundled_headless_chromium_is_discovered(tmp_path: Path) -> None:
     executable.write_bytes(b"test")
 
     assert bundled_headless_chromium(tmp_path) == executable
+
+
+def test_bundled_browser_manifest_rejects_path_traversal(tmp_path: Path) -> None:
+    (tmp_path / "searchcar-browser-manifest.json").write_text(
+        json.dumps({"chromium_headless_shell": "../outside/headless_shell"}),
+        encoding="utf-8",
+    )
+
+    try:
+        configure_playwright_environment(tmp_path)
+    except ValueError as error:
+        assert "manifest_path_unsafe" in str(error)
+    else:
+        raise AssertionError("unsafe browser manifest was accepted")
+
+
+def test_bundled_browser_manifest_verifies_size_and_checksum(tmp_path: Path) -> None:
+    executable = tmp_path / "chromium-1" / "headless_shell"
+    executable.parent.mkdir()
+    executable.write_bytes(b"trusted browser")
+    (tmp_path / "searchcar-browser-manifest.json").write_text(
+        json.dumps(
+            {
+                "chromium_headless_shell": "chromium-1/headless_shell",
+                "chromium_headless_shell_bytes": executable.stat().st_size,
+                "chromium_headless_shell_sha256": hashlib.sha256(
+                    executable.read_bytes()
+                ).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert configure_playwright_environment(tmp_path) == tmp_path.resolve()
+
+    executable.write_bytes(b"changed browser")
+    try:
+        configure_playwright_environment(tmp_path)
+    except ValueError as error:
+        assert "manifest_checksum_mismatch" in str(error)
+    else:
+        raise AssertionError("modified bundled browser was accepted")

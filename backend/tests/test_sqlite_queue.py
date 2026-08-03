@@ -9,7 +9,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import create_database_engine
 from app.desktop_onboarding import ensure_initial_admin
-from app.job_queue import claim_next_job, recover_interrupted_jobs
+from app.job_queue import (
+    claim_next_job,
+    recover_interrupted_jobs,
+    request_shutdown_cancellation,
+)
 from app.main import enqueue
 from app.models import (
     Project,
@@ -233,6 +237,53 @@ def test_startup_recovery_preserves_partial_payload(tmp_path: Path) -> None:
         assert run.finished_at == recovered_at
         assert project_run.status == "INTERRUPTED"
         assert project_run.error_code == "APP_INTERRUPTED"
+
+
+def test_shutdown_cancels_queue_and_requests_running_job(tmp_path: Path) -> None:
+    engine = sqlite_engine(tmp_path)
+    migrate_sqlite(engine)
+    with Session(engine) as db:
+        user = add_user(db)
+        project = Project(
+            owner_id=user.id,
+            name="Shutdown project",
+            name_key="shutdown project",
+            search_url="https://example.invalid/search",
+        )
+        db.add(project)
+        db.flush()
+        running = ScanRun(owner_id=user.id, kind="PROJECTS", status="RUNNING")
+        queued = ScanRun(owner_id=user.id, kind="PROJECTS", status="QUEUED")
+        db.add_all([running, queued])
+        db.flush()
+        db.add(
+            ProjectScanRun(
+                scan_run_id=queued.id,
+                project_id=project.id,
+                status="QUEUED",
+            )
+        )
+        db.commit()
+        running_id, queued_id = running.id, queued.id
+
+    stopped_at = datetime(2026, 8, 3, 10, 0, tzinfo=timezone.utc)
+    result = request_shutdown_cancellation(engine, now=stopped_at)
+
+    assert result == {
+        "cancelled": [queued_id],
+        "cancel_requested": [running_id],
+    }
+    with Session(engine) as db:
+        running = db.get(ScanRun, running_id)
+        queued = db.get(ScanRun, queued_id)
+        assert running.status == "CANCEL_REQUESTED"
+        assert running.payload["cancellation_reason"] == "APPLICATION_SHUTDOWN"
+        assert queued.status == "CANCELLED"
+        assert queued.finished_at == stopped_at
+        project_run = db.scalar(
+            select(ProjectScanRun).where(ProjectScanRun.scan_run_id == queued_id)
+        )
+        assert project_run.status == "CANCELLED"
 
 
 def test_sqlite_datetime_round_trip_is_aware_utc(tmp_path: Path) -> None:

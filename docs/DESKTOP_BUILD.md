@@ -36,7 +36,9 @@ On Windows, the interpreter path is
 
 Only Chromium's headless shell and its required media helper are retained. A
 relative manifest is written into `desktop/runtime/browsers`; it contains no
-developer machine path.
+developer machine path. The manifest records the executable size and SHA-256.
+The desktop runtime refuses to start when the executable is missing, modified
+or resolves outside the bundled browser directory.
 
 ## Backend sidecar
 
@@ -72,7 +74,42 @@ add platform signing and updater signatures in a later milestone.
 - compiled sidecar starts `/api/health` and serves the SPA only after bootstrap;
 - browser check creates a non-empty PNG using the bundled headless shell;
 - Tauri bundle contains `searchcar-core`, `desktop-ui` and `browsers`;
-- closing the desktop process also terminates the sidecar.
+- closing the desktop process asks active work to cancel cooperatively, waits
+  for the partial report to be committed and then terminates the sidecar;
+- Encar and Telegram links open in the operating-system browser.
+
+On an Apple Silicon build machine, run the compiled smoke scenario with:
+
+```bash
+scripts/macos_desktop_smoke.sh \
+  desktop/src-tauri/binaries/searchcar-core-aarch64-apple-darwin \
+  desktop/runtime/browsers \
+  desktop/dist \
+  work/macos-smoke/runtime \
+  work/macos-smoke/results
+```
+
+On Windows x64, use:
+
+```powershell
+scripts/windows_desktop_smoke.ps1 `
+  -Sidecar desktop/src-tauri/binaries/searchcar-core-x86_64-pc-windows-msvc.exe `
+  -BrowserDir desktop/runtime/browsers `
+  -FrontendDir desktop/dist `
+  -RuntimeRoot work/windows-smoke/runtime `
+  -OutputDir work/windows-smoke/results
+```
+
+Both scripts write `compiled-smoke.json` containing the sidecar, browser and
+frontend footprint plus elapsed smoke time. The Windows workflow also writes
+`installer.json` with the final installer size and SHA-256. Record installed
+size and cold/warm startup time manually on each clean pilot machine because
+CI unpack time is not representative of a customer computer.
+
+The current local Apple Silicon build inputs are approximately 236 MB unpacked
+(about 179 MB browser, 54 MB onefile sidecar and 3 MB frontend). Treat this only
+as an engineering baseline: the installer is compressed and exact figures are
+always taken from the generated JSON reports.
 
 The current validation step also requires launching the installed macOS
 `.app`, signing in and completing a real scan with its bundled Chromium. This
@@ -80,6 +117,12 @@ specific native launch cannot be executed inside Codex because the macOS system
 sandbox blocks it. The browser discovery, launch and screenshot logic has
 already passed in an allowed environment; the installed application flow must
 therefore be checked manually outside Codex.
+
+When the window exits during a scan, the runtime marks queued work cancelled
+and active work as cancellation-requested. The worker retains already processed
+cars in the report. The native shell waits up to 40 seconds and uses force-kill
+only if cooperative shutdown does not finish; the next start then recovers any
+remaining active record as interrupted.
 
 Windows and macOS artifacts must be tested on clean machines without Python,
 Node.js, Rust, Docker or a separately installed browser before release.

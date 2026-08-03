@@ -1,3 +1,4 @@
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -486,7 +487,11 @@ def process_job(job_id: int) -> None:
             from playwright.sync_api import sync_playwright
 
             with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(headless=settings.playwright_headless)
+                executable_path = os.environ.get("SEARCHCAR_CHROMIUM_EXECUTABLE")
+                browser = playwright.chromium.launch(
+                    headless=settings.playwright_headless,
+                    executable_path=executable_path or None,
+                )
                 context = browser.new_context(viewport={"width": 1440, "height": 1200}, locale="ko-KR")
                 page = context.new_page()
                 _raise_if_cancelled(db, job)
