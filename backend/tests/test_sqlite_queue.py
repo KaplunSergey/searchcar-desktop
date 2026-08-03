@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import create_database_engine
 from app.desktop_onboarding import ensure_initial_admin
+from app.desktop_scheduler import toggle_all_schedulers, tray_scheduler_status
 from app.job_queue import (
     claim_next_job,
     recover_interrupted_jobs,
@@ -24,7 +25,7 @@ from app.models import (
     User,
 )
 from app.sqlite_migrations import migrate_sqlite, sqlite_schema_version
-from app.worker import _reanchor_scheduler_after_manual_projects
+from app.worker import _reanchor_scheduler_after_manual_projects, enqueue_scheduled
 
 
 def sqlite_engine(tmp_path: Path):
@@ -50,9 +51,9 @@ def add_user(db: Session, username: str = "owner") -> User:
 def test_sqlite_migrations_are_versioned_and_idempotent(tmp_path: Path) -> None:
     engine = sqlite_engine(tmp_path)
 
-    assert migrate_sqlite(engine) == 2
-    assert migrate_sqlite(engine) == 2
-    assert sqlite_schema_version(engine) == 2
+    assert migrate_sqlite(engine) == 3
+    assert migrate_sqlite(engine) == 3
+    assert sqlite_schema_version(engine) == 3
 
     with engine.connect() as connection:
         columns = {
@@ -66,6 +67,11 @@ def test_sqlite_migrations_are_versioned_and_idempotent(tmp_path: Path) -> None:
             "heartbeat_at",
             "finished_at",
         } <= columns
+        scheduler_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns("scheduler_settings")
+        }
+        assert {"paused", "catch_up_enabled"} <= scheduler_columns
         assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
         assert connection.execute(text("PRAGMA integrity_check")).scalar_one() == "ok"
 
@@ -113,7 +119,7 @@ def test_pre_migration_desktop_database_is_adopted(tmp_path: Path) -> None:
             )
         )
 
-    assert migrate_sqlite(engine) == 2
+    assert migrate_sqlite(engine) == 3
     with engine.connect() as connection:
         row = connection.execute(
             text(
@@ -398,3 +404,89 @@ def test_finished_manual_project_run_reanchors_scheduler(tmp_path: Path) -> None
             tzinfo=timezone.utc,
         )
         assert run.payload["scheduler_reanchored_at"] == finished_at.isoformat()
+
+
+def test_scheduler_skips_stale_run_when_catch_up_is_disabled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    engine = sqlite_engine(tmp_path)
+    migrate_sqlite(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    with factory.begin() as db:
+        user = add_user(db)
+        project = Project(
+            owner_id=user.id,
+            name="Wake test",
+            name_key="wake test",
+            search_url="https://example.invalid/search",
+            auto_update=True,
+        )
+        db.add(project)
+        db.flush()
+        setting = SchedulerSetting(
+            user_id=user.id,
+            enabled=True,
+            paused=False,
+            catch_up_enabled=False,
+            interval_minutes=60,
+            next_run_at=now - timedelta(minutes=20),
+        )
+        db.add(setting)
+        db.flush()
+        db.add(ScheduledProject(scheduler_id=setting.id, project_id=project.id))
+
+    monkeypatch.setattr("app.worker.SessionLocal", factory)
+    enqueue_scheduled(now=now)
+
+    with factory() as db:
+        assert db.scalar(select(ScanRun)) is None
+        setting = db.scalar(select(SchedulerSetting))
+        assert setting.next_run_at == now + timedelta(hours=1)
+
+
+def test_scheduler_enqueues_one_catch_up_and_tray_can_pause(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    engine = sqlite_engine(tmp_path)
+    migrate_sqlite(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    with factory.begin() as db:
+        user = add_user(db)
+        project = Project(
+            owner_id=user.id,
+            name="Catch-up test",
+            name_key="catch-up test",
+            search_url="https://example.invalid/search",
+            auto_update=True,
+        )
+        db.add(project)
+        db.flush()
+        setting = SchedulerSetting(
+            user_id=user.id,
+            enabled=True,
+            paused=False,
+            catch_up_enabled=True,
+            interval_minutes=180,
+            next_run_at=now - timedelta(hours=8),
+        )
+        db.add(setting)
+        db.flush()
+        db.add(ScheduledProject(scheduler_id=setting.id, project_id=project.id))
+
+    monkeypatch.setattr("app.worker.SessionLocal", factory)
+    enqueue_scheduled(now=now)
+    enqueue_scheduled(now=now)
+
+    with factory() as db:
+        runs = list(db.scalars(select(ScanRun)))
+        assert len(runs) == 1
+        assert runs[0].payload["trigger"] == "AUTOMATIC"
+        status = tray_scheduler_status(db)
+        assert status["enabled"] is True
+        assert status["paused"] is False
+        toggled = toggle_all_schedulers(db, now=now)
+        assert toggled["paused"] is True

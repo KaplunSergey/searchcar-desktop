@@ -44,6 +44,9 @@ class ScanCancelled(Exception):
     pass
 
 
+SCHEDULER_DUE_GRACE_SECONDS = 90
+
+
 def _reanchor_scheduler_after_manual_projects(
     db,
     job: ScanRun,
@@ -1117,13 +1120,13 @@ def process_job(job_id: int) -> None:
             db.commit()
 
 
-def enqueue_scheduled() -> None:
+def enqueue_scheduled(*, now: datetime | None = None) -> None:
     from .maintenance import maintenance_active
 
     if maintenance_active():
         return
     with SessionLocal.begin() as db:
-        current = datetime.now(timezone.utc)
+        current = now or datetime.now(timezone.utc)
         settings_to_check = list(
             db.scalars(
                 select(SchedulerSetting)
@@ -1135,12 +1138,23 @@ def enqueue_scheduled() -> None:
             )
         )
         for setting in settings_to_check:
+            if setting.paused:
+                continue
             if not setting.next_run_at:
                 setting.next_run_at = current + timedelta(
                     minutes=setting.interval_minutes
                 )
                 continue
             if setting.next_run_at > current:
+                continue
+            overdue_seconds = (current - setting.next_run_at).total_seconds()
+            if (
+                not setting.catch_up_enabled
+                and overdue_seconds > SCHEDULER_DUE_GRACE_SECONDS
+            ):
+                setting.next_run_at = current + timedelta(
+                    minutes=setting.interval_minutes
+                )
                 continue
             ids = list(
                 db.scalars(

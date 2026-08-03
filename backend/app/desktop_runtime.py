@@ -255,7 +255,7 @@ def create_desktop_app(
         raise FileNotFoundError(f"desktop_frontend_not_found: {index_path}")
 
     from fastapi import HTTPException, Request
-    from fastapi.responses import JSONResponse, RedirectResponse
+    from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.staticfiles import StaticFiles
 
@@ -269,6 +269,8 @@ def create_desktop_app(
                 "/api/health",
                 "/desktop/bootstrap",
                 "/desktop/shutdown",
+                "/desktop/tray-status",
+                "/desktop/scheduler/toggle",
             }:
                 return await call_next(request)
             supplied = request.cookies.get(DESKTOP_COOKIE_NAME, "")
@@ -306,6 +308,38 @@ def create_desktop_app(
         if shutdown_handler is None:
             raise HTTPException(503, "desktop_shutdown_unavailable")
         return shutdown_handler()
+
+    @app.get("/desktop/tray-status", include_in_schema=False)
+    def desktop_tray_status(token: str):
+        if not hmac.compare_digest(token, session_secret):
+            raise HTTPException(403, "invalid_desktop_session")
+        from .database import SessionLocal
+        from .desktop_scheduler import tray_scheduler_status
+
+        with SessionLocal() as db:
+            status = tray_scheduler_status(db)
+        next_run = status["next_run_at"]
+        next_value = next_run.isoformat() if next_run else ""
+        return PlainTextResponse(
+            f"{int(bool(status['enabled']))}|"
+            f"{int(bool(status['paused']))}|{next_value}"
+        )
+
+    @app.post("/desktop/scheduler/toggle", include_in_schema=False)
+    def desktop_scheduler_toggle(token: str):
+        if not hmac.compare_digest(token, session_secret):
+            raise HTTPException(403, "invalid_desktop_session")
+        from .database import SessionLocal
+        from .desktop_scheduler import toggle_all_schedulers
+
+        with SessionLocal() as db:
+            status = toggle_all_schedulers(db)
+        next_run = status["next_run_at"]
+        next_value = next_run.isoformat() if next_run else ""
+        return PlainTextResponse(
+            f"{int(bool(status['enabled']))}|"
+            f"{int(bool(status['paused']))}|{next_value}"
+        )
 
     app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="desktop-ui")
     return app

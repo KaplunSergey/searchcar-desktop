@@ -114,9 +114,37 @@ Validation still required before M4 is complete:
   three pilot systems;
 - run the complete backend suite in the Python 3.12 build environment.
 
+## Milestone M5 — background scheduler and tray foundation
+
+Implemented:
+
+- versioned SQLite/PostgreSQL migration for scheduler pause and catch-up mode;
+- persistent per-user pause without disabling manual refresh actions;
+- optional wake/restart catch-up with a strict maximum of one queued run;
+- stale scheduled runs are skipped and re-anchored when catch-up is disabled;
+- existing automatic/manual merge and manual-refresh re-anchor remain active;
+- authenticated localhost tray-status and pause/resume control endpoints;
+- Tauri system tray with Open, next-run status, pause/resume and Exit actions;
+- closing the window hides it when a scheduler is enabled and keeps the
+  sidecar working; left-clicking the tray icon restores the window;
+- closing without an enabled scheduler or selecting Exit performs graceful
+  sidecar shutdown;
+- Russian and Ukrainian settings UI for pause and catch-up behavior;
+- unit scenarios for stale wake-up, single catch-up and tray pause state.
+
+Still required to complete M5:
+
+- add opt-in operating-system autostart and expose its actual native state;
+- add native completion/error notifications with a user setting;
+- refresh tray text in the selected application language;
+- execute sleep/wake, timezone/DST and long-running scan tests in installed
+  macOS and Windows applications;
+- compile the new tray code on both targets and validate Windows 10/11 tray
+  behavior; Rust tooling is unavailable in the current Codex environment;
+- add license/network/captcha guards before automatic enqueue once the local
+  license enforcement layer exists.
+
 ## Next milestone
 
-Complete the M4 native validation matrix, then proceed to Phase 5 scheduler,
-tray and background scans. The Phase 5 implementation must retain the new
-graceful shutdown path for explicit `Exit`, while ordinary window closing can
-hide the application and leave the scheduler sidecar running.
+Complete the M5 native tray validation, then implement the remaining Phase 5
+autostart and notification slice before starting Phase 6 licensing service.

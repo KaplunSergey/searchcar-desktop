@@ -1995,6 +1995,8 @@ def scheduler_out(user_id: int, db: Session) -> dict:
     if not setting:
         return {
             "enabled": False,
+            "paused": False,
+            "catch_up_enabled": True,
             "interval_minutes": 180,
             "project_ids": [],
             "next_run_at": None,
@@ -2008,6 +2010,8 @@ def scheduler_out(user_id: int, db: Session) -> dict:
     )
     return {
         "enabled": setting.enabled and bool(project_ids),
+        "paused": setting.paused,
+        "catch_up_enabled": setting.catch_up_enabled,
         "interval_minutes": setting.interval_minutes,
         "project_ids": project_ids,
         "next_run_at": setting.next_run_at if project_ids else None,
@@ -2048,13 +2052,29 @@ def set_scheduler(
     ) or SchedulerSetting(user_id=current.id)
     db.add(setting)
     db.flush()
-    setting.enabled = body.enabled
-    setting.interval_minutes = body.interval_minutes
-    setting.next_run_at = (
-        datetime.now(timezone.utc) + timedelta(minutes=body.interval_minutes)
-        if body.enabled
-        else None
+    previous_project_ids = set(
+        db.scalars(
+            select(ScheduledProject.project_id).where(
+                ScheduledProject.scheduler_id == setting.id
+            )
+        )
     )
+    reanchor = (
+        not setting.enabled
+        or setting.interval_minutes != body.interval_minutes
+        or previous_project_ids != set(project_ids)
+        or setting.next_run_at is None
+    )
+    setting.enabled = body.enabled
+    setting.paused = body.paused if body.enabled else False
+    setting.catch_up_enabled = body.catch_up_enabled
+    setting.interval_minutes = body.interval_minutes
+    if not body.enabled:
+        setting.next_run_at = None
+    elif reanchor:
+        setting.next_run_at = datetime.now(timezone.utc) + timedelta(
+            minutes=body.interval_minutes
+        )
     db.query(ScheduledProject).filter_by(scheduler_id=setting.id).delete()
     for project_id in project_ids:
         db.add(
@@ -2062,6 +2082,22 @@ def set_scheduler(
                 scheduler_id=setting.id, project_id=project_id
             )
         )
+    db.commit()
+    return scheduler_out(current.id, db)
+
+
+@app.post("/api/scheduler/pause")
+def pause_scheduler(
+    body: BoolPatch,
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    setting = db.scalar(
+        select(SchedulerSetting).where(SchedulerSetting.user_id == current.id)
+    )
+    if not setting or not setting.enabled:
+        raise HTTPException(409, "scheduler_not_enabled")
+    setting.paused = body.value
     db.commit()
     return scheduler_out(current.id, db)
 

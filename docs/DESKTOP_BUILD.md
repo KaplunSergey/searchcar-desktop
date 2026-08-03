@@ -124,6 +124,27 @@ cars in the report. The native shell waits up to 40 seconds and uses force-kill
 only if cooperative shutdown does not finish; the next start then recovers any
 remaining active record as interrupted.
 
+## Background scheduler and tray checks
+
+With the scheduler disabled, closing the main window must stop the sidecar and
+exit the application. With at least one scheduled project enabled, closing the
+window must hide it while the sidecar remains healthy and scans continue.
+
+Verify the tray menu on every pilot system:
+
+1. `Open SearchCar` restores and focuses the existing window without creating a
+   second sidecar.
+2. The next-run item changes from `calculating` to the persisted UTC deadline.
+3. `Pause automatic updates` changes to `Resume automatic updates`; manual
+   refresh remains available in the UI.
+4. After sleep, catch-up mode creates at most one automatic run. With catch-up
+   disabled, a stale deadline is skipped and re-anchored to the selected
+   interval.
+5. `Exit` performs the graceful-shutdown flow and leaves no sidecar process.
+
+The tray is currently an English native shell surface. Localized tray labels,
+OS autostart and native notifications are the remaining Phase 5 slice.
+
 Windows and macOS artifacts must be tested on clean machines without Python,
 Node.js, Rust, Docker or a separately installed browser before release.
 

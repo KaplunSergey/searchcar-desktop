@@ -104,9 +104,25 @@ def _durable_scan_queue(connection: Connection) -> None:
     )
 
 
+def _desktop_scheduler_controls(connection: Connection) -> None:
+    _add_column_if_missing(
+        connection,
+        "scheduler_settings",
+        "paused",
+        "BOOLEAN NOT NULL DEFAULT 0",
+    )
+    _add_column_if_missing(
+        connection,
+        "scheduler_settings",
+        "catch_up_enabled",
+        "BOOLEAN NOT NULL DEFAULT 1",
+    )
+
+
 MIGRATIONS = (
     SQLiteMigration(1, "current_web_schema_baseline", _baseline),
     SQLiteMigration(2, "durable_single_worker_scan_queue", _durable_scan_queue),
+    SQLiteMigration(3, "desktop_scheduler_controls", _desktop_scheduler_controls),
 )
 
 

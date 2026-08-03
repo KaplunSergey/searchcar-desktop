@@ -176,6 +176,8 @@ type ScanRecord = {
 };
 type SchedulerRecord = {
   enabled: boolean;
+  paused: boolean;
+  catch_up_enabled: boolean;
   interval_minutes: 60 | 180 | 360 | 720 | 1440;
   project_ids: number[];
   next_run_at?: string | null;
@@ -589,8 +591,12 @@ function App({
           <div className="top-actions">
             {schedulerQuery.data?.enabled && schedulerQuery.data.next_run_at ? (
               <span className="next-update">
-                {t("nextUpdateIn")}
-                <b>{formatCountdown(schedulerQuery.data.next_run_at, locale)}</b>
+                {schedulerQuery.data.paused ? t("schedulerTitle") : t("nextUpdateIn")}
+                <b>
+                  {schedulerQuery.data.paused
+                    ? t("schedulerPaused")
+                    : formatCountdown(schedulerQuery.data.next_run_at, locale)}
+                </b>
               </span>
             ) : null}
             <span>
@@ -2929,6 +2935,8 @@ function Settings({
   const scheduler = schedulerDraft ??
     schedulerQuery.data ?? {
       enabled: false,
+      paused: false,
+      catch_up_enabled: true,
       interval_minutes: 180 as const,
       project_ids: [],
     };
@@ -3008,8 +3016,12 @@ function Settings({
             <h3>{t("schedulerTitle")}</h3>
             <p>{t("automaticHelp")}</p>
             <div className="scheduler-state">
-              <span className={`source-state ${scheduler.enabled ? "ready" : ""}`}>
-                {scheduler.enabled ? t("schedulerEnabled") : t("schedulerDisabled")}
+              <span className={`source-state ${scheduler.enabled && !scheduler.paused ? "ready" : ""}`}>
+                {scheduler.paused
+                  ? t("schedulerPaused")
+                  : scheduler.enabled
+                    ? t("schedulerEnabled")
+                    : t("schedulerDisabled")}
               </span>
               <span>
                 {t("nextScheduledRun")}: {scheduler.enabled
@@ -3049,6 +3061,39 @@ function Settings({
             ))}
           </select>
         </label>
+        <fieldset>
+          <legend>{t("schedulerTitle")}</legend>
+          <label>
+            <input
+              type="checkbox"
+              checked={scheduler.paused}
+              disabled={!scheduler.enabled}
+              onChange={(event) =>
+                setSchedulerDraft({ ...scheduler, paused: event.target.checked })
+              }
+            />
+            <span>
+              <b>{t("pauseScheduler")}</b>
+              <small>{t("pauseSchedulerHelp")}</small>
+            </span>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={scheduler.catch_up_enabled}
+              onChange={(event) =>
+                setSchedulerDraft({
+                  ...scheduler,
+                  catch_up_enabled: event.target.checked,
+                })
+              }
+            />
+            <span>
+              <b>{t("catchUpScans")}</b>
+              <small>{t("catchUpScansHelp")}</small>
+            </span>
+          </label>
+        </fieldset>
         <fieldset>
           <legend>{t("scheduledProjects")}</legend>
           {projects.map((project) => (
