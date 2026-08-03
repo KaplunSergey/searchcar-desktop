@@ -52,3 +52,13 @@ test("ships required product surfaces and localization",async()=>{
   assert.match(page,/request<AuthUser>\("\/auth\/profile"/);
   assert.match(page,/newListingsCount > 0/);
 });
+test("desktop dropdown controls use cross-platform styling",async()=>{
+  const [entry,desktopStyles]=await Promise.all([
+    readFile(new URL("desktop/frontend/main.tsx",root),"utf8"),
+    readFile(new URL("desktop/frontend/desktop.css",root),"utf8"),
+  ]);
+  assert.match(entry,/import "\.\/desktop\.css"/);
+  assert.match(desktopStyles,/select\s*\{[^}]*appearance:\s*none/s);
+  assert.match(desktopStyles,/background-image:\s*url\(/);
+  assert.match(desktopStyles,/select:focus-visible/);
+});

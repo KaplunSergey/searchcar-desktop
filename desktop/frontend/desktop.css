@@ -1,0 +1,28 @@
+/* Keep form controls consistent between the macOS WebKit and Windows WebView2 shells. */
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  background-color: #fff;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none'%3E%3Cpath d='M1.5 1.5 6 6l4.5-4.5' stroke='%2365748b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-position: right 12px center;
+  background-repeat: no-repeat;
+  background-size: 12px 8px;
+  padding-right: 38px !important;
+  cursor: pointer;
+}
+
+select:focus-visible {
+  border-color: var(--blue);
+  outline: 2px solid #bfdbfe;
+  outline-offset: 1px;
+}
+
+select:disabled {
+  background-color: #f8fafc;
+  cursor: not-allowed;
+}
+
+select option {
+  background: #fff;
+  color: var(--ink);
+}
