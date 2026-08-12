@@ -132,9 +132,8 @@ Implemented:
 - Russian and Ukrainian settings UI for pause and catch-up behavior;
 - unit scenarios for stale wake-up, single catch-up and tray pause state.
 
-Still required to complete M5:
+Still required to complete M5 validation/polish:
 
-- add opt-in operating-system autostart and expose its actual native state;
 - add native completion/error notifications with a user setting;
 - refresh tray text in the selected application language;
 - execute sleep/wake, timezone/DST and long-running scan tests in installed
@@ -144,7 +143,58 @@ Still required to complete M5:
 - add license/network/captcha guards before automatic enqueue once the local
   license enforcement layer exists.
 
+## Milestone M6 — Cloudflare license service
+
+Implemented:
+
+- isolated Cloudflare Worker project and versioned D1 migration;
+- privacy-safe trial uniqueness for both subject and device fingerprint;
+- signed Ed25519 device requests and server-time license leases;
+- trial, check, redeem, transfer request and transfer claim endpoints;
+- one-time activation and transfer codes stored only as peppered hashes;
+- atomic single-winner redemption and owner-approved device transfer;
+- request freshness, replay protection, idempotency and D1 rate limits;
+- structured audit events and aggregated device/version checks;
+- temporary secret-protected bootstrap admin endpoints for Phase 8 to replace;
+- Miniflare/D1 concurrency and transfer tests;
+- manual deploy workflow plus encrypted scheduled D1 backup workflow;
+- documented key generation, deployment, backup and clean-database recovery.
+
+Validation still required before M6 is deployed:
+
+- create the production Cloudflare account resources and replace the placeholder
+  D1 database ID;
+- set the signing, pepper and bootstrap admin secrets outside the repository;
+- run the Miniflare suite on GitHub or another environment that permits
+  loopback sockets (the Codex sandbox blocks Miniflare's local listener);
+- perform the first remote D1 migration, test deployment and encrypted
+  backup/restore drill.
+
 ## Next milestone
 
-Complete the M5 native tray validation, then implement the remaining Phase 5
-autostart and notification slice before starting Phase 6 licensing service.
+Deploy and externally validate M6, then continue Phase 7 client enforcement.
+The first two M7 increments are implemented locally:
+
+- Ed25519 verification of cached Phase 6 leases using canonical JSON;
+- separate binding, lease and trusted-time state outside SQLite backups;
+- hard lease/subscription boundaries and clock-rollback protection;
+- read-only safe mode with guards at manual enqueue, scheduler enqueue and
+  worker start;
+- authenticated desktop license-status endpoint and automated tests for valid,
+  expired, tampered, device-mismatched, offline and rolled-back-clock states.
+- persistent Ed25519 device identity in macOS Keychain or a Windows
+  current-user DPAPI-protected blob, never in SQLite or portable backups;
+- privacy-preserving fingerprint derived from the device public key rather
+  than a hardware serial number;
+- signed trial, check and activation-code requests with strict HTTPS,
+  idempotency, bounded responses and signed-lease validation before storage;
+- startup and six-hour lease synchronization for existing bindings;
+- Russian/Ukrainian activation, trial, expiry and manual-refresh controls in
+  desktop settings;
+- bundled public license configuration that remains disabled until the
+  production Worker URL and verification key are supplied.
+
+M7 is not complete: transfer UI, Rust verification, production keys/enforcement
+and installed macOS/Windows secure-store validation remain.
+Native tray notifications and installed-OS scheduler tests remain tracked as M5
+polish. OS autostart is explicitly out of scope.

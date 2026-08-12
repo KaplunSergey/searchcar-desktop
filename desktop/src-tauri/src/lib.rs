@@ -14,6 +14,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
 struct SidecarProcess {
@@ -26,6 +27,7 @@ struct SidecarState(Mutex<Option<SidecarProcess>>);
 
 struct LifecycleState {
     explicit_exit: AtomicBool,
+    confirmation_open: AtomicBool,
 }
 
 #[derive(Default)]
@@ -171,6 +173,56 @@ fn stop_sidecar(app: &tauri::AppHandle) {
     }
 }
 
+fn finish_confirmed_exit(app: &tauri::AppHandle) {
+    if app
+        .state::<LifecycleState>()
+        .explicit_exit
+        .swap(true, Ordering::SeqCst)
+    {
+        return;
+    }
+    let app_handle = app.clone();
+    thread::spawn(move || {
+        // The sidecar first marks queued work cancelled and active work as
+        // cancellation-requested. It then waits for the worker to persist the
+        // partial report before the native process exits.
+        stop_sidecar(&app_handle);
+        app_handle.exit(0);
+    });
+}
+
+fn request_exit_confirmation(app: &tauri::AppHandle) {
+    let lifecycle = app.state::<LifecycleState>();
+    if lifecycle.explicit_exit.load(Ordering::SeqCst)
+        || lifecycle
+            .confirmation_open
+            .swap(true, Ordering::SeqCst)
+    {
+        return;
+    }
+    show_main_window(app);
+    let app_handle = app.clone();
+    app.dialog()
+        .message(
+            "Текущий поиск будет остановлен. Уже обработанные машины останутся в отчёте.",
+        )
+        .title("Выйти из SearchCar?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Выйти и остановить поиск".to_string(),
+            "Остаться".to_string(),
+        ))
+        .show(move |confirmed| {
+            app_handle
+                .state::<LifecycleState>()
+                .confirmation_open
+                .store(false, Ordering::SeqCst);
+            if confirmed {
+                finish_confirmed_exit(&app_handle);
+            }
+        });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -180,10 +232,12 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(SidecarState(Mutex::new(None)))
         .manage(LifecycleState {
             explicit_exit: AtomicBool::new(false),
+            confirmation_open: AtomicBool::new(false),
         })
         .setup(|app| {
             let port = available_port().map_err(std::io::Error::other)?;
@@ -195,6 +249,11 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             let frontend_dir = app.path().resource_dir()?.join("desktop-ui");
             let browser_dir = app.path().resource_dir()?.join("browsers");
+            let playwright_driver_dir = app
+                .path()
+                .resource_dir()?
+                .join("playwright-driver");
+            let license_config = app.path().resource_dir()?.join("license-service.json");
             std::fs::create_dir_all(&data_dir)?;
 
             let command = app
@@ -212,8 +271,11 @@ pub fn run() {
                     frontend_dir.to_string_lossy().into_owned(),
                     "--browser-dir".to_string(),
                     browser_dir.to_string_lossy().into_owned(),
+                    "--playwright-driver-dir".to_string(),
+                    playwright_driver_dir.to_string_lossy().into_owned(),
                 ])
-                .env("SEARCHCAR_DESKTOP_SESSION_SECRET", &secret);
+                .env("SEARCHCAR_DESKTOP_SESSION_SECRET", &secret)
+                .env("SEARCHCAR_LICENSE_CONFIG_FILE", license_config);
             let (mut events, child) = command.spawn()?;
             *app.state::<SidecarState>().0.lock().expect("sidecar state") =
                 Some(SidecarProcess {
@@ -259,11 +321,7 @@ pub fn run() {
                         }
                     }
                     "exit" => {
-                        app.state::<LifecycleState>()
-                            .explicit_exit
-                            .store(true, Ordering::SeqCst);
-                        stop_sidecar(app);
-                        app.exit(0);
+                        request_exit_confirmation(app);
                     }
                     _ => {}
                 })
@@ -328,6 +386,7 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
                 if window
                     .app_handle()
                     .state::<LifecycleState>()
@@ -336,29 +395,23 @@ pub fn run() {
                 {
                     return;
                 }
-                if scheduler_status(window.app_handle())
-                    .map(|status| status.enabled)
-                    .unwrap_or(false)
-                {
-                    api.prevent_close();
-                    let _ = window.hide();
-                } else {
-                    api.prevent_close();
-                    window
-                        .app_handle()
-                        .state::<LifecycleState>()
-                        .explicit_exit
-                        .store(true, Ordering::SeqCst);
-                    stop_sidecar(window.app_handle());
-                    window.app_handle().exit(0);
-                }
+                request_exit_confirmation(window.app_handle());
             }
         })
         .build(tauri::generate_context!())
         .expect("failed to run SearchCar Desktop");
     app.run(|app, event| {
-        if matches!(event, RunEvent::ExitRequested { .. }) {
-            stop_sidecar(app);
+        if let RunEvent::ExitRequested { api, .. } = event {
+            if app
+                .state::<LifecycleState>()
+                .explicit_exit
+                .load(Ordering::SeqCst)
+            {
+                stop_sidecar(app);
+            } else {
+                api.prevent_exit();
+                request_exit_confirmation(app);
+            }
         }
     });
 }

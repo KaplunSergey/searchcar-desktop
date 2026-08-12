@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 5 ]]; then
-  echo "usage: $0 SIDECAR BROWSER_DIR FRONTEND_DIR RUNTIME_ROOT OUTPUT_DIR" >&2
+if [[ $# -ne 6 ]]; then
+  echo "usage: $0 SIDECAR BROWSER_DIR PLAYWRIGHT_DRIVER_DIR FRONTEND_DIR RUNTIME_ROOT OUTPUT_DIR" >&2
   exit 2
 fi
 
 sidecar="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 browser_dir="$(cd "$2" && pwd)"
-frontend_dir="$(cd "$3" && pwd)"
-runtime_root="$4"
-output_dir="$5"
+playwright_driver_dir="$(cd "$3" && pwd)"
+frontend_dir="$(cd "$4" && pwd)"
+runtime_root="$5"
+output_dir="$6"
 mkdir -p "$runtime_root" "$output_dir"
 started_at="$(date +%s)"
 
@@ -21,7 +22,10 @@ stderr_log="$output_dir/compiled-sidecar.stderr.log"
 cookie_jar="$output_dir/session.cookies"
 
 "$sidecar" check --data-dir "$runtime_root/database-check" --port 18772
-"$sidecar" browser-check --browser-dir "$browser_dir" --output "$screenshot"
+"$sidecar" browser-check \
+  --browser-dir "$browser_dir" \
+  --playwright-driver-dir "$playwright_driver_dir" \
+  --output "$screenshot"
 if [[ ! -s "$screenshot" ]] || [[ "$(stat -f%z "$screenshot")" -lt 1024 ]]; then
   echo "compiled browser screenshot is missing or empty" >&2
   exit 1
@@ -34,6 +38,7 @@ SEARCHCAR_DESKTOP_SESSION_SECRET="$secret" \
   --data-dir "$data_dir" \
   --frontend-dir "$frontend_dir" \
   --browser-dir "$browser_dir" \
+  --playwright-driver-dir "$playwright_driver_dir" \
   --host 127.0.0.1 \
   --port "$port" >"$stdout_log" 2>"$stderr_log" &
 sidecar_pid=$!

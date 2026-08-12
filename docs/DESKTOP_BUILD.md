@@ -6,14 +6,20 @@ any of these tools.
 ## Build model
 
 Desktop artifacts are target-native. Build macOS Apple Silicon artifacts on an
-Apple Silicon Mac and Windows x64 artifacts on Windows x64. The build has three
+Apple Silicon Mac and Windows x64 artifacts on Windows x64. The build has four
 independent inputs:
 
 1. the Vite frontend;
 2. the Nuitka `searchcar-core` sidecar;
 3. the Playwright Chromium headless shell.
+4. the separately executable Playwright Node driver.
 
-Tauri combines them only after all three are ready.
+Tauri combines them only after all four are ready.
+
+Playwright's Node driver is kept as a fourth, separately executable resource.
+It must not be launched from Nuitka's temporary onefile extraction directory:
+macOS application launches may reject that child executable even when direct
+terminal checks pass.
 
 ## Python environment
 
@@ -42,6 +48,17 @@ or resolves outside the bundled browser directory.
 
 ## Backend sidecar
 
+Stage the platform-native Playwright driver before smoke tests or bundling:
+
+```bash
+.desktop-build-venv/bin/python scripts/prepare_desktop_playwright_driver.py
+```
+
+The resulting `desktop/runtime/playwright-driver` directory contains the
+platform Node executable and a size/checksum manifest. Tauri passes this path
+to the backend, which validates it and sets `PLAYWRIGHT_NODEJS_PATH` before
+Playwright starts.
+
 Build and test standalone first:
 
 ```bash
@@ -65,6 +82,23 @@ pnpm desktop:frontend:build
 pnpm desktop:tauri:build --debug --bundles app --no-sign
 ```
 
+For an isolated local Rust installation on macOS, run
+`scripts/install_local_rust.command`. It stores rustup and Cargo under
+`Documents/Codex/.toolchains` and does not modify the shell profile. Then run
+`scripts/build_mac_fixed.command` to rebuild the sidecar, Tauri shell and
+`SearchCar Desktop Fixed.app`. The previous app bundle is retained with a UTC
+timestamp instead of being deleted.
+
+GitHub Actions builds are split by native platform:
+
+- `macos-desktop.yml` produces an ad-hoc-signed Apple Silicon `.app` zip;
+- `windows-desktop.yml` produces the unsigned Windows x64 NSIS installer.
+
+Both workflows install pinned Python/Node dependencies, run backend/frontend
+tests, stage Chromium plus the external Playwright Node driver, run the compiled
+smoke suite and upload checksums with the build artifact. Code-signing and
+notarization credentials are intentionally not required for pilot builds.
+
 The pilot build is intentionally unsigned. Production release automation will
 add platform signing and updater signatures in a later milestone.
 
@@ -84,6 +118,7 @@ On an Apple Silicon build machine, run the compiled smoke scenario with:
 scripts/macos_desktop_smoke.sh \
   desktop/src-tauri/binaries/searchcar-core-aarch64-apple-darwin \
   desktop/runtime/browsers \
+  desktop/runtime/playwright-driver \
   desktop/dist \
   work/macos-smoke/runtime \
   work/macos-smoke/results
@@ -95,6 +130,7 @@ On Windows x64, use:
 scripts/windows_desktop_smoke.ps1 `
   -Sidecar desktop/src-tauri/binaries/searchcar-core-x86_64-pc-windows-msvc.exe `
   -BrowserDir desktop/runtime/browsers `
+  -PlaywrightDriverDir desktop/runtime/playwright-driver `
   -FrontendDir desktop/dist `
   -RuntimeRoot work/windows-smoke/runtime `
   -OutputDir work/windows-smoke/results
@@ -118,17 +154,20 @@ sandbox blocks it. The browser discovery, launch and screenshot logic has
 already passed in an allowed environment; the installed application flow must
 therefore be checked manually outside Codex.
 
-When the window exits during a scan, the runtime marks queued work cancelled
-and active work as cancellation-requested. The worker retains already processed
-cars in the report. The native shell waits up to 40 seconds and uses force-kill
-only if cooperative shutdown does not finish; the next start then recovers any
-remaining active record as interrupted.
+The red window close button, the tray `Exit` action and the operating-system
+quit command all show the same confirmation dialog. Confirming exit marks
+queued work cancelled and active work as cancellation-requested. The worker
+retains already processed cars in the report. The native shell waits up to 40
+seconds and uses force-kill only if cooperative shutdown does not finish; the
+next start then recovers any remaining active record as interrupted. Closing
+the window no longer keeps background scheduling alive implicitly.
 
 ## Background scheduler and tray checks
 
-With the scheduler disabled, closing the main window must stop the sidecar and
-exit the application. With at least one scheduled project enabled, closing the
-window must hide it while the sidecar remains healthy and scans continue.
+Closing the main window must always ask for confirmation. Confirming stops the
+sidecar regardless of scheduler state; cancelling leaves the window and all
+work running. Use the normal minimize action when the application should keep
+working in the background.
 
 Verify the tray menu on every pilot system:
 
@@ -142,8 +181,9 @@ Verify the tray menu on every pilot system:
    interval.
 5. `Exit` performs the graceful-shutdown flow and leaves no sidecar process.
 
-The tray is currently an English native shell surface. Localized tray labels,
-OS autostart and native notifications are the remaining Phase 5 slice.
+The tray is currently an English native shell surface. Localized tray labels
+and native notifications remain as Phase 5 polish. OS autostart was removed
+from the product scope on August 3, 2026.
 
 Windows and macOS artifacts must be tested on clean machines without Python,
 Node.js, Rust, Docker or a separately installed browser before release.

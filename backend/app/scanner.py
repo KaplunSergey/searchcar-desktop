@@ -77,11 +77,13 @@ class IncompletePaginationError(ScanError):
 class IdentityMismatchError(ScanError):
     code = "IDENTITY_MISMATCH"
 
-    def __init__(self, requested_id: str, displayed_id: str):
+    def __init__(self, requested_id: str, resolved_id: str):
         self.requested_id = requested_id
-        self.displayed_id = displayed_id
+        self.resolved_id = resolved_id
+        # Kept for compatibility with existing diagnostics and callers.
+        self.displayed_id = resolved_id
         super().__init__(
-            f"Encar displayed listing {displayed_id} for requested {requested_id}"
+            f"Encar resolved listing {resolved_id} for requested {requested_id}"
         )
 
 
@@ -103,12 +105,20 @@ def is_sold_page(text: str) -> bool:
 
 
 def resolve_listing_identity(
-    requested_id: str, structured_text: str, sold: bool = False
+    requested_id: str,
+    structured_text: str,
+    sold: bool = False,
+    resolved_url: str | None = None,
 ) -> tuple[str, str | None]:
+    requested_id = str(requested_id)
     displayed_id = extract_real_encar_id(structured_text)
-    if not sold and displayed_id and displayed_id != str(requested_id):
-        raise IdentityMismatchError(str(requested_id), displayed_id)
-    return str(requested_id), displayed_id
+    resolved_id = extract_car_id(resolved_url or "")
+    # Encar's URL carId and the page's Korean `등록번호` are different
+    # identifiers for the same live listing. Only a redirect to a different
+    # URL identity is evidence that Encar substituted another vehicle.
+    if not sold and resolved_id and resolved_id != requested_id:
+        raise IdentityMismatchError(requested_id, resolved_id)
+    return requested_id, displayed_id
 
 
 def _wait_for_search_results(page, wait_seconds: int = 8) -> None:
@@ -638,7 +648,10 @@ def read_detail(page, item: dict, storage: Path) -> dict:
     sold = is_sold_page(body_text)
     detail_price = parse_detail_price_krw(body_text)
     canonical, displayed_id = resolve_listing_identity(
-        source_id, structured_text, sold
+        source_id,
+        structured_text,
+        sold,
+        resolved_url=page.url,
     )
     accident = classify_accident(condition_text)
     condition, condition_summary = parse_condition(condition_text)

@@ -31,6 +31,7 @@ from .auth import (
 )
 from .database import get_db, settings
 from .importer import inspect_source, run as run_import
+from .job_queue import detach_project_from_active_jobs
 from .models import (
     Car,
     CarAlias,
@@ -76,10 +77,13 @@ from .schemas import (
     ScanProjectsIn,
     SchedulerIn,
     DesktopMigrationIn,
+    DesktopLicenseRedeemIn,
+    DesktopLicenseTrialIn,
     ExternalUrlIn,
     RegistrationIn,
 )
 from .services import merge_reliable_detail
+from .reporting import dedupe_report
 
 app = FastAPI(title="SearchCar API", version=settings.app_version)
 app.add_middleware(
@@ -1007,13 +1011,18 @@ def delete_project(
     db: Session = Depends(get_db),
 ) -> Response:
     project = owned_project(project_id, current, db)
+    affected_scans = detach_project_from_active_jobs(
+        db,
+        current.id,
+        project.id,
+    )
     audit(
         db,
         "PROJECT_DELETED",
         actor_user_id=current.id,
         entity_type="PROJECT",
         entity_id=project.id,
-        payload={"name": project.name},
+        payload={"name": project.name, "affected_scans": affected_scans},
     )
     db.delete(project)
     db.commit()
@@ -1520,9 +1529,14 @@ Encar URL: {record.url}"""
 
 def enqueue(kind: str, payload: dict, owner: User, db: Session) -> dict:
     from .maintenance import maintenance_active
+    from .desktop_license import SearchEntitlementError, require_search_entitlement
 
     if maintenance_active():
         raise HTTPException(409, "desktop_maintenance_active")
+    try:
+        require_search_entitlement()
+    except SearchEntitlementError as exc:
+        raise HTTPException(402, exc.code.lower()) from exc
     requested_projects = set(payload.get("project_ids") or [])
     requested_cars = set(payload.get("car_ids") or [])
     active_runs = list(db.scalars(
@@ -1716,6 +1730,14 @@ def scan_out(run: ScanRun, db: Session) -> dict:
         item.get("project_id") for item in raw_report if item.get("project_id")
     }
     report_car_ids = {item.get("car_id") for item in raw_report if item.get("car_id")}
+    report_registrations = (
+        {
+            car.id: (car.details or {}).get("registration_number")
+            for car in db.scalars(select(Car).where(Car.id.in_(report_car_ids)))
+        }
+        if report_car_ids
+        else {}
+    )
     favorite_pairs = (
         {
             (project_id, car_id)
@@ -1758,6 +1780,8 @@ def scan_out(run: ScanRun, db: Session) -> dict:
                 **item,
                 "project_name": item.get("project_name")
                 or projects.get(item.get("project_id")),
+                "registration_number": item.get("registration_number")
+                or report_registrations.get(item.get("car_id")),
                 "favorite": (item.get("project_id"), item.get("car_id"))
                 in favorite_pairs,
             },
@@ -1776,19 +1800,7 @@ def scan_out(run: ScanRun, db: Session) -> dict:
             "MATERIAL_UPDATE": 3,
         }.get(item.get("change"), 9)
 
-    unique_report: dict[tuple[int | None, int | None], dict] = {}
-    for item in report:
-        key = (item.get("project_id"), item.get("car_id"))
-        current = unique_report.get(key)
-        if current is None or report_priority(item) < report_priority(current):
-            unique_report[key] = item
-    payload["report"] = sorted(
-        unique_report.values(),
-        key=lambda item: (
-            report_priority(item),
-            item.get("updated_at") or "",
-        ),
-    )
+    payload["report"] = dedupe_report(report, priority=report_priority)
     if payload.get("summary"):
         payload["summary"] = {
             **payload["summary"],
@@ -2126,6 +2138,67 @@ def desktop_data_root() -> Path:
     if not configured:
         raise HTTPException(404, "desktop_runtime_required")
     return Path(configured).expanduser().resolve()
+
+
+@app.get("/api/desktop/license")
+def desktop_license_status(_: User = Depends(require_user)) -> dict:
+    desktop_data_root()
+    from .desktop_license import enforcement_mode, evaluate_search_entitlement
+    from .desktop_license_client import service_is_configured
+
+    configured = service_is_configured()
+    required = enforcement_mode() == "required"
+    return {
+        **evaluate_search_entitlement(
+            mode="required" if configured else enforcement_mode()
+        ).as_dict(),
+        "service_configured": configured,
+        "enforcement_required": required,
+    }
+
+
+def _desktop_license_admin(current: User) -> None:
+    if current.role != "ADMIN":
+        raise HTTPException(403, "admin_required")
+
+
+def _desktop_license_operation(operation) -> dict:
+    from .desktop_license_client import LicenseClientError, LicenseServiceClient
+
+    try:
+        client = LicenseServiceClient(desktop_data_root())
+        return operation(client)
+    except LicenseClientError as exc:
+        status = exc.http_status
+        if status in {401, 403}:
+            status = 409
+        raise HTTPException(status, exc.code.lower()) from exc
+
+
+@app.post("/api/desktop/license/trial")
+def activate_desktop_trial(
+    body: DesktopLicenseTrialIn,
+    current: User = Depends(require_csrf),
+) -> dict:
+    _desktop_license_admin(current)
+    return _desktop_license_operation(lambda client: client.activate_trial(body.subject))
+
+
+@app.post("/api/desktop/license/refresh")
+def refresh_desktop_license(current: User = Depends(require_csrf)) -> dict:
+    _desktop_license_admin(current)
+    return _desktop_license_operation(lambda client: client.refresh())
+
+
+@app.post("/api/desktop/license/redeem")
+def redeem_desktop_license(
+    body: DesktopLicenseRedeemIn,
+    current: User = Depends(require_csrf),
+) -> dict:
+    _desktop_license_admin(current)
+    return _desktop_license_operation(
+        lambda client: client.redeem(body.activation_code)
+    )
 
 
 @app.post("/api/desktop/open-external", status_code=202)

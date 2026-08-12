@@ -114,6 +114,9 @@ type ScanReportItem = {
   car_id: number;
   project_id: number;
   project_name?: string | null;
+  project_ids?: number[];
+  project_names?: string[];
+  encar_ids?: string[];
   favorite?: boolean;
   encar_id: string;
   title?: string | null;
@@ -214,6 +217,20 @@ type DesktopDataStatus = {
   data_directory: string;
   backups: DesktopBackup[];
   restore_result?: { status: string; error?: string } | null;
+};
+type DesktopLicenseStatus = {
+  mode: "disabled" | "required";
+  status: "pilot" | "active" | "blocked";
+  can_search: boolean;
+  reason?: string | null;
+  license_id?: string | null;
+  device_id?: string | null;
+  license_type?: string | null;
+  subscription_expires_at?: string | null;
+  lease_expires_at?: string | null;
+  effective_time?: string | null;
+  service_configured?: boolean;
+  enforcement_required?: boolean;
 };
 type DesktopMigrationReport = {
   status: "converted";
@@ -496,10 +513,13 @@ function App({
         method: id ? "PATCH" : "POST",
         body: JSON.stringify(form),
       }),
-    onSuccess: (_, variables) => {
+    onSuccess: (savedProject, variables) => {
       notify(variables.id ? t("projectEdited") : t("projectCreated"));
       setFormProject(null);
       void client.invalidateQueries({ queryKey: ["projects"] });
+      if (!variables.id) {
+        refreshMutation.mutate([savedProject.id]);
+      }
     },
     onError: (error) =>
       notify(
@@ -1466,7 +1486,12 @@ function ReportList({
               <span className="report-car-title">
                 <strong>{item.title || `Encar ${item.encar_id}`}</strong>
                 <small>
-                  {t("foundInProject")}: {item.project_name || `#${item.project_id}`}
+                  {item.project_names && item.project_names.length > 1
+                    ? `${t("foundInProjects")}: ${item.project_names.join(", ")}`
+                    : `${t("foundInProject")}: ${item.project_name || `#${item.project_id}`}`}
+                  {item.encar_ids && item.encar_ids.length > 1
+                    ? ` · ${t("encarListings")}: ${item.encar_ids.join(", ")}`
+                    : null}
                 </small>
               </span>
               <span className={`change-chip ${changeTone(item.change)}`}>
@@ -1600,9 +1625,14 @@ function Projects({
   const currentPagination = current?.payload?.pagination?.[
     String(current.payload.current_project_id || "")
   ];
+  const completedProjectCount = Object.keys(
+    current?.payload?.project_statuses || {},
+  ).length;
+  const displayedReport = current && completedProjectCount ? current : latestReport;
+  const displayingLiveReport = displayedReport?.id === current?.id;
   const newListingsCount =
-    latestReport?.payload?.summary?.new
-    ?? latestReport?.payload?.report?.filter((item) => item.change === "NEW").length
+    displayedReport?.payload?.summary?.new
+    ?? displayedReport?.payload?.report?.filter((item) => item.change === "NEW").length
     ?? 0;
   return (
     <>
@@ -1829,14 +1859,16 @@ function Projects({
           </div>
         </section>
       )}
-      {!current && latestReport ? (
+      {displayedReport ? (
         <section className="panel scan-report">
           <div className="report-heading">
             <div>
-              <h3>{t("latestUpdateReport")}</h3>
+              <h3>{t(displayingLiveReport ? "currentUpdateReport" : "latestUpdateReport")}</h3>
               <p>
-                {latestReport.payload?.summary?.changed || latestReport.payload?.report?.length || 0} {t("changes")} ·{" "}
-                {formatDate(latestReport.created_at, locale)}
+                {displayedReport.payload?.summary?.changed || displayedReport.payload?.report?.length || 0} {t("changes")} ·{" "}
+                {displayingLiveReport
+                  ? `${t("completedProjects")}: ${completedProjectCount}`
+                  : formatDate(displayedReport.created_at, locale)}
               </p>
             </div>
             {newListingsCount > 0 ? (
@@ -1845,22 +1877,22 @@ function Projects({
               </span>
             ) : null}
           </div>
-          {!!latestReport.payload?.invalidated_report_count && (
+          {!!displayedReport.payload?.invalidated_report_count && (
             <p className="integrity-notice">
-              {t("invalidatedHistoryHidden")}: {latestReport.payload.invalidated_report_count}
+              {t("invalidatedHistoryHidden")}: {displayedReport.payload.invalidated_report_count}
             </p>
           )}
-          {!latestReport.payload?.report?.length ? (
+          {!displayedReport.payload?.report?.length ? (
             <div className="report-empty"><strong>{t("noChangedCars")}</strong><span>{t("allListingsUnchanged")}</span></div>
           ) : (
             <ReportList
-              items={latestReport.payload.report}
+              items={displayedReport.payload.report}
               t={t}
               locale={locale}
               openCar={openReportCar}
             />
           )}
-          <FailureList failures={latestReport.payload?.failures || []} t={t} />
+          <FailureList failures={displayedReport.payload?.failures || []} t={t} />
         </section>
       ) : null}
     </>
@@ -2789,6 +2821,13 @@ function ScanReportSection({
 }) {
   const [open, setOpen] = useState(initiallyOpen);
   const report = scan.payload?.report || [];
+  const didAutoOpen = useRef(initiallyOpen);
+  useEffect(() => {
+    if (initiallyOpen && report.length && !didAutoOpen.current) {
+      didAutoOpen.current = true;
+      setOpen(true);
+    }
+  }, [initiallyOpen, report.length]);
   const invalidated = scan.payload?.invalidated_report_count || 0;
   const pagination = Object.values(scan.payload?.pagination || {});
   if (!report.length && !invalidated && !pagination.length) return null;
@@ -2927,6 +2966,14 @@ function Settings({
     enabled: isAdmin,
     retry: false,
   });
+  const desktopLicenseQuery = useQuery<DesktopLicenseStatus>({
+    queryKey: ["desktop-license"],
+    queryFn: () => request("/desktop/license"),
+    enabled: isAdmin,
+    retry: false,
+  });
+  const [trialSubject, setTrialSubject] = useState("");
+  const [activationCode, setActivationCode] = useState("");
   const [migrationUrl, setMigrationUrl] = useState(
     "postgresql+psycopg://encar:encar@127.0.0.1:5432/encar",
   );
@@ -3000,6 +3047,41 @@ function Settings({
       void client.invalidateQueries({ queryKey: ["desktop-data"] });
     },
     onError: () => notify(t("migrationFailed")),
+  });
+  const trialMutation = useMutation({
+    mutationFn: () =>
+      request<DesktopLicenseStatus>("/desktop/license/trial", {
+        method: "POST",
+        body: JSON.stringify({ subject: trialSubject }),
+      }),
+    onSuccess: (status) => {
+      client.setQueryData(["desktop-license"], status);
+      setTrialSubject("");
+      notify(t("licenseActivated"));
+    },
+    onError: () => notify(t("licenseActionFailed")),
+  });
+  const redeemMutation = useMutation({
+    mutationFn: () =>
+      request<DesktopLicenseStatus>("/desktop/license/redeem", {
+        method: "POST",
+        body: JSON.stringify({ activation_code: activationCode }),
+      }),
+    onSuccess: (status) => {
+      client.setQueryData(["desktop-license"], status);
+      setActivationCode("");
+      notify(t("licenseActivated"));
+    },
+    onError: () => notify(t("licenseActionFailed")),
+  });
+  const refreshLicenseMutation = useMutation({
+    mutationFn: () =>
+      request<DesktopLicenseStatus>("/desktop/license/refresh", { method: "POST" }),
+    onSuccess: (status) => {
+      client.setQueryData(["desktop-license"], status);
+      notify(t("licenseRefreshed"));
+    },
+    onError: () => notify(t("licenseActionFailed")),
   });
   const source = importMutation.data || importQuery.data;
   return (
@@ -3132,6 +3214,87 @@ function Settings({
           </Button>
         </div>
       </section>
+      {isAdmin && desktopLicenseQuery.data ? (
+        <section className="panel settings import-panel license-panel">
+          <div className="setting-row">
+            <div>
+              <h3>{t("licenseTitle")}</h3>
+              <p>{t("licenseHelp")}</p>
+            </div>
+            <span className={`source-state ${desktopLicenseQuery.data.status === "active" ? "ready" : ""}`}>
+              {desktopLicenseQuery.data.status === "active"
+                ? t("licenseActive")
+                : desktopLicenseQuery.data.service_configured
+                  ? t("licenseRequired")
+                  : t("licenseServicePending")}
+            </span>
+          </div>
+          {desktopLicenseQuery.data.license_id ? (
+            <dl className="license-summary">
+              <div><dt>{t("licenseType")}</dt><dd>{desktopLicenseQuery.data.license_type || "—"}</dd></div>
+              <div><dt>{t("licenseExpires")}</dt><dd>{formatDate(desktopLicenseQuery.data.subscription_expires_at, locale)}</dd></div>
+              <div><dt>{t("licenseOfflineUntil")}</dt><dd>{formatDate(desktopLicenseQuery.data.lease_expires_at, locale)}</dd></div>
+              <div><dt>{t("licenseDevice")}</dt><dd>{desktopLicenseQuery.data.device_id?.slice(0, 8) || "—"}</dd></div>
+            </dl>
+          ) : null}
+          {desktopLicenseQuery.data.reason ? (
+            <p className="license-reason">{t("licenseReason")}: {desktopLicenseQuery.data.reason}</p>
+          ) : null}
+          {!desktopLicenseQuery.data.service_configured ? (
+            <p className="license-not-configured">{t("licenseServiceHelp")}</p>
+          ) : (
+            <div className="license-actions">
+              {!desktopLicenseQuery.data.license_id ? (
+                <label>
+                  {t("trialSubject")}
+                  <div>
+                    <input
+                      value={trialSubject}
+                      placeholder={t("trialSubjectPlaceholder")}
+                      onChange={(event) => setTrialSubject(event.target.value)}
+                    />
+                    <Button
+                      kind="primary"
+                      disabled={trialMutation.isPending || trialSubject.trim().length < 3}
+                      onClick={() => trialMutation.mutate()}
+                    >
+                      {trialMutation.isPending ? t("licenseWorking") : t("startTrial")}
+                    </Button>
+                  </div>
+                </label>
+              ) : null}
+              <label>
+                {t("activationCode")}
+                <div>
+                  <input
+                    value={activationCode}
+                    placeholder="SC-XXXXX-XXXXX-XXXXX-XXXXX"
+                    onChange={(event) => setActivationCode(event.target.value)}
+                  />
+                  <Button
+                    kind="primary"
+                    disabled={redeemMutation.isPending || activationCode.trim().length < 10}
+                    onClick={() => redeemMutation.mutate()}
+                  >
+                    {redeemMutation.isPending ? t("licenseWorking") : t("activateLicense")}
+                  </Button>
+                </div>
+              </label>
+              {desktopLicenseQuery.data.license_id ? (
+                <div className="setting-footer">
+                  <span>{t("licenseRefreshHelp")}</span>
+                  <Button
+                    disabled={refreshLicenseMutation.isPending}
+                    onClick={() => refreshLicenseMutation.mutate()}
+                  >
+                    {refreshLicenseMutation.isPending ? t("licenseWorking") : t("refreshLicense")}
+                  </Button>
+                </div>
+              ) : null}
+            </div>
+          )}
+        </section>
+      ) : null}
       {isAdmin ? <section className="panel settings import-panel">
         <div className="setting-row">
           <div>

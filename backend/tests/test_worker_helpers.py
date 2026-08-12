@@ -12,6 +12,7 @@ from app.worker import (
     _failure_detail,
     _finish_cancelled_job,
     _material_changes,
+    _publish_project_results,
     _previous_state,
     _raise_if_cancelled,
     _read_verified_detail,
@@ -44,6 +45,33 @@ def test_report_prefers_new_and_price_changes():
         ]
     )
     assert [item["change"] for item in report] == ["NEW", "PRICE_DROP"]
+
+
+def test_report_merges_duplicate_encar_publications_of_one_vehicle():
+    report = _dedupe_report(
+        [
+            {
+                "project_id": 6,
+                "project_name": "Audi A4",
+                "car_id": 153,
+                "encar_id": "42498401",
+                "registration_number": "155노2743",
+                "change": "NEW",
+            },
+            {
+                "project_id": 6,
+                "project_name": "Audi A4",
+                "car_id": 154,
+                "encar_id": "42498400",
+                "registration_number": "155 노2743",
+                "change": "NEW",
+            },
+        ]
+    )
+
+    assert len(report) == 1
+    assert report[0]["car_id"] == 153
+    assert report[0]["encar_ids"] == ["42498401", "42498400"]
 
 
 def test_report_omits_relisted_status():
@@ -386,3 +414,37 @@ def test_cancelled_job_keeps_partial_report_and_progress():
     assert job.payload["project_statuses"] == {"4": "CANCELLED"}
     assert project_run.status == "CANCELLED"
     assert project_run.error_code is None
+
+
+def test_completed_project_publishes_a_live_report_before_the_scan_finishes():
+    job = SimpleNamespace(
+        payload={"project_ids": [4, 5], "pagination": {"4": {"found_count": 2}}}
+    )
+    report = [
+        {"project_id": 4, "car_id": 1, "change": "MATERIAL_UPDATE"},
+        {"project_id": 4, "car_id": 1, "change": "PRICE_DROP"},
+        {"project_id": 4, "car_id": 2, "change": "NEW"},
+    ]
+    failures = ["Project 4: TIMEOUT"]
+    failure_details = [{"scope": "PROJECT", "project_id": 4, "code": "TIMEOUT"}]
+
+    _publish_project_results(
+        job,
+        {},
+        report,
+        failures,
+        failure_details,
+        {"4": "SUCCEEDED"},
+    )
+
+    assert job.payload["current_project_id"] is None
+    assert job.payload["project_statuses"] == {"4": "SUCCEEDED"}
+    assert job.payload["pagination"] == {"4": {"found_count": 2}}
+    assert [item["change"] for item in job.payload["report"]] == ["NEW", "PRICE_DROP"]
+    assert job.payload["summary"] == {
+        "changed": 2,
+        "new": 1,
+        "price_changes": 1,
+        "failed": 1,
+    }
+    assert job.payload["failures"] == failure_details

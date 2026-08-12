@@ -80,14 +80,18 @@ jobs:
         shell: pwsh
         run: |
           $env:PYTHONPATH = Join-Path $pwd "backend"
+          $env:STORAGE_ROOT = Join-Path $env:RUNNER_TEMP "searchcar-test-storage"
+          $testDatabase = Join-Path $env:RUNNER_TEMP "searchcar-tests.sqlite3"
+          $env:DATABASE_URL = "sqlite+pysqlite:///$($testDatabase.Replace('\', '/'))"
           python -m pytest backend/tests -q
           pnpm test
           pnpm desktop:frontend:build
 
-      - name: Prepare bundled Chromium
+      - name: Prepare browser and external Playwright driver
         shell: pwsh
         run: |
           python scripts/prepare_desktop_browser.py
+          python scripts/prepare_desktop_playwright_driver.py
 
       - name: Compile diagnostic standalone sidecar
         shell: pwsh
@@ -118,6 +122,7 @@ jobs:
           scripts/windows_desktop_smoke.ps1 `
             -Sidecar "desktop/src-tauri/binaries/searchcar-core-x86_64-pc-windows-msvc.exe" `
             -BrowserDir "desktop/runtime/browsers" `
+            -PlaywrightDriverDir "desktop/runtime/playwright-driver" `
             -FrontendDir "desktop/dist" `
             -RuntimeRoot "$env:RUNNER_TEMP/searchcar-compiled-smoke" `
             -OutputDir "work/windows-smoke"

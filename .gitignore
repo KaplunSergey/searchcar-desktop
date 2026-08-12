@@ -46,6 +46,8 @@ next-env.d.ts
 /dist/
 /desktop/dist/
 /.wrangler/
+/license-service/.wrangler/
+/license-service/dist/
 /outputs/
 /work/
 /storage/
@@ -57,6 +59,8 @@ next-env.d.ts
 /desktop/src-tauri/binaries/searchcar-core-*
 /desktop/runtime/browsers/*
 !/desktop/runtime/browsers/.gitkeep
+/desktop/runtime/playwright-driver/*
+!/desktop/runtime/playwright-driver/.gitkeep
 /artifacts/
 /desktop-dist/
 *.build/

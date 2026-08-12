@@ -12,6 +12,11 @@ nontechnical operating procedures are listed in
 [`docs/NONTECHNICAL_OPERATIONS_PLAN.md`](docs/NONTECHNICAL_OPERATIONS_PLAN.md).
 The exact upstream commit and copy exclusions are documented in
 [`docs/UPSTREAM_BASELINE.md`](docs/UPSTREAM_BASELINE.md).
+The Phase 6 Worker/D1 licensing protocol, deployment and recovery procedure is
+documented in [`docs/LICENSE_SERVICE.md`](docs/LICENSE_SERVICE.md).
+The Phase 7 desktop entitlement, secure device identity and activation flow are
+documented in
+[`docs/DESKTOP_LICENSE_ENFORCEMENT.md`](docs/DESKTOP_LICENSE_ENFORCEMENT.md).
 
 Until the desktop milestones are implemented, the baseline application below
 continues to run through Docker exactly as it did in the source repository.

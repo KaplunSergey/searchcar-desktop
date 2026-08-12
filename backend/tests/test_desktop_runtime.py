@@ -9,6 +9,7 @@ from app.database import create_database_engine
 from app.desktop_runtime import (
     bundled_headless_chromium,
     configure_desktop_environment,
+    configure_playwright_driver,
     configure_playwright_environment,
 )
 
@@ -59,6 +60,108 @@ def test_desktop_environment_configures_bundled_browser(
     assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(browser_dir.resolve())
     assert os.environ["PLAYWRIGHT_SKIP_BROWSER_GC"] == "1"
     assert os.environ["SEARCHCAR_CHROMIUM_EXECUTABLE"] == str(executable.resolve())
+
+
+def test_desktop_environment_configures_external_playwright_driver(
+    tmp_path: Path,
+) -> None:
+    driver_dir = tmp_path / "playwright-driver"
+    driver_dir.mkdir()
+    executable = driver_dir / "node"
+    executable.write_bytes(b"signed external node")
+    (driver_dir / "searchcar-playwright-driver-manifest.json").write_text(
+        json.dumps(
+            {
+                "node_executable": "node",
+                "node_executable_bytes": executable.stat().st_size,
+                "node_executable_sha256": hashlib.sha256(
+                    executable.read_bytes()
+                ).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    paths = configure_desktop_environment(
+        tmp_path / "SearchCar",
+        43123,
+        playwright_driver_dir=driver_dir,
+    )
+
+    assert paths["playwright_driver"] == driver_dir.resolve()
+    assert os.environ["PLAYWRIGHT_NODEJS_PATH"] == str(executable.resolve())
+
+
+def test_desktop_environment_discovers_driver_next_to_browser(
+    tmp_path: Path,
+) -> None:
+    browser_dir = tmp_path / "Resources" / "browsers"
+    browser_dir.mkdir(parents=True)
+    chromium = browser_dir / "chromium" / "headless_shell"
+    chromium.parent.mkdir()
+    chromium.write_bytes(b"browser")
+    (browser_dir / "searchcar-browser-manifest.json").write_text(
+        json.dumps({"chromium_headless_shell": "chromium/headless_shell"}),
+        encoding="utf-8",
+    )
+    driver_dir = browser_dir.parent / "playwright-driver"
+    driver_dir.mkdir()
+    node = driver_dir / "node"
+    node.write_bytes(b"external node")
+    (driver_dir / "searchcar-playwright-driver-manifest.json").write_text(
+        json.dumps({"node_executable": "node"}),
+        encoding="utf-8",
+    )
+
+    paths = configure_desktop_environment(
+        tmp_path / "SearchCar",
+        43123,
+        browser_dir=browser_dir,
+    )
+
+    assert paths["playwright_driver"] == driver_dir.resolve()
+    assert os.environ["PLAYWRIGHT_NODEJS_PATH"] == str(node.resolve())
+
+
+def test_playwright_driver_manifest_rejects_path_traversal(tmp_path: Path) -> None:
+    (tmp_path / "searchcar-playwright-driver-manifest.json").write_text(
+        json.dumps({"node_executable": "../node"}),
+        encoding="utf-8",
+    )
+
+    try:
+        configure_playwright_driver(tmp_path)
+    except ValueError as error:
+        assert "manifest_path_unsafe" in str(error)
+    else:
+        raise AssertionError("unsafe Playwright driver manifest was accepted")
+
+
+def test_playwright_driver_manifest_verifies_checksum(tmp_path: Path) -> None:
+    executable = tmp_path / "node"
+    executable.write_bytes(b"trusted node")
+    (tmp_path / "searchcar-playwright-driver-manifest.json").write_text(
+        json.dumps(
+            {
+                "node_executable": "node",
+                "node_executable_bytes": executable.stat().st_size,
+                "node_executable_sha256": hashlib.sha256(
+                    executable.read_bytes()
+                ).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert configure_playwright_driver(tmp_path) == tmp_path.resolve()
+
+    executable.write_bytes(b"changed node")
+    try:
+        configure_playwright_driver(tmp_path)
+    except ValueError as error:
+        assert "manifest_checksum_mismatch" in str(error)
+    else:
+        raise AssertionError("modified Playwright driver was accepted")
 
 
 def test_missing_bundled_browser_directory_is_rejected(tmp_path: Path) -> None:

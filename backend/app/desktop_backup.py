@@ -263,6 +263,10 @@ def prepare_backup_database_copy(database_path: Path, storage_root: Path) -> Non
     """Make path fields portable and remove transferable login sessions."""
 
     with _sqlite_connection(database_path) as connection:
+        # SQLite's online backup preserves the source journal mode. Convert the
+        # isolated copy to a single-file journal before mutating it so that the
+        # archive cannot omit changes that are still present only in a WAL file.
+        connection.execute("PRAGMA journal_mode=DELETE")
         tables = [
             row[0]
             for row in connection.execute(

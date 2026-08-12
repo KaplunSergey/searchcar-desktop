@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 DESKTOP_COOKIE_NAME = "searchcar_desktop_session"
 BROWSER_MANIFEST_NAME = "searchcar-browser-manifest.json"
+PLAYWRIGHT_DRIVER_MANIFEST_NAME = "searchcar-playwright-driver-manifest.json"
 BUNDLED_CHROMIUM_ENV = "SEARCHCAR_CHROMIUM_EXECUTABLE"
 GRACEFUL_SHUTDOWN_SECONDS = 35
 
@@ -109,6 +110,72 @@ def configure_playwright_environment(browser_dir: Path) -> Path:
     return browser_dir
 
 
+def configure_playwright_driver(driver_dir: Path) -> Path:
+    """Use a resource-bundled Node executable instead of the onefile copy.
+
+    Nuitka extracts package data into a temporary directory.  macOS can deny
+    execution of Playwright's extracted Node child when the sidecar was
+    launched by an application bundle, even though the same file is readable.
+    Keeping Node as a separately signed Tauri resource avoids that boundary.
+    """
+
+    driver_dir = driver_dir.expanduser().resolve()
+    if not driver_dir.is_dir():
+        raise FileNotFoundError(
+            f"playwright_driver_directory_not_found: {driver_dir}"
+        )
+    manifest_path = driver_dir / PLAYWRIGHT_DRIVER_MANIFEST_NAME
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"playwright_driver_manifest_not_found: {manifest_path}"
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("playwright_driver_manifest_invalid") from exc
+    relative_value = manifest.get("node_executable")
+    if not isinstance(relative_value, str) or not relative_value:
+        raise ValueError("playwright_driver_manifest_executable_missing")
+    relative = PurePosixPath(relative_value)
+    windows_relative = PureWindowsPath(relative_value)
+    if (
+        "\\" in relative_value
+        or relative.is_absolute()
+        or windows_relative.is_absolute()
+        or windows_relative.drive
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise ValueError("playwright_driver_manifest_path_unsafe")
+    executable = driver_dir.joinpath(*relative.parts).resolve()
+    try:
+        executable.relative_to(driver_dir)
+    except ValueError as exc:
+        raise ValueError("playwright_driver_manifest_path_unsafe") from exc
+    if not executable.is_file():
+        raise FileNotFoundError(
+            f"playwright_driver_executable_not_found: {executable}"
+        )
+    expected_bytes = manifest.get("node_executable_bytes")
+    if expected_bytes is not None and (
+        not isinstance(expected_bytes, int)
+        or expected_bytes < 1
+        or executable.stat().st_size != expected_bytes
+    ):
+        raise ValueError("playwright_driver_manifest_size_mismatch")
+    expected_sha256 = manifest.get("node_executable_sha256")
+    if expected_sha256 is not None:
+        if not isinstance(expected_sha256, str) or len(expected_sha256) != 64:
+            raise ValueError("playwright_driver_manifest_checksum_invalid")
+        digest = hashlib.sha256()
+        with executable.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        if not hmac.compare_digest(digest.hexdigest(), expected_sha256.lower()):
+            raise ValueError("playwright_driver_manifest_checksum_mismatch")
+    os.environ["PLAYWRIGHT_NODEJS_PATH"] = str(executable)
+    return driver_dir
+
+
 def bundled_headless_chromium(browser_dir: Path) -> Path:
     browser_dir = browser_dir.expanduser().resolve()
     if (browser_dir / BROWSER_MANIFEST_NAME).is_file():
@@ -130,6 +197,7 @@ def configure_desktop_environment(
     data_dir: Path,
     port: int,
     browser_dir: Path | None = None,
+    playwright_driver_dir: Path | None = None,
 ) -> dict[str, Path]:
     data_dir = data_dir.expanduser().resolve()
     database_dir = data_dir / "data"
@@ -153,6 +221,14 @@ def configure_desktop_environment(
     }
     if browser_dir is not None:
         paths["browsers"] = configure_playwright_environment(browser_dir)
+        if playwright_driver_dir is None:
+            bundled_driver_dir = browser_dir.expanduser().resolve().parent / "playwright-driver"
+            if bundled_driver_dir.is_dir():
+                playwright_driver_dir = bundled_driver_dir
+    if playwright_driver_dir is not None:
+        paths["playwright_driver"] = configure_playwright_driver(
+            playwright_driver_dir
+        )
     return paths
 
 
@@ -423,8 +499,14 @@ def check_runtime(data_dir: Path, port: int) -> dict:
     }
 
 
-def check_browser(browser_dir: Path, output_path: Path) -> dict:
+def check_browser(
+    browser_dir: Path,
+    output_path: Path,
+    playwright_driver_dir: Path | None = None,
+) -> dict:
     browser_dir = configure_playwright_environment(browser_dir)
+    if playwright_driver_dir is not None:
+        configure_playwright_driver(playwright_driver_dir)
     output_path = output_path.expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     from playwright.sync_api import sync_playwright
@@ -507,6 +589,7 @@ def parser() -> argparse.ArgumentParser:
         help="Launch bundled Chromium and save a diagnostic screenshot",
     )
     browser_check.add_argument("--browser-dir", type=Path, required=True)
+    browser_check.add_argument("--playwright-driver-dir", type=Path)
     browser_check.add_argument("--output", type=Path, required=True)
     export = commands.add_parser(
         "backup-export",
@@ -538,6 +621,7 @@ def parser() -> argparse.ArgumentParser:
     serve.add_argument("--data-dir", type=Path, required=True)
     serve.add_argument("--frontend-dir", type=Path, required=True)
     serve.add_argument("--browser-dir", type=Path)
+    serve.add_argument("--playwright-driver-dir", type=Path)
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, required=True)
     return result
@@ -549,7 +633,15 @@ def main() -> None:
         print(json.dumps(check_runtime(arguments.data_dir, arguments.port)))
         return
     if arguments.command == "browser-check":
-        print(json.dumps(check_browser(arguments.browser_dir, arguments.output)))
+        print(
+            json.dumps(
+                check_browser(
+                    arguments.browser_dir,
+                    arguments.output,
+                    arguments.playwright_driver_dir,
+                )
+            )
+        )
         return
     if arguments.command == "backup-export":
         print(
@@ -586,6 +678,7 @@ def main() -> None:
         arguments.data_dir,
         arguments.port,
         arguments.browser_dir,
+        arguments.playwright_driver_dir,
     )
     configure_structured_logging(paths["logs"])
     from .maintenance import clear_stale_maintenance_lock
@@ -625,6 +718,15 @@ def main() -> None:
         daemon=True,
     )
     worker_thread.start()
+    from .desktop_license_client import run_periodic_license_sync
+
+    license_sync_thread = threading.Thread(
+        target=run_periodic_license_sync,
+        args=(worker_stop, paths["root"]),
+        name="searchcar-license-sync",
+        daemon=True,
+    )
+    license_sync_thread.start()
     shutdown_controller = GracefulShutdownController(worker_stop, worker_thread)
     session_secret = os.environ.get("SEARCHCAR_DESKTOP_SESSION_SECRET", "")
     desktop_app = create_desktop_app(

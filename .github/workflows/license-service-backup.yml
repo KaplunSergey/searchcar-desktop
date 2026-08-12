@@ -1,0 +1,52 @@
+name: Backup license service
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 1 * *"
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: license-production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      LICENSE_BACKUP_PASSPHRASE: ${{ secrets.LICENSE_BACKUP_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Activate pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.17.0 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Export D1
+        run: |
+          mkdir -p artifacts/license-service-backup
+          pnpm exec wrangler d1 export searchcar-license-production \
+            --remote \
+            --config license-service/wrangler.jsonc \
+            --output=artifacts/license-service-backup/license-service.sql
+      - name: Encrypt and checksum
+        run: |
+          test -n "$LICENSE_BACKUP_PASSPHRASE"
+          openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000 \
+            -in artifacts/license-service-backup/license-service.sql \
+            -out artifacts/license-service-backup/license-service.sql.enc \
+            -pass env:LICENSE_BACKUP_PASSPHRASE
+          sha256sum artifacts/license-service-backup/license-service.sql.enc \
+            > artifacts/license-service-backup/license-service.sql.enc.sha256
+          rm artifacts/license-service-backup/license-service.sql
+      - uses: actions/upload-artifact@v4
+        with:
+          name: license-service-backup-${{ github.run_id }}
+          path: artifacts/license-service-backup/*
+          if-no-files-found: error
+          retention-days: 30

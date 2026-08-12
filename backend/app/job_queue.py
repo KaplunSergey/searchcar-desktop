@@ -92,6 +92,71 @@ def heartbeat_job(
         return result.rowcount == 1
 
 
+def detach_project_from_active_jobs(
+    db: Session,
+    owner_id: int,
+    project_id: int,
+    *,
+    now: datetime | None = None,
+) -> list[int]:
+    """Remove a deleted project from queued work and cancel empty jobs."""
+
+    timestamp = now or utc_now()
+    affected: list[int] = []
+    jobs = list(
+        db.scalars(
+            select(ScanRun).where(
+                ScanRun.owner_id == owner_id,
+                ScanRun.kind == "PROJECTS",
+                ScanRun.status.in_(("QUEUED", "RUNNING", "CANCEL_REQUESTED")),
+            )
+        )
+    )
+    for job in jobs:
+        payload = dict(job.payload or {})
+        project_ids = list(payload.get("project_ids") or [])
+        if project_id not in project_ids:
+            continue
+
+        remaining = [item for item in project_ids if item != project_id]
+        payload["project_ids"] = remaining
+        affected.append(job.id)
+        if remaining and payload.get("current_project_id") != project_id:
+            job.payload = payload
+            continue
+
+        payload.update(
+            {
+                "cancellation_reason": "PROJECT_DELETED",
+                "cancellation_requested_at": timestamp.isoformat(),
+            }
+        )
+        if job.status == "QUEUED":
+            job.status = "CANCELLED"
+            job.finished_at = timestamp
+            job.heartbeat_at = timestamp
+            job.worker_id = None
+            payload.update(
+                {
+                    "cancelled_at": timestamp.isoformat(),
+                    "current_project_id": None,
+                    "report": list(payload.get("report") or []),
+                    "failures": list(payload.get("failures") or []),
+                    "summary": payload.get("summary")
+                    or {
+                        "changed": 0,
+                        "new": 0,
+                        "price_changes": 0,
+                        "failed": 0,
+                    },
+                }
+            )
+        else:
+            job.status = "CANCEL_REQUESTED"
+        job.payload = payload
+    return affected
+
+
 def recover_interrupted_jobs(
     engine: Engine,
     *,

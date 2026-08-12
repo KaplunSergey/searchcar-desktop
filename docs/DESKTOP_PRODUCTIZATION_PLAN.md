@@ -89,7 +89,6 @@ KaplunSergey/SearchCarDesktop-Releases  # public, только бинарник�
 - scheduler с выбором проектов, периодичности и режима поиска;
 - фоновые scans при свёрнутом/скрытом окне;
 - system tray, обратный отсчёт до следующего запуска и отмена текущего scan;
-- опциональный автозапуск с ОС, выключенный по умолчанию;
 - контролируемый catch-up пропущенного запуска после сна/перезапуска;
 - текущая многопользовательская локальная авторизация;
 - бесплатный 30-дневный trial;
@@ -126,7 +125,7 @@ flowchart LR
     U["Пользователь"] --> T["Tauri desktop"]
     T --> UI["React UI"]
     T --> LC["Rust license coordinator"]
-    T --> TR["Tray + optional autostart"]
+    T --> TR["System tray"]
     T --> C["searchcar-core sidecar"]
     C --> API["FastAPI localhost"]
     C --> S["Persistent scheduler"]
@@ -184,8 +183,6 @@ flowchart LR
   запуска, для нового времени используется последнее сохранённое значение;
 - при полном выходе scheduler не работает; если он включён, пользователь видит
   предупреждение и время следующего пропуска;
-- опция `Запускать вместе с системой` использует Tauri autostart plugin и
-  включается только явным действием пользователя;
 - завершение, ошибка, captcha и отмена отражаются в истории и, при разрешении,
   системным уведомлением.
 
@@ -346,9 +343,8 @@ lease, максимум около 48 часов. Мгновенное откл�
 Timer перед постановкой job повторно сверяет сохранённое время, поэтому гонка
 между нажатием кнопки и срабатыванием таймера не создаёт второй scan.
 
-Опциональный автозапуск с Windows/macOS нужен только для тех, кому важно не
-открывать приложение вручную после входа в систему. Он выключен по умолчанию и
-может быть отключён одной настройкой.
+Приложение запускается пользователем вручную. Автозапуск вместе с ОС исключён
+из первой версии отдельным продуктовым решением.
 
 ## 6. Локальная база и перенос существующих данных
 
@@ -702,10 +698,9 @@ checksums совпадают; backup восстанавливается в чи�
 Задачи:
 
 - адаптировать существующий scheduler к единственному desktop sidecar;
-- экран enabled/interval/projects/catch-up/autostart;
+- экран enabled/interval/projects/catch-up;
 - system tray: открыть, пауза, следующий запуск, выйти;
 - закрытие окна в tray при включённом scheduler;
-- Tauri autostart plugin, выключенный по умолчанию;
 - wake/resume detection и один catch-up run;
 - единая очередь без overlapping scans и duplicate timers;
 - атомарный re-anchor scheduler после глобального ручного `Обновить проекты`;
@@ -840,7 +835,7 @@ trial, scan, backup, renewal и transfer только по документац�
 - dependency/license/SBOM review;
 - parser regression against known fixtures;
 - long scan cancellation and crash recovery;
-- scheduler/tray/autostart/sleep/wake/DST simulations;
+- scheduler/tray/sleep/wake/DST simulations;
 - network/captcha/server outage simulations;
 - D1 backup restore drill;
 - corrupted backup/update tests;
@@ -880,7 +875,6 @@ rollback и disaster recovery проверены практикой.
 - можно выбрать периодичность и набор проектов;
 - countdown совпадает с сохранённым `next_run_at`;
 - окно можно закрыть, scan продолжается в tray;
-- опциональный autostart включается и отключается из UI;
 - два timer events не создают overlapping runs;
 - глобальное ручное `Обновить проекты` после завершения переносит
   `next_run_at` на полный текущий интервал вперёд;
@@ -1037,7 +1031,7 @@ Actions или инструкцию со скриншотами. Клиентс�
 9. владелец управляет лицензиями через отдельную админку;
 10. установка и регулярные операции документированы для нетехнического человека;
 11. D1 и ключи восстановлены в тестовом disaster drill;
-12. scheduler стабильно работает в tray, после sleep и при optional autostart;
+12. scheduler стабильно работает в tray и после sleep;
 13. глобальное ручное обновление проектов переносит следующий automatic run на
     полный выбранный интервал без дублирующего запуска по старому timer;
 14. пилот успешно отработал минимум на Windows 10, Windows 11 и Apple Silicon Mac.

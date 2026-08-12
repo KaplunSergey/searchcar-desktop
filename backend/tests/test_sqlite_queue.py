@@ -12,6 +12,7 @@ from app.desktop_onboarding import ensure_initial_admin
 from app.desktop_scheduler import toggle_all_schedulers, tray_scheduler_status
 from app.job_queue import (
     claim_next_job,
+    detach_project_from_active_jobs,
     recover_interrupted_jobs,
     request_shutdown_cancellation,
 )
@@ -180,7 +181,6 @@ def test_two_workers_cannot_claim_jobs_at_the_same_time(tmp_path: Path) -> None:
                 ("worker-a", "worker-b"),
             )
         )
-
     assert sum(job_id is not None for job_id in claimed) == 1
     with Session(engine) as db:
         jobs = list(db.scalars(select(ScanRun).order_by(ScanRun.id)))
@@ -190,6 +190,44 @@ def test_two_workers_cannot_claim_jobs_at_the_same_time(tmp_path: Path) -> None:
         assert running.attempt_count == 1
         assert running.started_at is not None
         assert running.started_at.tzinfo == timezone.utc
+
+
+def test_deleting_only_project_cancels_queued_job(tmp_path: Path) -> None:
+    engine = sqlite_engine(tmp_path)
+    migrate_sqlite(engine)
+    cancelled_at = datetime(2026, 8, 3, 10, 0, tzinfo=timezone.utc)
+    with Session(engine, expire_on_commit=False) as db:
+        user = add_user(db)
+        project = Project(
+            owner_id=user.id,
+            name="Honda",
+            name_key="honda",
+            search_url="https://www.encar.com/honda",
+        )
+        db.add(project)
+        db.flush()
+        job = ScanRun(
+            owner_id=user.id,
+            kind="PROJECTS",
+            status="QUEUED",
+            payload={"project_ids": [project.id]},
+        )
+        db.add(job)
+        db.flush()
+
+        affected = detach_project_from_active_jobs(
+            db,
+            user.id,
+            project.id,
+            now=cancelled_at,
+        )
+        db.commit()
+
+        assert affected == [job.id]
+        assert job.status == "CANCELLED"
+        assert job.payload["project_ids"] == []
+        assert job.payload["cancellation_reason"] == "PROJECT_DELETED"
+        assert job.finished_at == cancelled_at
 
 
 def test_startup_recovery_preserves_partial_payload(tmp_path: Path) -> None:

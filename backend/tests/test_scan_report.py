@@ -71,3 +71,68 @@ def test_existing_relisted_item_is_hidden_from_scan_report() -> None:
 
         assert result["payload"]["report"] == []
         assert result["payload"]["summary"]["changed"] == 0
+
+
+def test_scan_report_groups_legacy_rows_for_one_registration_number() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        user = User(
+            username="Owner",
+            username_key="owner",
+            password_hash="!test",
+            role="USER",
+            status="ACTIVE",
+            project_limit=1,
+        )
+        db.add(user)
+        db.flush()
+        project = Project(
+            owner_id=user.id,
+            name="Project",
+            name_key="project",
+            search_url="https://www.encar.com/project",
+        )
+        first = Car(
+            canonical_encar_id="42498401",
+            url="https://fem.encar.com/cars/detail/42498401",
+            title="Audi",
+            details={"registration_number": "155노2743"},
+            status="NEW",
+        )
+        second = Car(
+            canonical_encar_id="42498400",
+            url="https://fem.encar.com/cars/detail/42498400",
+            title="Audi",
+            details={"registration_number": "155 노2743"},
+            status="NEW",
+        )
+        db.add_all([project, first, second])
+        db.flush()
+        db.add_all(
+            [
+                ProjectCar(project_id=project.id, car_id=first.id, tracking_enabled=True),
+                ProjectCar(project_id=project.id, car_id=second.id, tracking_enabled=True),
+            ]
+        )
+        run = ScanRun(
+            owner_id=user.id,
+            kind="PROJECTS",
+            status="SUCCEEDED",
+            payload={
+                "project_ids": [project.id],
+                "report": [
+                    {"project_id": project.id, "car_id": first.id, "encar_id": "42498401", "change": "NEW"},
+                    {"project_id": project.id, "car_id": second.id, "encar_id": "42498400", "change": "NEW"},
+                ],
+                "summary": {"changed": 2, "new": 2, "price_changes": 0, "failed": 0},
+            },
+        )
+        db.add(run)
+        db.commit()
+
+        result = scan_out(run, db)
+
+        assert len(result["payload"]["report"]) == 1
+        assert result["payload"]["report"][0]["encar_ids"] == ["42498401", "42498400"]
+        assert result["payload"]["summary"]["changed"] == 1

@@ -38,11 +38,23 @@ def test_missing():
 def test_alias_merge(): assert merge_aliases([{"car_id":"1","canonical_car_id":"2","source_car_id":"1"},{"car_id":"2","canonical_car_id":"2"}])[0]["aliases"]==["1"]
 
 
-def test_listing_identity_rejects_encar_replacement_page():
+def test_listing_identity_accepts_distinct_url_and_registration_ids():
+    assert resolve_listing_identity(
+        "42319346",
+        "등록번호 42318013",
+        resolved_url="https://fem.encar.com/cars/detail/42319346",
+    ) == ("42319346", "42318013")
+
+
+def test_listing_identity_rejects_redirect_to_another_car():
     with pytest.raises(IdentityMismatchError) as error:
-        resolve_listing_identity("42178983", "등록번호 42172299")
+        resolve_listing_identity(
+            "42178983",
+            "등록번호 42170001",
+            resolved_url="https://fem.encar.com/cars/detail/42172299",
+        )
     assert error.value.requested_id == "42178983"
-    assert error.value.displayed_id == "42172299"
+    assert error.value.resolved_id == "42172299"
 
 
 def test_sold_page_keeps_requested_identity_even_with_recommendation():
@@ -50,6 +62,7 @@ def test_sold_page_keeps_requested_identity_even_with_recommendation():
         "41093659",
         "이 차량은 판매되었거나 삭제된 차량입니다\n등록번호 99999999",
         sold=True,
+        resolved_url="https://fem.encar.com/cars/detail/99999999",
     ) == ("41093659", "99999999")
 
 def test_vehicle_and_condition_fields():

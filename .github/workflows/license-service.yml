@@ -1,0 +1,74 @@
+name: License service
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy Worker and apply production D1 migrations
+        required: true
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - ".github/workflows/license-service.yml"
+      - "license-service/**"
+      - "scripts/generate_license_signing_key.mjs"
+      - "package.json"
+      - "pnpm-lock.yaml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/license-service.yml"
+      - "license-service/**"
+      - "scripts/generate_license_signing_key.mjs"
+      - "package.json"
+      - "pnpm-lock.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Typecheck and Miniflare tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Activate pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.17.0 --activate
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check Worker types
+        run: pnpm license:typecheck
+      - name: Run Worker/D1 tests
+        run: pnpm license:test
+
+  deploy:
+    name: Apply migrations and deploy
+    needs: test
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: license-production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Activate pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.17.0 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Apply D1 migrations
+        run: pnpm exec wrangler d1 migrations apply LICENSE_DB --remote --config license-service/wrangler.jsonc
+      - name: Deploy Worker
+        run: pnpm exec wrangler deploy --config license-service/wrangler.jsonc

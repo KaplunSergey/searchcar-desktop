@@ -7,6 +7,9 @@ param(
     [string]$BrowserDir,
 
     [Parameter(Mandatory = $true)]
+    [string]$PlaywrightDriverDir,
+
+    [Parameter(Mandatory = $true)]
     [string]$FrontendDir,
 
     [Parameter(Mandatory = $true)]
@@ -19,6 +22,7 @@ param(
 $ErrorActionPreference = "Stop"
 $sidecarPath = (Resolve-Path $Sidecar).Path
 $browserPath = (Resolve-Path $BrowserDir).Path
+$playwrightDriverPath = (Resolve-Path $PlaywrightDriverDir).Path
 $frontendPath = (Resolve-Path $FrontendDir).Path
 $runtimePath = New-Item -ItemType Directory -Force $RuntimeRoot
 $outputPath = New-Item -ItemType Directory -Force $OutputDir
@@ -49,6 +53,7 @@ if ($LASTEXITCODE -ne 0) {
 
 & $sidecarPath browser-check `
     --browser-dir $browserPath `
+    --playwright-driver-dir $playwrightDriverPath `
     --output $screenshotPath
 if ($LASTEXITCODE -ne 0) {
     throw "Compiled Playwright browser check failed"
@@ -74,6 +79,7 @@ try {
             "--data-dir", $serveDataPath,
             "--frontend-dir", $frontendPath,
             "--browser-dir", $browserPath,
+            "--playwright-driver-dir", $playwrightDriverPath,
             "--host", "127.0.0.1",
             "--port", $port
         ) `

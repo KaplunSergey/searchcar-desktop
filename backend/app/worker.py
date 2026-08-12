@@ -25,7 +25,6 @@ from .models import (
 )
 from .parser import fingerprint_listing, material_changes, should_read_detail
 from .scanner import (
-    IdentityMismatchError,
     PriceConfirmationError,
     ScanError,
     collect_search_pages,
@@ -38,6 +37,7 @@ from .services import (
     mark_found_without_detail,
     upsert_detail,
 )
+from .reporting import dedupe_report
 
 
 class ScanCancelled(Exception):
@@ -54,9 +54,9 @@ def _reanchor_scheduler_after_manual_projects(
 ) -> None:
     payload = dict(job.payload or {})
     if (
-        job.kind != "PROJECTS"
+        getattr(job, "kind", None) != "PROJECTS"
         or payload.get("trigger") != "MANUAL"
-        or job.started_at is None
+        or getattr(job, "started_at", None) is None
     ):
         return
     setting = db.scalar(
@@ -153,6 +153,35 @@ def _finish_cancelled_job(
     db.commit()
 
 
+def _publish_project_results(
+    job: ScanRun,
+    payload: dict,
+    report: list[dict],
+    failures: list[str],
+    failure_details: list[dict],
+    project_statuses: dict[str, str],
+) -> None:
+    """Persist the completed-project portion so the UI can render it mid-scan."""
+
+    partial_report = _dedupe_report(report)
+    job.payload = {
+        **(job.payload or payload),
+        "current_project_id": None,
+        "project_statuses": project_statuses,
+        "report": partial_report,
+        "failures": list(failure_details),
+        "summary": {
+            "changed": len(partial_report),
+            "new": sum(item.get("change") == "NEW" for item in partial_report),
+            "price_changes": sum(
+                item.get("change") in {"PRICE_DROP", "PRICE_INCREASE"}
+                for item in partial_report
+            ),
+            "failed": len(failures),
+        },
+    }
+
+
 def _material_changes(old: dict, new: dict) -> list[dict]:
     return material_changes(old, new)
 
@@ -165,7 +194,7 @@ def _failure_detail(
     car: Car | None = None,
 ) -> dict:
     technical = str(exc)
-    if isinstance(exc, ScanError):
+    if isinstance(exc, ScanError) or isinstance(getattr(exc, "code", None), str):
         code = exc.code
     elif any(marker in technical for marker in ("ERR_TIMED_OUT", "Timeout", "timeout")):
         code = "TIMEOUT"
@@ -183,36 +212,7 @@ def _failure_detail(
 
 
 def _dedupe_report(report: list[dict]) -> list[dict]:
-    priority = {
-        "NEW": 0,
-        "PRICE_DROP": 1,
-        "PRICE_INCREASE": 1,
-        "MATERIAL_UPDATE": 2,
-    }
-    unique: dict[tuple[int | None, int | None], dict] = {}
-    for item in report:
-        if item.get("change") == "RELISTED":
-            continue
-        key = (item.get("project_id"), item.get("car_id"))
-        current = unique.get(key)
-        item_change = item.get("change")
-        current_change = current.get("change") if current else None
-        if (
-            current is None
-            or item_change == "SOLD"
-            or (
-                current_change != "SOLD"
-                and priority.get(item_change, 9) < priority.get(current_change, 9)
-            )
-        ):
-            unique[key] = item
-    return sorted(
-        unique.values(),
-        key=lambda item: (
-            priority.get(item.get("change"), 9),
-            item.get("updated_at") or "",
-        ),
-    )
+    return dedupe_report(report)
 
 
 def _known_car(db, source_id: str) -> Car | None:
@@ -424,6 +424,7 @@ def _change_report(
         "project_name": project.name,
         "encar_id": car.canonical_encar_id,
         "source_car_id": (car.details or {}).get("source_car_id"),
+        "registration_number": (car.details or {}).get("registration_number"),
         "previous_car_id": previous.car_id if previous else None,
         "before_snapshot_id": previous.snapshot_id if previous else None,
         "after_snapshot_id": after_snapshot_id,
@@ -487,6 +488,9 @@ def process_job(job_id: int) -> None:
         stop_for_captcha = False
 
         try:
+            from .desktop_license import require_search_entitlement
+
+            require_search_entitlement()
             from playwright.sync_api import sync_playwright
 
             with sync_playwright() as playwright:
@@ -641,17 +645,6 @@ def process_job(job_id: int) -> None:
                                     db.rollback()
                                     continue
                                 except ScanError as exc:
-                                    if (
-                                        isinstance(exc, IdentityMismatchError)
-                                        and not known_relation
-                                    ):
-                                        # Encar sometimes places a substituted
-                                        # or recommended listing behind a
-                                        # result URL. It is not a project
-                                        # failure when that source was never
-                                        # tracked.
-                                        db.rollback()
-                                        continue
                                     if known and known_relation:
                                         mark_found_without_detail(db, project, known)
                                         search_found_ids.add(
@@ -892,11 +885,14 @@ def process_job(job_id: int) -> None:
                         (job.payload or {}).get("project_statuses") or {}
                     )
                     project_statuses[str(project.id)] = project_run.status
-                    job.payload = {
-                        **(job.payload or payload),
-                        "current_project_id": None,
-                        "project_statuses": project_statuses,
-                    }
+                    _publish_project_results(
+                        job,
+                        payload,
+                        report,
+                        failures,
+                        failure_details,
+                        project_statuses,
+                    )
                     completed += 1
                     job.progress = round(completed / total_units * 100)
                     db.commit()
@@ -1121,10 +1117,12 @@ def process_job(job_id: int) -> None:
 
 
 def enqueue_scheduled(*, now: datetime | None = None) -> None:
+    from .desktop_license import evaluate_search_entitlement
     from .maintenance import maintenance_active
 
     if maintenance_active():
         return
+    entitlement = evaluate_search_entitlement()
     with SessionLocal.begin() as db:
         current = now or datetime.now(timezone.utc)
         settings_to_check = list(
@@ -1146,6 +1144,11 @@ def enqueue_scheduled(*, now: datetime | None = None) -> None:
                 )
                 continue
             if setting.next_run_at > current:
+                continue
+            if not entitlement.can_search:
+                setting.next_run_at = current + timedelta(
+                    minutes=setting.interval_minutes
+                )
                 continue
             overdue_seconds = (current - setting.next_run_at).total_seconds()
             if (

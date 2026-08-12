@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.database import Base
 from app.models import Car, CarAlias, PriceHistory, Project, ProjectCar, User
+from app.scanner import resolve_listing_identity
 from app.services import TrackingDisabledError, mark_absent, upsert_detail
 
 
@@ -56,6 +57,58 @@ def tracked_car(db: Session):
     db.add(relation)
     db.commit()
     return project, car, relation
+
+
+def test_clean_database_saves_listing_with_distinct_encar_ids(db):
+    user = User(
+        username="Owner",
+        username_key="owner",
+        password_hash="!test",
+        role="USER",
+        status="ACTIVE",
+        project_limit=1,
+    )
+    db.add(user)
+    db.flush()
+    project = Project(
+        owner_id=user.id,
+        name="Honda",
+        name_key="honda",
+        search_url="https://www.encar.com/fc/fc_carsearchlist.do",
+        scan_mode="ACCURATE",
+        auto_update=False,
+    )
+    db.add(project)
+    db.flush()
+
+    canonical_id, registration_id = resolve_listing_identity(
+        "42319346",
+        "등록번호 42318013",
+        resolved_url="https://fem.encar.com/cars/detail/42319346",
+    )
+    car = upsert_detail(
+        db,
+        project,
+        {
+            "canonical_car_id": canonical_id,
+            "source_car_id": canonical_id,
+            "displayed_car_id": registration_id,
+            "url": f"https://fem.encar.com/cars/detail/{canonical_id}",
+            "title": "Honda Accord",
+            "price_krw": 27_500_000,
+            "price_source": "DETAIL_PRIMARY",
+            "sold": False,
+            "checked_at": "2026-08-03T12:00:00+00:00",
+        },
+    )
+    db.commit()
+
+    assert car.canonical_encar_id == "42319346"
+    assert car.details["displayed_car_id"] == "42318013"
+    assert db.get(
+        ProjectCar,
+        {"project_id": project.id, "car_id": car.id},
+    ).search_status == "FOUND"
 
 
 def test_three_search_misses_never_mark_active_listing_sold(db):

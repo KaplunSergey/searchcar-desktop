@@ -51,14 +51,59 @@ test("ships required product surfaces and localization",async()=>{
   assert.match(page,/currentUser\.preferred_locale \|\| "ru"/);
   assert.match(page,/request<AuthUser>\("\/auth\/profile"/);
   assert.match(page,/newListingsCount > 0/);
+  assert.match(page,/const displayedReport = current && completedProjectCount \? current : latestReport/);
+  assert.match(page,/currentUpdateReport/);
+  assert.match(page,/didAutoOpen/);
+  assert.match(translations,/currentUpdateReport: "Промежуточный отчёт"/);
 });
-test("desktop dropdown controls use cross-platform styling",async()=>{
-  const [entry,desktopStyles]=await Promise.all([
+test("web and desktop dropdown controls use the same cross-platform styling",async()=>{
+  const [entry,sharedStyles,desktopStyles]=await Promise.all([
     readFile(new URL("desktop/frontend/main.tsx",root),"utf8"),
+    readFile(new URL("app/globals.css",root),"utf8"),
     readFile(new URL("desktop/frontend/desktop.css",root),"utf8"),
   ]);
   assert.match(entry,/import "\.\/desktop\.css"/);
-  assert.match(desktopStyles,/select\s*\{[^}]*appearance:\s*none/s);
-  assert.match(desktopStyles,/background-image:\s*url\(/);
-  assert.match(desktopStyles,/select:focus-visible/);
+  assert.match(desktopStyles,/reuses the shared dropdown styling/);
+  assert.match(sharedStyles,/select:not\(\[multiple\]\)\{[^}]*appearance:none/s);
+  assert.match(sharedStyles,/background-image:url\(/);
+  assert.match(sharedStyles,/background-position:right 16px center/);
+  assert.match(sharedStyles,/padding-right:44px!important/);
+  assert.match(sharedStyles,/select:not\(\[multiple\]\):focus-visible/);
+});
+test("desktop exit requires confirmation and preserves graceful scan cancellation",async()=>{
+  const [shell,runtime,queue]=await Promise.all([
+    readFile(new URL("desktop/src-tauri/src/lib.rs",root),"utf8"),
+    readFile(new URL("backend/app/desktop_runtime.py",root),"utf8"),
+    readFile(new URL("backend/app/job_queue.py",root),"utf8"),
+  ]);
+  assert.match(shell,/fn request_exit_confirmation/);
+  assert.match(shell,/Выйти и остановить поиск/);
+  assert.match(shell,/WindowEvent::CloseRequested/);
+  assert.match(shell,/RunEvent::ExitRequested/);
+  assert.match(shell,/request_sidecar_shutdown/);
+  assert.match(runtime,/request_shutdown_cancellation/);
+  assert.match(queue,/job\.status = "CANCEL_REQUESTED"/);
+  assert.match(queue,/cancellation_reason.*APPLICATION_SHUTDOWN/s);
+});
+test("desktop licensing keeps device secrets outside portable data",async()=>{
+  const [client,license,page,config]=await Promise.all([
+    readFile(new URL("backend/app/desktop_license_client.py",root),"utf8"),
+    readFile(new URL("backend/app/desktop_license.py",root),"utf8"),
+    readFile(new URL("app/page.tsx",root),"utf8"),
+    readFile(new URL("desktop/license-service.json",root),"utf8"),
+  ]);
+  assert.match(client,/class MacOSKeychainStore/);
+  assert.match(client,/class WindowsDpapiStore/);
+  assert.match(client,/SEARCHCAR-DEVICE-REQUEST-V1/);
+  assert.match(client,/run_periodic_license_sync/);
+  assert.match(license,/SEARCHCAR-LICENSE-LEASE-V1/);
+  assert.match(page,/desktop\/license\/trial/);
+  assert.match(page,/desktop\/license\/redeem/);
+  assert.match(page,/desktop\/license\/refresh/);
+  assert.deepEqual(JSON.parse(config),{
+    protocol_version:1,
+    service_url:"",
+    public_keys:{},
+    enforcement:"disabled",
+  });
 });

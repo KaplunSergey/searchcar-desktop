@@ -77,3 +77,9 @@ class DesktopMigrationIn(BaseModel):
 
 class ExternalUrlIn(BaseModel):
     url:str=Field(min_length=8,max_length=2048)
+
+class DesktopLicenseTrialIn(BaseModel):
+    subject:str=Field(min_length=3,max_length=254)
+
+class DesktopLicenseRedeemIn(BaseModel):
+    activation_code:str=Field(min_length=10,max_length=40)
