@@ -117,7 +117,7 @@ before(async () => {
     d1Databases: { LICENSE_DB: "license-tests" },
     bindings: {
       LICENSE_SIGNING_PRIVATE_KEY: privateKey,
-      LICENSE_SIGNING_KEY_ID: "test-key-v1",
+      LICENSE_SIGNING_KEY_ID: "test-key-v1-01",
       CODE_PEPPER: "test-code-pepper-with-enough-entropy",
       RATE_LIMIT_PEPPER: "test-rate-pepper-with-enough-entropy",
       ADMIN_API_TOKEN: "test-admin-token-with-enough-entropy",
