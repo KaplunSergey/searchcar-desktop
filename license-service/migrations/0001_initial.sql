@@ -1,5 +1,3 @@
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE schema_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
