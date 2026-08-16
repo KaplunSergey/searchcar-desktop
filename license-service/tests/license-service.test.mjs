@@ -11,6 +11,38 @@ const migration = await readFile(
   "utf8",
 );
 
+function splitMigrationStatements(sql) {
+  const statements = [];
+  let start = 0;
+  let quote = null;
+
+  for (let index = 0; index < sql.length; index += 1) {
+    const character = sql[index];
+    if (quote !== null) {
+      if (character === quote) {
+        if (sql[index + 1] === quote) {
+          index += 1;
+        } else {
+          quote = null;
+        }
+      }
+      continue;
+    }
+    if (character === "'" || character === '"' || character === "`") {
+      quote = character;
+      continue;
+    }
+    if (character !== ";") continue;
+    const statement = sql.slice(start, index).trim();
+    if (statement) statements.push(statement);
+    start = index + 1;
+  }
+
+  const finalStatement = sql.slice(start).trim();
+  if (finalStatement) statements.push(finalStatement);
+  return statements;
+}
+
 function base64Url(bytes) {
   return Buffer.from(bytes).toString("base64url");
 }
@@ -97,7 +129,9 @@ before(async () => {
   });
   await mf.ready;
   database = await mf.getD1Database("LICENSE_DB");
-  await database.exec(migration);
+  for (const statement of splitMigrationStatements(migration)) {
+    await database.prepare(statement).run();
+  }
   localRuntimeAvailable = true;
 });
 
