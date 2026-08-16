@@ -675,12 +675,6 @@ export async function approveAdminTransfer(env: Env, value: unknown, now: Date) 
   try {
     await env.LICENSE_DB.batch([
       env.LICENSE_DB.prepare(
-        `UPDATE device_transfers
-            SET status = 'APPROVED', license_id = ?, old_device_id = ?,
-                new_device_id = ?, approved_at = ?, approved_by = 'bootstrap-token'
-          WHERE id = ? AND status = 'PENDING'`,
-      ).bind(licenseId, oldDevice.id, newDeviceId, nowIso, transfer.id),
-      env.LICENSE_DB.prepare(
         `UPDATE devices
             SET is_active = 0, deactivated_at = ?
           WHERE id = ? AND license_id = ? AND is_active = 1`,
@@ -700,6 +694,12 @@ export async function approveAdminTransfer(env: Env, value: unknown, now: Date) 
         nowIso,
         nowIso,
       ),
+      env.LICENSE_DB.prepare(
+        `UPDATE device_transfers
+            SET status = 'APPROVED', license_id = ?, old_device_id = ?,
+                new_device_id = ?, approved_at = ?, approved_by = 'bootstrap-token'
+          WHERE id = ? AND status = 'PENDING'`,
+      ).bind(licenseId, oldDevice.id, newDeviceId, nowIso, transfer.id),
       env.LICENSE_DB.prepare(
         "UPDATE licenses SET activation_count = activation_count + 1, updated_at = ? WHERE id = ?",
       ).bind(nowIso, licenseId),
