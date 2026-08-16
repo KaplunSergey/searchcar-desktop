@@ -110,6 +110,26 @@ export async function verifyDeviceProof(request: SignedDeviceRequest): Promise<v
   if (publicKeyBytes.byteLength !== 32) {
     throw new ApiError(400, "INVALID_DEVICE_KEY", "The device public key is invalid.");
   }
+  const fingerprintPrefix = encoder.encode("SEARCHCAR-DEVICE-FINGERPRINT-V1\n");
+  const fingerprintInput = new Uint8Array(
+    fingerprintPrefix.byteLength + publicKeyBytes.byteLength,
+  );
+  fingerprintInput.set(fingerprintPrefix, 0);
+  fingerprintInput.set(new Uint8Array(publicKeyBytes), fingerprintPrefix.byteLength);
+  const fingerprintDigest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", fingerprintInput),
+  );
+  const expectedFingerprint = Array.from(
+    fingerprintDigest,
+    (byte) => byte.toString(16).padStart(2, "0"),
+  ).join("");
+  if (request.device.fingerprint_hash !== expectedFingerprint) {
+    throw new ApiError(
+      400,
+      "INVALID_DEVICE_FINGERPRINT",
+      "The device fingerprint is invalid.",
+    );
+  }
   const signature = base64UrlDecode(request.proof);
   if (signature.byteLength !== 64) {
     throw new ApiError(401, "INVALID_DEVICE_PROOF", "The device proof is invalid.");
@@ -151,6 +171,33 @@ export async function signLease(
   const key = await importSigningKey(env);
   const message = encoder.encode(`SEARCHCAR-LICENSE-LEASE-V1\n${canonicalJson(payload)}`);
   const signature = await crypto.subtle.sign({ name: "Ed25519" }, key, message);
+  try {
+    const publicKeyBytes = base64UrlDecode(env.LICENSE_SIGNING_PUBLIC_KEY);
+    if (publicKeyBytes.byteLength !== 32) throw new Error("invalid public key length");
+    const publicKey = await crypto.subtle.importKey(
+      "raw",
+      publicKeyBytes,
+      { name: "Ed25519" },
+      false,
+      ["verify"],
+    );
+    const matches = await crypto.subtle.verify(
+      { name: "Ed25519" },
+      publicKey,
+      signature,
+      message,
+    );
+    if (!matches) {
+      throw new ApiError(500, "SIGNING_KEY_MISMATCH", "The signing key pair does not match.");
+    }
+  } catch (error) {
+    if (error instanceof ApiError && error.code === "SIGNING_KEY_MISMATCH") throw error;
+    throw new ApiError(
+      500,
+      "SIGNING_PUBLIC_KEY_INVALID",
+      "The signing public key is unavailable.",
+    );
+  }
   return { payload, signature: base64UrlEncode(signature) };
 }
 

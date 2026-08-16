@@ -1,6 +1,7 @@
 export interface Env {
   LICENSE_DB: D1Database;
   LICENSE_SIGNING_PRIVATE_KEY: string;
+  LICENSE_SIGNING_PUBLIC_KEY: string;
   LICENSE_SIGNING_KEY_ID: string;
   CODE_PEPPER: string;
   RATE_LIMIT_PEPPER: string;

@@ -36,6 +36,7 @@ jobs:
       CARGO_TERM_COLOR: always
       PLAYWRIGHT_SKIP_BROWSER_GC: "1"
       PYTHONUTF8: "1"
+      SEARCHCAR_MACOS_LOCAL_KEY_FALLBACK: "1"
 
     steps:
       - name: Check out source

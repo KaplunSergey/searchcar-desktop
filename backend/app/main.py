@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import logging
 import os
 import shutil
 import webbrowser
@@ -84,6 +85,8 @@ from .schemas import (
 )
 from .services import merge_reliable_detail
 from .reporting import dedupe_report
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="SearchCar API", version=settings.app_version)
 app.add_middleware(
@@ -2162,7 +2165,7 @@ def _desktop_license_admin(current: User) -> None:
         raise HTTPException(403, "admin_required")
 
 
-def _desktop_license_operation(operation) -> dict:
+def _desktop_license_operation(action: str, operation) -> dict:
     from .desktop_license_client import LicenseClientError, LicenseServiceClient
 
     try:
@@ -2172,7 +2175,23 @@ def _desktop_license_operation(operation) -> dict:
         status = exc.http_status
         if status in {401, 403}:
             status = 409
+        logger.warning(
+            "Desktop license operation failed: action=%s code=%s http_status=%s cause_type=%s",
+            action,
+            exc.code,
+            status,
+            type(exc.__cause__).__name__ if exc.__cause__ is not None else "none",
+        )
         raise HTTPException(status, exc.code.lower()) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Desktop license operation failed unexpectedly: action=%s error_type=%s",
+            action,
+            type(exc).__name__,
+        )
+        raise HTTPException(500, "license_internal_error") from None
 
 
 @app.post("/api/desktop/license/trial")
@@ -2181,13 +2200,15 @@ def activate_desktop_trial(
     current: User = Depends(require_csrf),
 ) -> dict:
     _desktop_license_admin(current)
-    return _desktop_license_operation(lambda client: client.activate_trial(body.subject))
+    return _desktop_license_operation(
+        "trial", lambda client: client.activate_trial(body.subject)
+    )
 
 
 @app.post("/api/desktop/license/refresh")
 def refresh_desktop_license(current: User = Depends(require_csrf)) -> dict:
     _desktop_license_admin(current)
-    return _desktop_license_operation(lambda client: client.refresh())
+    return _desktop_license_operation("refresh", lambda client: client.refresh())
 
 
 @app.post("/api/desktop/license/redeem")
@@ -2197,6 +2218,7 @@ def redeem_desktop_license(
 ) -> dict:
     _desktop_license_admin(current)
     return _desktop_license_operation(
+        "redeem",
         lambda client: client.redeem(body.activation_code)
     )
 

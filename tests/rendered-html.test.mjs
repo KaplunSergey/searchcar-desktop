@@ -81,16 +81,23 @@ test("desktop exit requires confirmation and preserves graceful scan cancellatio
   assert.match(shell,/WindowEvent::CloseRequested/);
   assert.match(shell,/RunEvent::ExitRequested/);
   assert.match(shell,/request_sidecar_shutdown/);
+  assert.match(shell,/SEARCHCAR_DESKTOP_PARENT_PID/);
+  assert.match(shell,/--allow-device-key-file-fallback/);
+  assert.match(shell,/RunEvent::Exit => stop_sidecar/);
   assert.match(runtime,/request_shutdown_cancellation/);
+  assert.match(runtime,/class DesktopInstanceLock/);
+  assert.match(runtime,/watch_parent_process/);
+  assert.match(runtime,/allow-device-key-file-fallback/);
   assert.match(queue,/job\.status = "CANCEL_REQUESTED"/);
   assert.match(queue,/cancellation_reason.*APPLICATION_SHUTDOWN/s);
 });
 test("desktop licensing keeps device secrets outside portable data",async()=>{
-  const [client,license,page,config]=await Promise.all([
+  const [client,license,page,config,workerConfig]=await Promise.all([
     readFile(new URL("backend/app/desktop_license_client.py",root),"utf8"),
     readFile(new URL("backend/app/desktop_license.py",root),"utf8"),
     readFile(new URL("app/page.tsx",root),"utf8"),
     readFile(new URL("desktop/license-service.json",root),"utf8"),
+    readFile(new URL("license-service/wrangler.jsonc",root),"utf8"),
   ]);
   assert.match(client,/class MacOSKeychainStore/);
   assert.match(client,/class WindowsDpapiStore/);
@@ -100,10 +107,21 @@ test("desktop licensing keeps device secrets outside portable data",async()=>{
   assert.match(page,/desktop\/license\/trial/);
   assert.match(page,/desktop\/license\/redeem/);
   assert.match(page,/desktop\/license\/refresh/);
-  assert.deepEqual(JSON.parse(config),{
-    protocol_version:1,
-    service_url:"",
-    public_keys:{},
-    enforcement:"disabled",
-  });
+  assert.match(page,/function responseErrorCode/);
+  assert.match(page,/function licenseErrorMessage/);
+  assert.match(page,/className="license-action-error" role="alert"/);
+  assert.match(page,/LICENSE_SERVICE_CONNECT_FAILED/i);
+  const licenseConfig=JSON.parse(config);
+  assert.equal(licenseConfig.protocol_version,1);
+  assert.equal(licenseConfig.enforcement,"disabled");
+  assert.equal(licenseConfig.device_key_storage,"file-preview");
+  assert.match(licenseConfig.service_url,/^https:\/\/[a-z0-9.-]+$/u);
+  assert.match(licenseConfig.public_keys["searchcar-license-v1"],/^[A-Za-z0-9_-]{43}$/u);
+  const workerLicenseConfig=JSON.parse(workerConfig);
+  const workerKeyId=workerLicenseConfig.vars.LICENSE_SIGNING_KEY_ID;
+  assert.equal(workerKeyId,"searchcar-license-v1");
+  assert.equal(
+    workerLicenseConfig.vars.LICENSE_SIGNING_PUBLIC_KEY,
+    licenseConfig.public_keys[workerKeyId],
+  );
 });

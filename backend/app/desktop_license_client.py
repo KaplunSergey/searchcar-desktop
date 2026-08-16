@@ -1,8 +1,9 @@
 """Native desktop identity and Cloudflare license-service synchronization.
 
 The device signing seed is never stored in SQLite or a SearchCar backup.  On
-macOS it lives in the user's Keychain.  On Windows only a DPAPI-protected blob
-is written under the excluded ``license`` directory.
+macOS it normally lives in the user's Keychain, with a mode-0600 file fallback
+for local ad-hoc builds that macOS refuses to authorize.  On Windows only a
+DPAPI-protected blob is written under the excluded ``license`` directory.
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ from pathlib import Path
 import platform
 import re
 import secrets
-import subprocess
 import sys
 import threading
 from typing import Any, Protocol
@@ -50,11 +50,14 @@ DEVICE_MESSAGE_PREFIX = "SEARCHCAR-DEVICE-REQUEST-V1\n"
 KEYCHAIN_SERVICE = "com.searchcar.desktop.device-signing"
 KEYCHAIN_ACCOUNT = "device-signing-key-v1"
 DPAPI_KEY_NAME = "device-key.dpapi"
+MACOS_FILE_KEY_NAME = "device-key.macos"
 MAX_LICENSE_RESPONSE_BYTES = 128 * 1024
 _LICENSE_OPERATION_LOCK = threading.Lock()
+_DEVICE_IDENTITY_LOCK = threading.Lock()
 _ACTIVATION_CODE = re.compile(
     r"^SC-[23456789A-HJ-NP-Z]{5}(?:-[23456789A-HJ-NP-Z]{5}){3}$"
 )
+_REMOTE_ERROR_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 logger = logging.getLogger(__name__)
 
 
@@ -76,6 +79,8 @@ def _base64url(value: bytes) -> str:
 
 
 def _decode_secret(value: str) -> bytes:
+    if re.fullmatch(r"[A-Za-z0-9_-]{43}", value) is None:
+        raise LicenseClientError("LICENSE_DEVICE_KEY_INVALID")
     try:
         decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
     except (ValueError, UnicodeError) as exc:
@@ -85,68 +90,346 @@ def _decode_secret(value: str) -> bytes:
     return decoded
 
 
-class MacOSKeychainStore:
-    """Store the Ed25519 seed in the login Keychain without argv disclosure."""
+class MacOSKeychainApi:
+    """ctypes bridge for a login-Keychain generic password, without a CLI prompt."""
 
-    executable = "/usr/bin/security"
+    _ERR_SEC_SUCCESS = 0
+    _ERR_SEC_ITEM_NOT_FOUND = -25300
+
+    def __init__(self) -> None:
+        import ctypes
+
+        self.ctypes = ctypes
+        self.security = ctypes.CDLL(
+            "/System/Library/Frameworks/Security.framework/Security"
+        )
+        self.core_foundation = ctypes.CDLL(
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+        )
+        self._configure_functions()
+        self.service = KEYCHAIN_SERVICE.encode("utf-8")
+        self.account = KEYCHAIN_ACCOUNT.encode("utf-8")
+
+    def _configure_functions(self) -> None:
+        ctypes = self.ctypes
+        self.security.SecKeychainCopyDefault.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+        self.security.SecKeychainCopyDefault.restype = ctypes.c_int32
+        self.security.SecKeychainFindGenericPassword.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+            ctypes.c_char_p,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        self.security.SecKeychainFindGenericPassword.restype = ctypes.c_int32
+        self.security.SecKeychainAddGenericPassword.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        self.security.SecKeychainAddGenericPassword.restype = ctypes.c_int32
+        self.security.SecKeychainItemModifyAttributesAndData.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        self.security.SecKeychainItemModifyAttributesAndData.restype = ctypes.c_int32
+        self.security.SecKeychainItemFreeContent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        self.security.SecKeychainItemFreeContent.restype = ctypes.c_int32
+        self.core_foundation.CFRelease.argtypes = [ctypes.c_void_p]
+
+    def _find(self, *, include_password: bool) -> tuple[int, int | None, bytes | None]:
+        length = self.ctypes.c_uint32()
+        password = self.ctypes.c_void_p()
+        item = self.ctypes.c_void_p()
+        keychain = self.ctypes.c_void_p()
+        status = self.security.SecKeychainCopyDefault(self.ctypes.byref(keychain))
+        if status != self._ERR_SEC_SUCCESS:
+            return status, None, None
+        try:
+            status = self.security.SecKeychainFindGenericPassword(
+                keychain,
+                len(self.service),
+                self.service,
+                len(self.account),
+                self.account,
+                self.ctypes.byref(length) if include_password else None,
+                self.ctypes.byref(password) if include_password else None,
+                self.ctypes.byref(item),
+            )
+            if status != self._ERR_SEC_SUCCESS:
+                return status, None, None
+            value = self.ctypes.string_at(password, length.value) if include_password else None
+            return status, item.value, value
+        finally:
+            if include_password and password.value:
+                self.security.SecKeychainItemFreeContent(None, password)
+            self._release_item(keychain.value)
+
+    def _release_item(self, item: int | None) -> None:
+        if item:
+            self.core_foundation.CFRelease(item)
 
     def load(self) -> bytes | None:
-        result = subprocess.run(
-            [
-                self.executable,
-                "find-generic-password",
-                "-a",
-                KEYCHAIN_ACCOUNT,
-                "-s",
-                KEYCHAIN_SERVICE,
-                "-w",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 44:
-            return None
-        if result.returncode != 0:
-            raise LicenseClientError("LICENSE_KEYCHAIN_UNAVAILABLE")
-        return _decode_secret(result.stdout.strip())
+        status, item, value = self._find(include_password=True)
+        try:
+            if status == self._ERR_SEC_ITEM_NOT_FOUND:
+                return None
+            if status != self._ERR_SEC_SUCCESS:
+                raise OSError(f"SecKeychainFindGenericPassword failed: {status}")
+            return value
+        finally:
+            self._release_item(item)
 
     def save(self, value: bytes) -> None:
-        # Omitting the value after -w makes `security` read it from stdin, so
-        # the private seed never appears in the process list.
-        result = subprocess.run(
-            [
-                self.executable,
-                "add-generic-password",
-                "-U",
-                "-a",
-                KEYCHAIN_ACCOUNT,
-                "-s",
-                KEYCHAIN_SERVICE,
-                "-l",
-                "SearchCar device signing key",
-                "-w",
-            ],
-            input=_base64url(value) + "\n",
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            raise LicenseClientError("LICENSE_KEYCHAIN_UNAVAILABLE")
+        status, item, _ = self._find(include_password=False)
+        buffer = self.ctypes.create_string_buffer(value)
+        try:
+            if status == self._ERR_SEC_ITEM_NOT_FOUND:
+                new_item = self.ctypes.c_void_p()
+                keychain = self.ctypes.c_void_p()
+                status = self.security.SecKeychainCopyDefault(self.ctypes.byref(keychain))
+                if status != self._ERR_SEC_SUCCESS:
+                    raise OSError(f"SecKeychainCopyDefault failed: {status}")
+                status = self.security.SecKeychainAddGenericPassword(
+                    keychain,
+                    len(self.service),
+                    self.service,
+                    len(self.account),
+                    self.account,
+                    len(value),
+                    buffer,
+                    self.ctypes.byref(new_item),
+                )
+                self._release_item(new_item.value)
+                self._release_item(keychain.value)
+            elif status == self._ERR_SEC_SUCCESS:
+                status = self.security.SecKeychainItemModifyAttributesAndData(
+                    item, None, len(value), buffer
+                )
+            if status != self._ERR_SEC_SUCCESS:
+                raise OSError(f"SecKeychain add/update failed: {status}")
+        finally:
+            self._release_item(item)
+
+
+class MacOSKeychainStore:
+    """Store the Ed25519 seed using the native macOS Keychain API."""
+
+    def __init__(self, api: MacOSKeychainApi | None = None):
+        self.api = api or MacOSKeychainApi()
+
+    def load(self) -> bytes | None:
+        try:
+            value = self.api.load()
+        except OSError as exc:
+            raise LicenseClientError("LICENSE_KEYCHAIN_UNAVAILABLE") from exc
+        if value is None or len(value) == 32:
+            return value
+        # Builds before the native Security.framework bridge stored the same
+        # seed as 43 ASCII base64url bytes. Migrate it in place so an upgrade
+        # never changes the device identity or loses an existing binding.
+        try:
+            decoded = _decode_secret(value.decode("ascii"))
+            self.api.save(decoded)
+            persisted = self.api.load()
+        except UnicodeDecodeError as exc:
+            raise LicenseClientError("LICENSE_DEVICE_KEY_INVALID") from exc
+        except OSError as exc:
+            raise LicenseClientError("LICENSE_KEYCHAIN_UNAVAILABLE") from exc
+        if persisted != decoded:
+            raise LicenseClientError("LICENSE_DEVICE_KEY_PERSISTENCE_FAILED")
+        value = decoded
+        return value
+
+    def save(self, value: bytes) -> None:
+        try:
+            self.api.save(value)
+        except OSError as exc:
+            raise LicenseClientError("LICENSE_KEYCHAIN_UNAVAILABLE") from exc
 
 
 def _atomic_bytes(path: Path, value: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(6)}.tmp")
-    temporary.write_bytes(value)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(temporary, flags, 0o600)
     try:
-        temporary.chmod(0o600)
-    except OSError:
-        pass
-    os.replace(temporary, path)
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
+        remaining = memoryview(value)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("device key write failed")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+        if os.name != "nt" and os.fstat(descriptor).st_mode & 0o077:
+            raise OSError("device key permissions are not private")
+    except Exception:
+        os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+        raise
+    os.close(descriptor)
+    try:
+        os.replace(temporary, path)
+        if os.name != "nt" and path.stat().st_mode & 0o077:
+            path.unlink(missing_ok=True)
+            raise OSError("device key permissions are not private")
+        if os.name != "nt":
+            directory_descriptor = os.open(
+                path.parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+class MacOSDeviceSecretStore:
+    """Prefer Keychain and keep a private fallback for unreliable local builds."""
+
+    def __init__(
+        self,
+        data_dir: Path,
+        *,
+        keychain: DeviceSecretStore | None = None,
+        allow_file_fallback: bool = False,
+    ):
+        self.keychain = keychain or MacOSKeychainStore()
+        self.path = data_dir / LICENSE_DIRECTORY_NAME / MACOS_FILE_KEY_NAME
+        self.allow_file_fallback = allow_file_fallback
+
+    def _load_file(self) -> bytes | None:
+        return _load_private_device_key_file(self.path)
+
+    def load(self) -> bytes | None:
+        # Once the fallback was needed it becomes authoritative. Otherwise a
+        # temporarily inaccessible old Keychain item could reappear later and
+        # silently switch this installation to a different device identity.
+        file_value = self._load_file()
+        if file_value is not None:
+            if self.allow_file_fallback:
+                return file_value
+            try:
+                keychain_value = self.keychain.load()
+            except LicenseClientError as exc:
+                if exc.code != "LICENSE_KEYCHAIN_UNAVAILABLE":
+                    raise
+                raise LicenseClientError(
+                    "LICENSE_FILE_FALLBACK_DISABLED"
+                ) from exc
+            if keychain_value is None:
+                try:
+                    self.keychain.save(file_value)
+                    keychain_value = self.keychain.load()
+                except LicenseClientError as exc:
+                    if exc.code != "LICENSE_KEYCHAIN_UNAVAILABLE":
+                        raise
+                    raise LicenseClientError(
+                        "LICENSE_FILE_FALLBACK_DISABLED"
+                    ) from exc
+            if keychain_value != file_value:
+                raise LicenseClientError("LICENSE_FILE_FALLBACK_DISABLED")
+            try:
+                self.path.unlink()
+            except OSError as exc:
+                raise LicenseClientError(
+                    "LICENSE_DEVICE_KEY_PERSISTENCE_FAILED"
+                ) from exc
+            return keychain_value
+        try:
+            value = self.keychain.load()
+        except LicenseClientError as exc:
+            if exc.code != "LICENSE_KEYCHAIN_UNAVAILABLE":
+                raise
+        else:
+            if value is not None:
+                return value
+        return None
+
+    def save(self, value: bytes) -> None:
+        try:
+            self.keychain.save(value)
+        except LicenseClientError as exc:
+            if exc.code != "LICENSE_KEYCHAIN_UNAVAILABLE":
+                raise
+        else:
+            try:
+                persisted = self.keychain.load()
+            except LicenseClientError as exc:
+                if exc.code != "LICENSE_KEYCHAIN_UNAVAILABLE":
+                    raise
+            else:
+                if persisted == value:
+                    return
+                if persisted is not None:
+                    raise LicenseClientError(
+                        "LICENSE_DEVICE_KEY_PERSISTENCE_FAILED"
+                    )
+        # An ad-hoc signed macOS build can report a successful Keychain write
+        # and then deny or hide the same item on readback. Only that unreliable
+        # path receives the excluded mode-0600 fallback; a working production
+        # Keychain never leaves the raw seed on disk.
+        if not self.allow_file_fallback:
+            raise LicenseClientError("LICENSE_KEYCHAIN_UNAVAILABLE")
+        try:
+            _atomic_bytes(self.path, value)
+        except OSError as exc:
+            raise LicenseClientError(
+                "LICENSE_DEVICE_KEY_PERSISTENCE_FAILED"
+            ) from exc
+
+
+def _load_private_device_key_file(path: Path) -> bytes | None:
+    if not path.exists():
+        return None
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise OSError("device key path is not a regular file")
+        path.chmod(0o600)
+        metadata = path.stat()
+        if metadata.st_size != 32 or metadata.st_mode & 0o077:
+            raise OSError("device key file is not private")
+        value = path.read_bytes()
+    except OSError as exc:
+        raise LicenseClientError("LICENSE_DEVICE_KEY_INVALID") from exc
+    if len(value) != 32:
+        raise LicenseClientError("LICENSE_DEVICE_KEY_INVALID")
+    return value
+
+
+class MacOSPreviewFileSecretStore:
+    """Preview-only macOS store independent of unsigned-app Keychain access."""
+
+    def __init__(self, data_dir: Path):
+        self.path = data_dir / LICENSE_DIRECTORY_NAME / MACOS_FILE_KEY_NAME
+
+    def load(self) -> bytes | None:
+        return _load_private_device_key_file(self.path)
+
+    def save(self, value: bytes) -> None:
+        if len(value) != 32:
+            raise LicenseClientError("LICENSE_DEVICE_KEY_INVALID")
+        try:
+            _atomic_bytes(self.path, value)
+        except OSError as exc:
+            raise LicenseClientError(
+                "LICENSE_DEVICE_KEY_PERSISTENCE_FAILED"
+            ) from exc
 
 
 class WindowsDpapiStore:
@@ -245,7 +528,22 @@ class WindowsDpapiStore:
 
 def native_secret_store(data_dir: Path) -> DeviceSecretStore:
     if sys.platform == "darwin":
-        return MacOSKeychainStore()
+        try:
+            configured_storage = _configured_license_document().get(
+                "device_key_storage", "keychain"
+            )
+        except LicenseStateError as exc:
+            raise LicenseClientError(exc.code) from exc
+        if configured_storage == "file-preview":
+            return MacOSPreviewFileSecretStore(data_dir)
+        if configured_storage != "keychain":
+            raise LicenseClientError("LICENSE_CONFIG_INVALID")
+        return MacOSDeviceSecretStore(
+            data_dir,
+            allow_file_fallback=(
+                os.environ.get("SEARCHCAR_ALLOW_DEVICE_KEY_FILE_FALLBACK") == "1"
+            ),
+        )
     if sys.platform == "win32":
         return WindowsDpapiStore(data_dir)
     raise LicenseClientError("LICENSE_SECURE_STORE_UNAVAILABLE")
@@ -282,7 +580,7 @@ class DeviceIdentity:
         return {**unsigned, "proof": _base64url(signature)}
 
 
-def load_or_create_device_identity(
+def _load_or_create_device_identity_unlocked(
     data_dir: Path,
     *,
     store: DeviceSecretStore | None = None,
@@ -319,6 +617,23 @@ def load_or_create_device_identity(
         fingerprint_hash=fingerprint,
         label=label,
     )
+
+
+def load_or_create_device_identity(
+    data_dir: Path,
+    *,
+    store: DeviceSecretStore | None = None,
+    device_label: str | None = None,
+) -> DeviceIdentity:
+    # Client construction happens before the higher-level operation lock. Keep
+    # first-run identity creation atomic so concurrent API requests cannot
+    # activate one key while another key wins the persistence race.
+    with _DEVICE_IDENTITY_LOCK:
+        return _load_or_create_device_identity_unlocked(
+            data_dir,
+            store=store,
+            device_label=device_label,
+        )
 
 
 def configured_service_url() -> str:
@@ -364,6 +679,7 @@ class LicenseServiceClient:
 
     def _post(self, path: str, extra: dict[str, Any]) -> dict[str, Any]:
         body = self.identity.signed_request(extra)
+        content = json.dumps(body, separators=(",", ":")).encode("utf-8")
         try:
             with httpx.Client(
                 timeout=httpx.Timeout(12.0, connect=5.0),
@@ -371,14 +687,30 @@ class LicenseServiceClient:
                 trust_env=False,
                 transport=self.transport,
             ) as client:
-                response = client.post(
-                    self.service_url + path,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Idempotency-Key": body["request_id"],
-                    },
-                    content=json.dumps(body, separators=(",", ":")).encode("utf-8"),
-                )
+                for attempt in range(2):
+                    try:
+                        response = client.post(
+                            self.service_url + path,
+                            headers={
+                                "Content-Type": "application/json",
+                                "Idempotency-Key": body["request_id"],
+                            },
+                            content=content,
+                        )
+                        break
+                    except (httpx.TransportError, OSError):
+                        if attempt == 1:
+                            raise
+                else:  # pragma: no cover - the loop always returns or raises.
+                    raise LicenseClientError("LICENSE_SERVICE_UNAVAILABLE")
+        except httpx.ConnectTimeout as exc:
+            raise LicenseClientError("LICENSE_SERVICE_CONNECT_TIMEOUT") from exc
+        except httpx.ConnectError as exc:
+            raise LicenseClientError("LICENSE_SERVICE_CONNECT_FAILED") from exc
+        except httpx.ReadTimeout as exc:
+            raise LicenseClientError("LICENSE_SERVICE_RESPONSE_TIMEOUT") from exc
+        except httpx.TimeoutException as exc:
+            raise LicenseClientError("LICENSE_SERVICE_TIMEOUT") from exc
         except (httpx.HTTPError, OSError) as exc:
             raise LicenseClientError("LICENSE_SERVICE_UNAVAILABLE") from exc
         if len(response.content) > MAX_LICENSE_RESPONSE_BYTES:
@@ -393,7 +725,9 @@ class LicenseServiceClient:
             error = envelope.get("error")
             code = error.get("code") if isinstance(error, dict) else None
             raise LicenseClientError(
-                code if isinstance(code, str) else "LICENSE_SERVICE_REJECTED",
+                code
+                if isinstance(code, str) and _REMOTE_ERROR_CODE.fullmatch(code)
+                else "LICENSE_SERVICE_REJECTED",
                 http_status=response.status_code if 400 <= response.status_code < 500 else 503,
             )
         data = envelope.get("data")

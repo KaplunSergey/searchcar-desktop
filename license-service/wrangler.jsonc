@@ -12,6 +12,7 @@
   },
   "vars": {
     "LICENSE_SIGNING_KEY_ID": "searchcar-license-v1",
+    "LICENSE_SIGNING_PUBLIC_KEY": "yuEaFu6U3l53W4umYMqu3wj_-uLcvEQpS-U4lq8eqyI",
     "LEASE_HOURS": "48",
     "TRIAL_DAYS": "30",
     "PUBLIC_RATE_LIMIT_PER_MINUTE": "30",

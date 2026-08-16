@@ -11,6 +11,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/license-service.yml"
+      - "desktop/license-service.json"
       - "license-service/**"
       - "scripts/generate_license_signing_key.mjs"
       - "package.json"
@@ -19,6 +20,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/license-service.yml"
+      - "desktop/license-service.json"
       - "license-service/**"
       - "scripts/generate_license_signing_key.mjs"
       - "package.json"

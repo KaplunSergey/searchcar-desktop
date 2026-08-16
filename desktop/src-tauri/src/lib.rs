@@ -256,25 +256,39 @@ pub fn run() {
             let license_config = app.path().resource_dir()?.join("license-service.json");
             std::fs::create_dir_all(&data_dir)?;
 
+            let mut sidecar_arguments = vec![
+                "serve".to_string(),
+                "--host".to_string(),
+                "127.0.0.1".to_string(),
+                "--port".to_string(),
+                port.to_string(),
+                "--data-dir".to_string(),
+                data_dir.to_string_lossy().into_owned(),
+                "--frontend-dir".to_string(),
+                frontend_dir.to_string_lossy().into_owned(),
+                "--browser-dir".to_string(),
+                browser_dir.to_string_lossy().into_owned(),
+                "--playwright-driver-dir".to_string(),
+                playwright_driver_dir.to_string_lossy().into_owned(),
+            ];
+            if option_env!("SEARCHCAR_MACOS_LOCAL_KEY_FALLBACK") == Some("1") {
+                // A command-line flag survives the onefile sidecar boundary
+                // even when a bundled macOS process drops a custom env var.
+                sidecar_arguments.push("--allow-device-key-file-fallback".to_string());
+            }
             let command = app
                 .shell()
                 .sidecar("searchcar-core")?
-                .args(vec![
-                    "serve".to_string(),
-                    "--host".to_string(),
-                    "127.0.0.1".to_string(),
-                    "--port".to_string(),
-                    port.to_string(),
-                    "--data-dir".to_string(),
-                    data_dir.to_string_lossy().into_owned(),
-                    "--frontend-dir".to_string(),
-                    frontend_dir.to_string_lossy().into_owned(),
-                    "--browser-dir".to_string(),
-                    browser_dir.to_string_lossy().into_owned(),
-                    "--playwright-driver-dir".to_string(),
-                    playwright_driver_dir.to_string_lossy().into_owned(),
-                ])
+                .args(sidecar_arguments)
                 .env("SEARCHCAR_DESKTOP_SESSION_SECRET", &secret)
+                .env(
+                    "SEARCHCAR_DESKTOP_PARENT_PID",
+                    std::process::id().to_string(),
+                )
+                .env(
+                    "SEARCHCAR_ALLOW_DEVICE_KEY_FILE_FALLBACK",
+                    option_env!("SEARCHCAR_MACOS_LOCAL_KEY_FALLBACK").unwrap_or("0"),
+                )
                 .env("SEARCHCAR_LICENSE_CONFIG_FILE", license_config);
             let (mut events, child) = command.spawn()?;
             *app.state::<SidecarState>().0.lock().expect("sidecar state") =
@@ -400,8 +414,8 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("failed to run SearchCar Desktop");
-    app.run(|app, event| {
-        if let RunEvent::ExitRequested { api, .. } = event {
+    app.run(|app, event| match event {
+        RunEvent::ExitRequested { api, .. } => {
             if app
                 .state::<LifecycleState>()
                 .explicit_exit
@@ -413,5 +427,7 @@ pub fn run() {
                 request_exit_confirmation(app);
             }
         }
+        RunEvent::Exit => stop_sidecar(app),
+        _ => {}
     });
 }

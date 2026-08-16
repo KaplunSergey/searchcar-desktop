@@ -97,6 +97,7 @@ async function readJson(request: Request): Promise<unknown> {
 function requireConfigured(env: Env): void {
   const required: Array<keyof Env> = [
     "LICENSE_SIGNING_PRIVATE_KEY",
+    "LICENSE_SIGNING_PUBLIC_KEY",
     "LICENSE_SIGNING_KEY_ID",
     "CODE_PEPPER",
     "RATE_LIMIT_PEPPER",

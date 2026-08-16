@@ -195,6 +195,8 @@ The first two M7 increments are implemented locally:
   production Worker URL and verification key are supplied.
 
 M7 is not complete: transfer UI, Rust verification, production keys/enforcement
-and installed macOS/Windows secure-store validation remain.
+and installed macOS/Windows secure-store validation remain. The Windows x64
+build and installed-OS pilot are deliberately deferred until after the current
+macOS license-service rollout.
 Native tray notifications and installed-OS scheduler tests remain tracked as M5
 polish. OS autostart is explicitly out of scope.

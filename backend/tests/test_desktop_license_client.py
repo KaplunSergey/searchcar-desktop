@@ -2,7 +2,9 @@ import base64
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import logging
 import threading
+import time
 from types import SimpleNamespace
 
 from cryptography.hazmat.primitives import serialization
@@ -18,8 +20,11 @@ from app.desktop_license_client import (
     DEVICE_MESSAGE_PREFIX,
     LicenseClientError,
     LicenseServiceClient,
+    MacOSDeviceSecretStore,
     MacOSKeychainStore,
+    MacOSPreviewFileSecretStore,
     load_or_create_device_identity,
+    native_secret_store,
     run_periodic_license_sync,
 )
 
@@ -100,28 +105,268 @@ def test_device_identity_is_stable_and_private_key_stays_in_store(tmp_path) -> N
     assert not (tmp_path / "license" / "device-key.dpapi").exists()
 
 
-def test_macos_keychain_secret_is_supplied_over_stdin(monkeypatch) -> None:
-    calls = []
+def test_concurrent_first_run_creates_one_device_identity(tmp_path) -> None:
+    class SlowFirstLoadStore:
+        def __init__(self):
+            self.value: bytes | None = None
+            self.save_count = 0
+
+        def load(self) -> bytes | None:
+            snapshot = self.value
+            if snapshot is None:
+                time.sleep(0.05)
+            return snapshot
+
+        def save(self, value: bytes) -> None:
+            self.save_count += 1
+            self.value = value
+
+    store = SlowFirstLoadStore()
+    start = threading.Barrier(3)
+    identities = []
+    failures = []
+
+    def create() -> None:
+        try:
+            start.wait(timeout=2)
+            identities.append(load_or_create_device_identity(tmp_path, store=store))
+        except Exception as exc:  # pragma: no cover - assertion reports the cause.
+            failures.append(exc)
+
+    threads = [threading.Thread(target=create) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    start.wait(timeout=2)
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert failures == []
+    assert len(identities) == 2
+    assert identities[0].public_key == identities[1].public_key
+    assert store.save_count == 1
+
+
+def test_macos_keychain_uses_native_bridge() -> None:
     secret = b"k" * 32
 
-    def run(arguments, **kwargs):
-        calls.append((arguments, kwargs))
-        if arguments[1] == "find-generic-password" and len(calls) == 1:
-            return SimpleNamespace(returncode=44, stdout="", stderr="not found")
-        if arguments[1] == "add-generic-password":
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-        return SimpleNamespace(returncode=0, stdout=b64url(secret) + "\n", stderr="")
+    class MemoryKeychain:
+        value: bytes | None = None
 
-    monkeypatch.setattr("app.desktop_license_client.subprocess.run", run)
-    store = MacOSKeychainStore()
+        def load(self) -> bytes | None:
+            return self.value
+
+        def save(self, value: bytes) -> None:
+            self.value = value
+
+    api = MemoryKeychain()
+    store = MacOSKeychainStore(api=api)
 
     assert store.load() is None
     store.save(secret)
     assert store.load() == secret
-    add_arguments, add_options = calls[1]
-    assert b64url(secret) not in add_arguments
-    assert add_arguments[-1] == "-w"
-    assert add_options["input"] == b64url(secret) + "\n"
+    assert api.value == secret
+
+
+def test_macos_keychain_migrates_legacy_base64_seed_without_identity_change() -> None:
+    secret = b"m" * 32
+
+    class LegacyKeychain:
+        value = b64url(secret).encode("ascii")
+
+        def load(self) -> bytes | None:
+            return self.value
+
+        def save(self, value: bytes) -> None:
+            self.value = value
+
+    api = LegacyKeychain()
+    store = MacOSKeychainStore(api=api)
+
+    assert store.load() == secret
+    assert api.value == secret
+    assert store.load() == secret
+
+
+def test_macos_keychain_authorization_failure_uses_private_file(tmp_path) -> None:
+    secret = b"f" * 32
+
+    class DeniedKeychain:
+        def load(self) -> bytes | None:
+            raise LicenseClientError("LICENSE_KEYCHAIN_UNAVAILABLE")
+
+        def save(self, value: bytes) -> None:
+            raise LicenseClientError("LICENSE_KEYCHAIN_UNAVAILABLE")
+
+    store = MacOSDeviceSecretStore(
+        tmp_path,
+        keychain=DeniedKeychain(),
+        allow_file_fallback=True,
+    )
+
+    assert store.load() is None
+    store.save(secret)
+    assert store.load() == secret
+    assert store.path.read_bytes() == secret
+    assert store.path.stat().st_mode & 0o077 == 0
+
+
+def test_macos_preview_file_store_is_stable_without_keychain(tmp_path) -> None:
+    store = MacOSPreviewFileSecretStore(tmp_path)
+
+    first = load_or_create_device_identity(tmp_path, store=store)
+    second = load_or_create_device_identity(tmp_path, store=store)
+
+    assert first.public_key == second.public_key
+    assert store.path.is_file()
+    assert store.path.stat().st_size == 32
+    assert store.path.stat().st_mode & 0o077 == 0
+
+
+def test_native_macos_store_uses_explicit_preview_config(tmp_path, monkeypatch) -> None:
+    config = tmp_path / "license-service.json"
+    config.write_text(
+        json.dumps(
+            {
+                "protocol_version": 1,
+                "service_url": "https://license.example.test",
+                "public_keys": {"test-key": "a" * 43},
+                "enforcement": "disabled",
+                "device_key_storage": "file-preview",
+            }
+        )
+    )
+    monkeypatch.setenv("SEARCHCAR_LICENSE_CONFIG_FILE", str(config))
+    monkeypatch.setattr("app.desktop_license_client.sys.platform", "darwin")
+
+    store = native_secret_store(tmp_path / "data")
+
+    assert isinstance(store, MacOSPreviewFileSecretStore)
+
+
+def test_macos_readable_keychain_does_not_write_raw_fallback(tmp_path) -> None:
+    class ReliableKeychain:
+        value: bytes | None = None
+
+        def load(self) -> bytes | None:
+            return self.value
+
+        def save(self, value: bytes) -> None:
+            self.value = value
+
+    store = MacOSDeviceSecretStore(tmp_path, keychain=ReliableKeychain())
+
+    first = load_or_create_device_identity(tmp_path, store=store)
+    second = load_or_create_device_identity(tmp_path, store=store)
+
+    assert first.public_key == second.public_key
+    assert not store.path.exists()
+
+
+def test_macos_keychain_success_with_missing_readback_keeps_stable_fallback(
+    tmp_path,
+) -> None:
+    class WriteOnlyKeychain:
+        def load(self) -> bytes | None:
+            return None
+
+        def save(self, value: bytes) -> None:
+            assert len(value) == 32
+
+    store = MacOSDeviceSecretStore(
+        tmp_path,
+        keychain=WriteOnlyKeychain(),
+        allow_file_fallback=True,
+    )
+
+    first = load_or_create_device_identity(tmp_path, store=store)
+    second = load_or_create_device_identity(tmp_path, store=store)
+
+    assert first.public_key == second.public_key
+    assert store.path.is_file()
+    assert store.path.stat().st_size == 32
+    assert store.path.stat().st_mode & 0o077 == 0
+
+
+def test_macos_fallback_remains_authoritative_after_keychain_recovers(tmp_path) -> None:
+    old_keychain_seed = b"o" * 32
+
+    class RecoveringKeychain:
+        denied = True
+
+        def load(self) -> bytes | None:
+            if self.denied:
+                raise LicenseClientError("LICENSE_KEYCHAIN_UNAVAILABLE")
+            return old_keychain_seed
+
+        def save(self, _value: bytes) -> None:
+            if self.denied:
+                raise LicenseClientError("LICENSE_KEYCHAIN_UNAVAILABLE")
+
+    keychain = RecoveringKeychain()
+    store = MacOSDeviceSecretStore(
+        tmp_path,
+        keychain=keychain,
+        allow_file_fallback=True,
+    )
+    first = load_or_create_device_identity(tmp_path, store=store)
+    fallback_seed = store.path.read_bytes()
+
+    keychain.denied = False
+    second = load_or_create_device_identity(tmp_path, store=store)
+
+    assert fallback_seed != old_keychain_seed
+    assert first.public_key == second.public_key
+    assert store.path.read_bytes() == fallback_seed
+
+
+def test_macos_production_store_migrates_matching_fallback_to_keychain(
+    tmp_path,
+) -> None:
+    seed = b"p" * 32
+
+    class EmptyKeychain:
+        value: bytes | None = None
+
+        def load(self) -> bytes | None:
+            return self.value
+
+        def save(self, value: bytes) -> None:
+            self.value = value
+
+    pilot_store = MacOSDeviceSecretStore(
+        tmp_path,
+        keychain=EmptyKeychain(),
+        allow_file_fallback=True,
+    )
+    pilot_store.path.parent.mkdir(parents=True)
+    pilot_store.path.write_bytes(seed)
+    pilot_store.path.chmod(0o600)
+    production_keychain = EmptyKeychain()
+    production_store = MacOSDeviceSecretStore(
+        tmp_path,
+        keychain=production_keychain,
+    )
+
+    assert production_store.load() == seed
+    assert production_keychain.value == seed
+    assert not production_store.path.exists()
+
+
+def test_macos_production_store_fails_closed_when_keychain_is_denied(tmp_path) -> None:
+    class DeniedKeychain:
+        def load(self) -> bytes | None:
+            raise LicenseClientError("LICENSE_KEYCHAIN_UNAVAILABLE")
+
+        def save(self, _value: bytes) -> None:
+            raise LicenseClientError("LICENSE_KEYCHAIN_UNAVAILABLE")
+
+    store = MacOSDeviceSecretStore(tmp_path, keychain=DeniedKeychain())
+
+    with pytest.raises(LicenseClientError) as caught:
+        load_or_create_device_identity(tmp_path, store=store)
+
+    assert caught.value.code == "LICENSE_KEYCHAIN_UNAVAILABLE"
+    assert not store.path.exists()
 
 
 def test_trial_request_is_signed_and_installs_verified_lease(tmp_path, monkeypatch) -> None:
@@ -175,6 +420,50 @@ def test_trial_request_is_signed_and_installs_verified_lease(tmp_path, monkeypat
     assert (tmp_path / "license" / "trusted-time.json").is_file()
 
 
+def test_lost_trial_response_retries_the_identical_signed_request(
+    tmp_path, monkeypatch
+) -> None:
+    worker_key = signing_state(monkeypatch)
+    observed: list[tuple[bytes, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed.append((request.content, request.headers["Idempotency-Key"]))
+        if len(observed) == 1:
+            raise httpx.ReadTimeout("response was lost", request=request)
+        body = json.loads(request.content)
+        now = datetime.now(timezone.utc)
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "data": {
+                    "license_id": "118f6ac2-8c44-7df0-8f6d-2d34af37b337",
+                    "device_id": "128f6ac2-8c44-7df0-8f6d-2d34af37b337",
+                    "lease": signed_lease(
+                        worker_key,
+                        body,
+                        license_id="118f6ac2-8c44-7df0-8f6d-2d34af37b337",
+                        device_id="128f6ac2-8c44-7df0-8f6d-2d34af37b337",
+                        now=now,
+                    ),
+                },
+            },
+        )
+
+    client = LicenseServiceClient(
+        tmp_path,
+        service_url="https://license.example.test",
+        store=MemoryStore(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = client.activate_trial("retry@example.test")
+
+    assert result["can_search"] is True
+    assert len(observed) == 2
+    assert observed[0] == observed[1]
+
+
 def test_tampered_worker_lease_is_not_persisted(tmp_path, monkeypatch) -> None:
     signing_state(monkeypatch)
 
@@ -205,6 +494,61 @@ def test_tampered_worker_lease_is_not_persisted(tmp_path, monkeypatch) -> None:
     assert caught.value.code.startswith("LICENSE_")
     assert not (tmp_path / "license" / "binding.json").exists()
     assert not (tmp_path / "license" / "lease.json").exists()
+
+
+def test_untrusted_worker_error_code_is_not_forwarded(tmp_path) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "ok": False,
+                "error": {"code": "<script>alert(1)</script>", "message": "bad"},
+            },
+        )
+
+    client = LicenseServiceClient(
+        tmp_path,
+        service_url="https://license.example.test",
+        store=MemoryStore(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(LicenseClientError) as caught:
+        client.activate_trial("owner@example.test")
+
+    assert caught.value.code == "LICENSE_SERVICE_REJECTED"
+
+
+def test_desktop_license_operation_logs_only_sanitized_diagnostics(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    from fastapi import HTTPException
+
+    from app import desktop_license_client
+    from app.database import settings
+
+    monkeypatch.setattr(settings, "storage_root", str(tmp_path / "storage"))
+    from app.main import _desktop_license_operation
+
+    class BrokenClient:
+        def __init__(self, _data_dir):
+            try:
+                raise OSError("do-not-log-this-sensitive-marker")
+            except OSError as cause:
+                raise LicenseClientError("LICENSE_SERVICE_CONNECT_FAILED") from cause
+
+    monkeypatch.setattr(desktop_license_client, "LicenseServiceClient", BrokenClient)
+    monkeypatch.setattr("app.main.desktop_data_root", lambda: tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        with pytest.raises(HTTPException) as caught:
+            _desktop_license_operation("trial", lambda _client: {})
+
+    assert caught.value.detail == "license_service_connect_failed"
+    assert "action=trial" in caplog.text
+    assert "code=LICENSE_SERVICE_CONNECT_FAILED" in caplog.text
+    assert "cause_type=OSError" in caplog.text
+    assert "do-not-log-this-sensitive-marker" not in caplog.text
 
 
 def test_periodic_sync_does_not_create_identity_without_binding(tmp_path, monkeypatch) -> None:

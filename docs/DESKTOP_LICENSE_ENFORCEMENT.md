@@ -25,6 +25,7 @@ license/
 ├── binding.json
 ├── lease.json
 ├── trusted-time.json
+├── device-key.macos  # macOS fallback for unauthorized ad-hoc builds; mode 0600
 └── device-key.dpapi  # Windows only; current-user encrypted
 ```
 
@@ -63,11 +64,15 @@ Installed applications read the equivalent non-secret values from
 }
 ```
 
-The device seed is stored in the user's macOS Keychain. On Windows, the
-license directory contains only a current-user DPAPI ciphertext. The Worker
-receives the public key and its domain-separated SHA-256 fingerprint; raw
-hardware identifiers are not collected. Trial subject text is normalized and
-hashed locally before transmission.
+The macOS preview configuration explicitly sets
+`"device_key_storage": "file-preview"`, so local ad-hoc builds never depend
+on Keychain authorization. Its device seed is an excluded mode-0600 file in
+the license directory. A production macOS configuration must remove that
+setting (or set `"keychain"`) and use the user's Keychain instead. On Windows,
+the license directory contains only a current-user DPAPI ciphertext.
+The Worker receives the public key and its domain-separated SHA-256 fingerprint;
+raw hardware identifiers are not collected. Trial subject text is normalized
+and hashed locally before transmission.
 
 An existing binding is checked shortly after application startup and every six
 hours. Each response lease is verified locally before `binding.json` or
@@ -89,4 +94,6 @@ a trial, redeem an activation code and refresh an existing lease.
 2. Add transfer request/claim controls and owner-facing recovery copy.
 3. Repeat lease verification in Rust before starting the sidecar.
 4. Validate Keychain, DPAPI, offline grace, copied state and fingerprint
-   behavior in installed macOS and Windows applications.
+   behavior in installed macOS and Windows applications. Windows build and
+   pilot verification are explicitly deferred until after the current macOS
+   license-service rollout.

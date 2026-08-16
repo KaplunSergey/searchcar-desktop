@@ -2,16 +2,61 @@ import hashlib
 import os
 import json
 from pathlib import Path
+import threading
+
+import pytest
 
 from sqlalchemy import text
 
 from app.database import create_database_engine
 from app.desktop_runtime import (
+    DesktopInstanceLock,
     bundled_headless_chromium,
     configure_desktop_environment,
     configure_playwright_driver,
     configure_playwright_environment,
+    parent_process_is_alive,
+    watch_parent_process,
 )
+
+
+def test_desktop_instance_lock_allows_only_one_backend(tmp_path: Path) -> None:
+    path = tmp_path / "runtime" / "desktop.lock"
+    first = DesktopInstanceLock(path)
+    second = DesktopInstanceLock(path)
+    first.acquire()
+    try:
+        with pytest.raises(RuntimeError, match="desktop_instance_already_running"):
+            second.acquire()
+    finally:
+        first.release()
+
+    second.acquire()
+    second.release()
+
+
+def test_parent_watchdog_requests_shutdown_when_shell_disappears(
+    monkeypatch,
+) -> None:
+    requested = []
+
+    class Controller:
+        def request(self):
+            requested.append(True)
+
+    monkeypatch.setattr(
+        "app.desktop_runtime.parent_process_is_alive", lambda _pid: False
+    )
+
+    watch_parent_process(
+        12345,
+        threading.Event(),
+        Controller(),
+        interval_seconds=0.01,
+    )
+
+    assert requested == [True]
+    assert parent_process_is_alive(os.getpid()) is True
 
 
 def test_sqlite_engine_enables_desktop_safety_pragmas(tmp_path: Path) -> None:

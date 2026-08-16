@@ -255,13 +255,91 @@ const api = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
 const apiOrigin = api.replace(/\/api\/?$/, "");
 const csrfCookieName = process.env.NEXT_PUBLIC_CSRF_COOKIE_NAME || "encar_csrf";
 let csrfToken = "";
+const apiErrorCodePattern = /^[a-z][a-z0-9_]{0,63}$/;
 
 class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
-    super(message);
+  code?: string;
+  constructor(status: number, code?: string) {
+    super(code || `HTTP ${status}`);
     this.status = status;
+    this.code = code;
   }
+}
+
+function responseErrorCode(body: string): string | undefined {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      "detail" in parsed &&
+      typeof parsed.detail === "string" &&
+      apiErrorCodePattern.test(parsed.detail)
+    ) {
+      return parsed.detail;
+    }
+  } catch {
+    // Non-JSON error bodies are intentionally not exposed to the interface.
+  }
+  return undefined;
+}
+
+function licenseErrorMessage(error: unknown, t: Translate): string {
+  const code = error instanceof ApiError && error.code
+    ? error.code
+    : error instanceof TypeError
+      ? "local_api_unavailable"
+      : "license_operation_failed";
+  const groups: Array<[Set<string>, Key]> = [
+    [new Set(["local_api_unavailable"]), "licenseErrorLocalApi"],
+    [new Set([
+      "license_service_unavailable",
+      "license_service_connect_timeout",
+      "license_service_connect_failed",
+      "license_service_response_timeout",
+      "license_service_timeout",
+    ]), "licenseErrorServiceUnavailable"],
+    [new Set([
+      "license_service_not_configured",
+      "license_service_url_invalid",
+      "license_public_key_config_invalid",
+      "license_config_invalid",
+      "service_not_configured",
+    ]), "licenseErrorConfiguration"],
+    [new Set([
+      "license_keychain_unavailable",
+      "license_dpapi_unavailable",
+      "license_secure_store_unavailable",
+      "license_file_fallback_disabled",
+      "license_device_key_invalid",
+      "license_device_key_persistence_failed",
+    ]), "licenseErrorDeviceStorage"],
+    [new Set([
+      "trial_unavailable",
+      "license_trial_subject_invalid",
+    ]), "licenseErrorTrialUnavailable"],
+    [new Set(["invalid_code", "code_not_available"]), "licenseErrorActivationCode"],
+    [new Set(["rate_limited"]), "licenseErrorRateLimited"],
+    [new Set([
+      "signing_key_invalid",
+      "signing_key_mismatch",
+      "signing_public_key_invalid",
+      "license_signature_invalid",
+      "license_signing_key_unknown",
+      "license_service_response_invalid",
+      "license_service_response_too_large",
+      "license_service_rejected",
+    ]), "licenseErrorVerification"],
+    [new Set(["authentication_required"]), "licenseErrorLoginRequired"],
+    [new Set([
+      "csrf_validation_failed",
+      "desktop_session_required",
+      "admin_required",
+    ]), "licenseErrorSession"],
+  ];
+  const key = groups.find(([codes]) => codes.has(code))?.[1] || "licenseErrorUnknown";
+  return `${t(key)} (${code.toUpperCase()})`;
 }
 
 function assetUrl(path?: string | null) {
@@ -292,8 +370,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     },
   });
   if (!response.ok) {
-    const message = await response.text();
-    throw new ApiError(response.status, message || `HTTP ${response.status}`);
+    const body = await response.text();
+    throw new ApiError(response.status, responseErrorCode(body));
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -2974,6 +3052,7 @@ function Settings({
   });
   const [trialSubject, setTrialSubject] = useState("");
   const [activationCode, setActivationCode] = useState("");
+  const [licenseError, setLicenseError] = useState<string | null>(null);
   const [migrationUrl, setMigrationUrl] = useState(
     "postgresql+psycopg://encar:encar@127.0.0.1:5432/encar",
   );
@@ -3054,12 +3133,19 @@ function Settings({
         method: "POST",
         body: JSON.stringify({ subject: trialSubject }),
       }),
+    onMutate: () => setLicenseError(null),
     onSuccess: (status) => {
       client.setQueryData(["desktop-license"], status);
+      void client.invalidateQueries({ queryKey: ["desktop-license"] });
       setTrialSubject("");
+      setLicenseError(null);
       notify(t("licenseActivated"));
     },
-    onError: () => notify(t("licenseActionFailed")),
+    onError: (error) => {
+      const message = licenseErrorMessage(error, t);
+      setLicenseError(message);
+      notify(message);
+    },
   });
   const redeemMutation = useMutation({
     mutationFn: () =>
@@ -3067,21 +3153,35 @@ function Settings({
         method: "POST",
         body: JSON.stringify({ activation_code: activationCode }),
       }),
+    onMutate: () => setLicenseError(null),
     onSuccess: (status) => {
       client.setQueryData(["desktop-license"], status);
+      void client.invalidateQueries({ queryKey: ["desktop-license"] });
       setActivationCode("");
+      setLicenseError(null);
       notify(t("licenseActivated"));
     },
-    onError: () => notify(t("licenseActionFailed")),
+    onError: (error) => {
+      const message = licenseErrorMessage(error, t);
+      setLicenseError(message);
+      notify(message);
+    },
   });
   const refreshLicenseMutation = useMutation({
     mutationFn: () =>
       request<DesktopLicenseStatus>("/desktop/license/refresh", { method: "POST" }),
+    onMutate: () => setLicenseError(null),
     onSuccess: (status) => {
       client.setQueryData(["desktop-license"], status);
+      void client.invalidateQueries({ queryKey: ["desktop-license"] });
+      setLicenseError(null);
       notify(t("licenseRefreshed"));
     },
-    onError: () => notify(t("licenseActionFailed")),
+    onError: (error) => {
+      const message = licenseErrorMessage(error, t);
+      setLicenseError(message);
+      notify(message);
+    },
   });
   const source = importMutation.data || importQuery.data;
   return (
@@ -3244,6 +3344,9 @@ function Settings({
             <p className="license-not-configured">{t("licenseServiceHelp")}</p>
           ) : (
             <div className="license-actions">
+              {licenseError ? (
+                <p className="license-action-error" role="alert">{licenseError}</p>
+              ) : null}
               {!desktopLicenseQuery.data.license_id ? (
                 <label>
                   {t("trialSubject")}

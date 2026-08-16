@@ -17,6 +17,57 @@ BROWSER_MANIFEST_NAME = "searchcar-browser-manifest.json"
 PLAYWRIGHT_DRIVER_MANIFEST_NAME = "searchcar-playwright-driver-manifest.json"
 BUNDLED_CHROMIUM_ENV = "SEARCHCAR_CHROMIUM_EXECUTABLE"
 GRACEFUL_SHUTDOWN_SECONDS = 35
+PARENT_WATCH_INTERVAL_SECONDS = 2.0
+
+
+class DesktopInstanceLock:
+    """Hold one backend process per desktop data directory."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.file = None
+
+    def acquire(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                if self.path.stat().st_size == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            handle.close()
+            raise RuntimeError("desktop_instance_already_running") from exc
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{os.getpid()}\n".encode("ascii"))
+        handle.flush()
+        self.file = handle
+
+    def release(self) -> None:
+        handle, self.file = self.file, None
+        if handle is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 class JsonLogFormatter(logging.Formatter):
@@ -477,6 +528,68 @@ class GracefulShutdownController:
             self.server.should_exit = True
 
 
+def parent_process_is_alive(parent_pid: int) -> bool:
+    if parent_pid <= 1:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        process_query_limited_information = 0x1000
+        still_active = 259
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(
+            process_query_limited_information,
+            False,
+            parent_pid,
+        )
+        if not handle:
+            # Access denied means the PID exists but cannot be inspected. Any
+            # other failure is treated as gone so the orphan sidecar can stop.
+            return ctypes.get_last_error() == 5
+        try:
+            exit_code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return True
+            return exit_code.value == still_active
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(parent_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def watch_parent_process(
+    parent_pid: int,
+    stop_event: threading.Event,
+    shutdown_controller: GracefulShutdownController,
+    *,
+    interval_seconds: float = PARENT_WATCH_INTERVAL_SECONDS,
+) -> None:
+    while not stop_event.wait(max(0.05, interval_seconds)):
+        if parent_process_is_alive(parent_pid):
+            continue
+        logging.getLogger(__name__).warning(
+            "Desktop shell exited; stopping sidecar: parent_pid=%s",
+            parent_pid,
+        )
+        shutdown_controller.request()
+        return
+
+
 def check_runtime(data_dir: Path, port: int) -> dict:
     paths = configure_desktop_environment(data_dir, port)
     schema_version = initialize_database()
@@ -622,6 +735,7 @@ def parser() -> argparse.ArgumentParser:
     serve.add_argument("--frontend-dir", type=Path, required=True)
     serve.add_argument("--browser-dir", type=Path)
     serve.add_argument("--playwright-driver-dir", type=Path)
+    serve.add_argument("--allow-device-key-file-fallback", action="store_true")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, required=True)
     return result
@@ -674,6 +788,8 @@ def main() -> None:
             )
         )
         return
+    if arguments.allow_device_key_file_fallback:
+        os.environ["SEARCHCAR_ALLOW_DEVICE_KEY_FILE_FALLBACK"] = "1"
     paths = configure_desktop_environment(
         arguments.data_dir,
         arguments.port,
@@ -681,6 +797,8 @@ def main() -> None:
         arguments.playwright_driver_dir,
     )
     configure_structured_logging(paths["logs"])
+    instance_lock = DesktopInstanceLock(paths["root"] / "runtime" / "desktop.lock")
+    instance_lock.acquire()
     from .maintenance import clear_stale_maintenance_lock
 
     clear_stale_maintenance_lock()
@@ -746,11 +864,24 @@ def main() -> None:
     )
     server = uvicorn.Server(config)
     shutdown_controller.attach_server(server)
+    parent_pid_value = os.environ.get("SEARCHCAR_DESKTOP_PARENT_PID", "")
+    if parent_pid_value.isdecimal() and int(parent_pid_value) > 1:
+        threading.Thread(
+            target=watch_parent_process,
+            args=(int(parent_pid_value), worker_stop, shutdown_controller),
+            name="searchcar-parent-watchdog",
+            daemon=True,
+        ).start()
+    elif parent_pid_value:
+        logging.getLogger(__name__).warning(
+            "Ignoring invalid desktop parent PID"
+        )
     try:
         server.run()
     finally:
         shutdown_controller.request()
         worker_thread.join(timeout=GRACEFUL_SHUTDOWN_SECONDS)
+        instance_lock.release()
 
 
 if __name__ == "__main__":

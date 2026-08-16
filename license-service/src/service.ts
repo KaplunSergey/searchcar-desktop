@@ -25,6 +25,26 @@ interface AdminCodeRow extends LicenseRow {
   makes_perpetual: number;
   code_expires_at: string | null;
   used_at: string | null;
+  used_by_device_id: string | null;
+}
+
+async function findActivationCode(
+  env: Env,
+  codeHash: string,
+): Promise<AdminCodeRow | null> {
+  return env.LICENSE_DB.prepare(
+    `SELECT
+       ac.id AS activation_code_id, ac.license_id AS code_license_id, ac.duration_months,
+       ac.makes_perpetual, ac.expires_at AS code_expires_at, ac.used_at,
+       ac.used_by_device_id,
+       l.id, l.kind, l.status, l.started_at, l.expires_at, l.perpetual,
+       l.activation_count
+     FROM activation_codes ac
+     JOIN licenses l ON l.id = ac.license_id
+     WHERE ac.code_hash = ?`,
+  )
+    .bind(codeHash)
+    .first<AdminCodeRow>();
 }
 
 export function addCalendarMonths(date: Date, months: number): Date {
@@ -104,6 +124,119 @@ function assertDeviceMatches(device: DeviceRow, request: SignedDeviceRequest): v
   }
 }
 
+async function exactTrialBinding(
+  env: Env,
+  request: SignedDeviceRequest,
+  subjectHash: string,
+): Promise<{ license: LicenseRow; device: DeviceRow } | null> {
+  const ids = await env.LICENSE_DB.prepare(
+    `SELECT tc.license_id, d.id AS device_id
+       FROM trial_claims tc
+       JOIN devices d ON d.license_id = tc.license_id AND d.is_active = 1
+      WHERE tc.subject_hash = ? AND tc.fingerprint_hash = ?
+        AND d.public_key = ? AND d.fingerprint_hash = ?
+      LIMIT 1`,
+  )
+    .bind(
+      subjectHash,
+      request.device.fingerprint_hash,
+      request.device.public_key,
+      request.device.fingerprint_hash,
+    )
+    .first<{ license_id: string; device_id: string }>();
+  if (!ids) return null;
+  const [license, device] = await Promise.all([
+    env.LICENSE_DB.prepare(
+      `SELECT id, kind, status, started_at, expires_at, perpetual, activation_count
+         FROM licenses WHERE id = ?`,
+    )
+      .bind(ids.license_id)
+      .first<LicenseRow>(),
+    env.LICENSE_DB.prepare(
+      `SELECT id, license_id, public_key, fingerprint_hash, label, is_active
+         FROM devices WHERE id = ? AND license_id = ?`,
+    )
+      .bind(ids.device_id, ids.license_id)
+      .first<DeviceRow>(),
+  ]);
+  return license?.kind === "TRIAL" && device ? { license, device } : null;
+}
+
+async function trialIdentityAlreadyUsed(
+  env: Env,
+  request: SignedDeviceRequest,
+  subjectHash: string,
+): Promise<boolean> {
+  const collision = await env.LICENSE_DB.prepare(
+    `SELECT 1 AS found FROM trial_claims
+      WHERE subject_hash = ? OR fingerprint_hash = ?
+     UNION ALL
+     SELECT 1 AS found FROM devices
+      WHERE fingerprint_hash = ? OR public_key = ?
+     LIMIT 1`,
+  )
+    .bind(
+      subjectHash,
+      request.device.fingerprint_hash,
+      request.device.fingerprint_hash,
+      request.device.public_key,
+    )
+    .first<{ found: number }>();
+  return collision !== null;
+}
+
+async function recoveredTrialResponse(
+  env: Env,
+  request: SignedDeviceRequest,
+  subjectHash: string,
+  now: Date,
+) {
+  const binding = await exactTrialBinding(env, request, subjectHash);
+  if (!binding || !canSearch(binding.license, now)) return null;
+  return {
+    license_id: binding.license.id,
+    device_id: binding.device.id,
+    lease: await createLease(env, {
+      ...binding,
+      appVersion: request.app_version,
+      now,
+    }),
+  };
+}
+
+async function recoveredRedemptionResponse(
+  env: Env,
+  row: AdminCodeRow,
+  request: SignedDeviceRequest,
+  now: Date,
+) {
+  if (row.used_at === null || row.used_by_device_id === null) return null;
+  const usedDevice = await env.LICENSE_DB.prepare(
+    `SELECT id, license_id, public_key, fingerprint_hash, label, is_active
+       FROM devices WHERE id = ? AND license_id = ?`,
+  )
+    .bind(row.used_by_device_id, row.code_license_id)
+    .first<DeviceRow>();
+  if (
+    !usedDevice ||
+    usedDevice.is_active !== 1 ||
+    usedDevice.public_key !== request.device.public_key ||
+    usedDevice.fingerprint_hash !== request.device.fingerprint_hash
+  ) {
+    return null;
+  }
+  return {
+    license_id: row.id,
+    device_id: usedDevice.id,
+    lease: await createLease(env, {
+      license: row,
+      device: usedDevice,
+      appVersion: request.app_version,
+      now,
+    }),
+  };
+}
+
 export async function activateTrial(
   _request: Request,
   env: Env,
@@ -115,16 +248,9 @@ export async function activateTrial(
     max: 64,
     pattern: /^[a-f0-9]{64}$/u,
   });
-  const existing = await env.LICENSE_DB.prepare(
-    `SELECT license_id FROM trial_claims
-      WHERE subject_hash = ? OR fingerprint_hash = ?
-     UNION ALL
-     SELECT license_id FROM devices WHERE fingerprint_hash = ?
-     LIMIT 1`,
-  )
-    .bind(subjectHash, body.device.fingerprint_hash, body.device.fingerprint_hash)
-    .first();
-  if (existing) {
+  const recovered = await recoveredTrialResponse(env, body, subjectHash, now);
+  if (recovered) return recovered;
+  if (await trialIdentityAlreadyUsed(env, body, subjectHash)) {
     throw new ApiError(409, "TRIAL_UNAVAILABLE", "A trial cannot be activated for this subject or device.");
   }
 
@@ -149,6 +275,10 @@ export async function activateTrial(
     label: body.device.label ?? null,
     is_active: 1,
   };
+  // Validate the signing secret and create the response before consuming the
+  // single-use trial. A malformed private key must not leave a trial claim in
+  // D1 when no verifiable lease can be returned to the desktop application.
+  const lease = await createLease(env, { license, device, appVersion: body.app_version, now });
   try {
     await env.LICENSE_DB.batch([
       env.LICENSE_DB.prepare(
@@ -189,11 +319,12 @@ export async function activateTrial(
     ]);
   } catch (error) {
     if (isConstraintError(error)) {
+      const raced = await recoveredTrialResponse(env, body, subjectHash, now);
+      if (raced) return raced;
       throw new ApiError(409, "TRIAL_UNAVAILABLE", "A trial cannot be activated for this subject or device.");
     }
     throw error;
   }
-  const lease = await createLease(env, { license, device, appVersion: body.app_version, now });
   return { license_id: licenseId, device_id: deviceId, lease };
 }
 
@@ -222,6 +353,7 @@ export async function checkLicense(
   }
   assertDeviceMatches(device, body);
   const nowIso = now.toISOString();
+  const lease = await createLease(env, { license, device, appVersion: body.app_version, now });
   await env.LICENSE_DB.batch([
     env.LICENSE_DB.prepare(
       `UPDATE devices SET last_seen_at = ? WHERE id = ? AND is_active = 1`,
@@ -237,7 +369,7 @@ export async function checkLicense(
          last_ip_hash = excluded.last_ip_hash`,
     ).bind(deviceId, licenseId, nowIso, body.app_version, await ipHash(request, env)),
   ]);
-  return { lease: await createLease(env, { license, device, appVersion: body.app_version, now }) };
+  return { lease };
 }
 
 export async function redeemActivationCode(
@@ -248,21 +380,16 @@ export async function redeemActivationCode(
 ) {
   const code = normalizeCode(requireString(body, "activation_code", { min: 10, max: 40 }), "SC");
   const codeHash = await pepperedHash(env.CODE_PEPPER, code);
-  const row = await env.LICENSE_DB.prepare(
-    `SELECT
-       ac.id AS activation_code_id, ac.license_id AS code_license_id, ac.duration_months,
-       ac.makes_perpetual, ac.expires_at AS code_expires_at, ac.used_at,
-       l.id, l.kind, l.status, l.started_at, l.expires_at, l.perpetual,
-       l.activation_count
-     FROM activation_codes ac
-     JOIN licenses l ON l.id = ac.license_id
-     WHERE ac.code_hash = ?`,
-  )
-    .bind(codeHash)
-    .first<AdminCodeRow>();
+  const row = await findActivationCode(env, codeHash);
+  if (!row) {
+    throw new ApiError(409, "CODE_NOT_AVAILABLE", "The activation code cannot be used.");
+  }
+  if (row.used_at !== null) {
+    const recovered = await recoveredRedemptionResponse(env, row, body, now);
+    if (recovered) return recovered;
+    throw new ApiError(409, "CODE_NOT_AVAILABLE", "The activation code cannot be used.");
+  }
   if (
-    !row ||
-    row.used_at !== null ||
     row.status !== "ACTIVE" ||
     (row.code_expires_at !== null && new Date(row.code_expires_at).getTime() <= now.getTime())
   ) {
@@ -297,6 +424,21 @@ export async function redeemActivationCode(
           row.duration_months ?? 0,
         ).toISOString();
   const renewalId = crypto.randomUUID();
+  const license: LicenseRow = {
+    id: row.code_license_id,
+    kind: newPerpetual === 1 ? "PERPETUAL" : "SUBSCRIPTION",
+    status: row.status,
+    started_at: row.started_at,
+    expires_at: newExpiresAt,
+    perpetual: newPerpetual,
+    activation_count: row.activation_count + (newBinding ? 1 : 0),
+  };
+  const lease = await createLease(env, {
+    license,
+    device,
+    appVersion: body.app_version,
+    now,
+  });
   const statements: D1PreparedStatement[] = [];
   if (newBinding) {
     statements.push(
@@ -367,24 +509,20 @@ export async function redeemActivationCode(
     await env.LICENSE_DB.batch(statements);
   } catch (error) {
     if (isConstraintError(error)) {
+      const racedRow = await findActivationCode(env, codeHash);
+      const recovered = racedRow
+        ? await recoveredRedemptionResponse(env, racedRow, body, now)
+        : null;
+      if (recovered) return recovered;
       throw new ApiError(409, "CODE_NOT_AVAILABLE", "The activation code cannot be used.");
     }
     throw error;
   }
 
-  const license: LicenseRow = {
-    id: row.code_license_id,
-    kind: newPerpetual === 1 ? "PERPETUAL" : "SUBSCRIPTION",
-    status: row.status,
-    started_at: row.started_at,
-    expires_at: newExpiresAt,
-    perpetual: newPerpetual,
-    activation_count: row.activation_count + (newBinding ? 1 : 0),
-  };
   return {
     license_id: license.id,
     device_id: device.id,
-    lease: await createLease(env, { license, device, appVersion: body.app_version, now }),
+    lease,
   };
 }
 
@@ -487,6 +625,7 @@ export async function claimTransfer(
   }
   assertDeviceMatches(device, body);
   const nowIso = now.toISOString();
+  const lease = await createLease(env, { license, device, appVersion: body.app_version, now });
   if (transfer.status === "APPROVED") {
     await env.LICENSE_DB.batch([
       env.LICENSE_DB.prepare(
@@ -508,7 +647,7 @@ export async function claimTransfer(
   return {
     license_id: license.id,
     device_id: device.id,
-    lease: await createLease(env, { license, device, appVersion: body.app_version, now }),
+    lease,
   };
 }
 

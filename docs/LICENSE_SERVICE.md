@@ -110,11 +110,14 @@ contain those plaintext values.
    ```
 
 4. Keep `license-signing-public-key.json` for the Phase 7 client. Never commit
-   the private `.key` file.
-   Copy its `key_id` and `public_key`, together with the deployed Worker URL,
-   into `desktop/license-service.json`. Keep `enforcement` disabled for pilot
-   builds until a remote trial/check/redeem smoke test succeeds; change it to
-   `required` for the production build.
+   the private `.key` file. Copy `public_key` into the non-secret
+   `LICENSE_SIGNING_PUBLIC_KEY` variable in `license-service/wrangler.jsonc`.
+   Copy its `key_id` and the same `public_key`, together with the deployed
+   Worker URL, into `desktop/license-service.json`. The Worker signs and
+   immediately verifies every lease against this value before consuming a
+   trial or activation code. Keep `enforcement` disabled for pilot builds until
+   a remote trial/check/redeem smoke test succeeds; change it to `required` for
+   the production build.
 5. Apply migrations and run locally:
 
    ```bash
