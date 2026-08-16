@@ -232,6 +232,11 @@ type DesktopLicenseStatus = {
   service_configured?: boolean;
   enforcement_required?: boolean;
 };
+type DesktopLicenseTransferRequest = {
+  transfer_code: string;
+  claim_token: string;
+  expires_at: string;
+};
 type DesktopMigrationReport = {
   status: "converted";
   backup: { path: string; files: number; bytes: number };
@@ -320,6 +325,12 @@ function licenseErrorMessage(error: unknown, t: Translate): string {
       "license_trial_subject_invalid",
     ]), "licenseErrorTrialUnavailable"],
     [new Set(["invalid_code", "code_not_available"]), "licenseErrorActivationCode"],
+    [new Set([
+      "invalid_transfer_code",
+      "invalid_transfer_claim",
+      "transfer_pending",
+      "transfer_not_available",
+    ]), "licenseErrorTransfer"],
     [new Set(["rate_limited"]), "licenseErrorRateLimited"],
     [new Set([
       "signing_key_invalid",
@@ -3052,6 +3063,7 @@ function Settings({
   });
   const [trialSubject, setTrialSubject] = useState("");
   const [activationCode, setActivationCode] = useState("");
+  const [transferRequest, setTransferRequest] = useState<DesktopLicenseTransferRequest | null>(null);
   const [licenseError, setLicenseError] = useState<string | null>(null);
   const [migrationUrl, setMigrationUrl] = useState(
     "postgresql+psycopg://encar:encar@127.0.0.1:5432/encar",
@@ -3176,6 +3188,48 @@ function Settings({
       void client.invalidateQueries({ queryKey: ["desktop-license"] });
       setLicenseError(null);
       notify(t("licenseRefreshed"));
+    },
+    onError: (error) => {
+      const message = licenseErrorMessage(error, t);
+      setLicenseError(message);
+      notify(message);
+    },
+  });
+  const requestTransferMutation = useMutation({
+    mutationFn: () =>
+      request<DesktopLicenseTransferRequest>("/desktop/license/transfer/request", {
+        method: "POST",
+      }),
+    onMutate: () => setLicenseError(null),
+    onSuccess: (transfer) => {
+      setTransferRequest(transfer);
+      setLicenseError(null);
+      notify(t("licenseTransferRequested"));
+    },
+    onError: (error) => {
+      const message = licenseErrorMessage(error, t);
+      setLicenseError(message);
+      notify(message);
+    },
+  });
+  const claimTransferMutation = useMutation({
+    mutationFn: () => {
+      if (!transferRequest) throw new Error("transfer_request_missing");
+      return request<DesktopLicenseStatus>("/desktop/license/transfer/claim", {
+        method: "POST",
+        body: JSON.stringify({
+          transfer_code: transferRequest.transfer_code,
+          claim_token: transferRequest.claim_token,
+        }),
+      });
+    },
+    onMutate: () => setLicenseError(null),
+    onSuccess: (status) => {
+      client.setQueryData(["desktop-license"], status);
+      void client.invalidateQueries({ queryKey: ["desktop-license"] });
+      setTransferRequest(null);
+      setLicenseError(null);
+      notify(t("licenseTransferred"));
     },
     onError: (error) => {
       const message = licenseErrorMessage(error, t);
@@ -3394,6 +3448,42 @@ function Settings({
                   </Button>
                 </div>
               ) : null}
+              <div className="license-transfer">
+                <h4>{t("licenseTransferTitle")}</h4>
+                <p>{t("licenseTransferHelp")}</p>
+                {!transferRequest ? (
+                  <Button
+                    disabled={requestTransferMutation.isPending}
+                    onClick={() => requestTransferMutation.mutate()}
+                  >
+                    {requestTransferMutation.isPending
+                      ? t("licenseWorking")
+                      : t("licenseTransferRequest")}
+                  </Button>
+                ) : (
+                  <div className="license-transfer-request">
+                    <p>{t("licenseTransferPending")}</p>
+                    <code>{transferRequest.transfer_code}</code>
+                    <small>
+                      {t("licenseTransferExpires")}: {formatDate(transferRequest.expires_at, locale)}
+                    </small>
+                    <div>
+                      <Button
+                        kind="primary"
+                        disabled={claimTransferMutation.isPending}
+                        onClick={() => claimTransferMutation.mutate()}
+                      >
+                        {claimTransferMutation.isPending
+                          ? t("licenseWorking")
+                          : t("licenseTransferClaim")}
+                      </Button>
+                      <Button onClick={() => setTransferRequest(null)}>
+                        {t("licenseTransferRestart")}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </section>

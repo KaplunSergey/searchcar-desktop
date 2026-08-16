@@ -4,6 +4,6 @@
   "public_keys": {
     "searchcar-license-v1": "yuEaFu6U3l53W4umYMqu3wj_-uLcvEQpS-U4lq8eqyI"
   },
-  "enforcement": "disabled",
+  "enforcement": "required",
   "device_key_storage": "file-preview"
 }

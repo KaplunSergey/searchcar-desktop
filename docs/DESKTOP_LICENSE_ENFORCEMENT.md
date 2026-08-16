@@ -1,8 +1,9 @@
 # Desktop license enforcement
 
 Phase 7 adds defense in depth around every operation that can start the Encar
-scanner. The backend enforcement, OS-protected device identity, Cloudflare
-synchronization and first activation UI are implemented locally.
+scanner. The backend enforcement, device identity, Cloudflare synchronization,
+first activation UI and native preflight are implemented locally. The bundled
+pilot configuration now uses `enforcement: required`.
 
 ## Current enforcement points
 
@@ -78,22 +79,37 @@ An existing binding is checked shortly after application startup and every six
 hours. Each response lease is verified locally before `binding.json` or
 `lease.json` is replaced.
 
-The pilot currently defaults to `disabled`, which reports status `pilot` and
-keeps search available. This transition mode must not be used for a commercial
-release. Enabling `required` without a binding, lease or known signing key is
-fail-closed.
+The current pilot requires an active signed license for every search. A
+brand-new desktop may still open the activation screen, but it cannot queue or
+start a scan before receiving a valid lease. The unsigned macOS preview keeps
+its file-preview identity only for this pilot; a signed production release
+will use Keychain storage.
 
 `GET /api/desktop/license` exposes the non-secret entitlement decision to an
 authenticated desktop user. Administrator-only CSRF-protected endpoints start
-a trial, redeem an activation code and refresh an existing lease.
+a trial, redeem an activation code, refresh an existing lease and create or
+claim a transfer from the destination device. A transfer request displays only
+the short owner code; its claim token stays in memory and is never written to
+the local license files or a backup. The owner approves the short code through
+the Phase 8 owner admin surface (the bootstrap admin API remains the pilot
+fallback).
 
 ## Remaining Phase 7 work
 
-1. Deploy Phase 6 and bundle the production Worker URL and lease-verification
-   public key, then enable required mode.
-2. Add transfer request/claim controls and owner-facing recovery copy.
-3. Repeat lease verification in Rust before starting the sidecar.
+1. Rebuild and manually validate the required pilot configuration with an
+   active license, a fresh unlicensed data directory and a deliberately
+   tampered lease.
+2. Complete the owner approval/recovery surface in Phase 8. Destination-device
+   request and claim controls are implemented locally.
+3. Repeat lease verification in Rust before starting the sidecar. This native
+   gate is implemented and covered by a Rust unit test.
 4. Validate Keychain, DPAPI, offline grace, copied state and fingerprint
    behavior in installed macOS and Windows applications. Windows build and
    pilot verification are explicitly deferred until after the current macOS
    license-service rollout.
+
+The native preflight permits a brand-new desktop with no binding, and an
+authentic but expired lease, to reach the activation/refresh UI. It rejects an
+incomplete state, a changed binding, an unknown signing key or an invalid
+signature before launching the sidecar. The backend remains the authoritative
+scan gate for expiry, offline grace and clock rollback.

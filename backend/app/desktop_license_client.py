@@ -57,6 +57,10 @@ _DEVICE_IDENTITY_LOCK = threading.Lock()
 _ACTIVATION_CODE = re.compile(
     r"^SC-[23456789A-HJ-NP-Z]{5}(?:-[23456789A-HJ-NP-Z]{5}){3}$"
 )
+_TRANSFER_CODE = re.compile(
+    r"^TR-[23456789A-HJ-NP-Z]{5}(?:-[23456789A-HJ-NP-Z]{5}){3}$"
+)
+_TRANSFER_CLAIM_TOKEN = re.compile(r"^[A-Za-z0-9_-]{32,64}$")
 _REMOTE_ERROR_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 logger = logging.getLogger(__name__)
 
@@ -808,6 +812,39 @@ class LicenseServiceClient:
             data = self._post(
                 "/v1/licenses/redeem",
                 {"activation_code": normalized},
+            )
+            return self._install(data)
+
+    def request_transfer(self) -> dict[str, Any]:
+        """Create a short-lived request on the destination device.
+
+        The claim token is deliberately returned only to this process.  It is
+        never written to the portable license state, logs or backups.
+        """
+
+        with _LICENSE_OPERATION_LOCK:
+            data = self._post("/v1/transfers/request", {})
+        if not (
+            isinstance(data.get("transfer_code"), str)
+            and _TRANSFER_CODE.fullmatch(data["transfer_code"])
+            and isinstance(data.get("claim_token"), str)
+            and _TRANSFER_CLAIM_TOKEN.fullmatch(data["claim_token"])
+            and isinstance(data.get("expires_at"), str)
+        ):
+            raise LicenseClientError("LICENSE_SERVICE_RESPONSE_INVALID", http_status=502)
+        return data
+
+    def claim_transfer(self, transfer_code: str, claim_token: str) -> dict[str, Any]:
+        normalized_code = "".join(transfer_code.upper().split())
+        normalized_token = "".join(claim_token.split())
+        if not _TRANSFER_CODE.fullmatch(normalized_code):
+            raise LicenseClientError("INVALID_TRANSFER_CODE", http_status=400)
+        if not _TRANSFER_CLAIM_TOKEN.fullmatch(normalized_token):
+            raise LicenseClientError("INVALID_TRANSFER_CLAIM", http_status=400)
+        with _LICENSE_OPERATION_LOCK:
+            data = self._post(
+                "/v1/transfers/claim",
+                {"transfer_code": normalized_code, "claim_token": normalized_token},
             )
             return self._install(data)
 

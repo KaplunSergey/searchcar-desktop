@@ -464,6 +464,76 @@ def test_lost_trial_response_retries_the_identical_signed_request(
     assert observed[0] == observed[1]
 
 
+def test_transfer_request_keeps_claim_token_out_of_license_state(tmp_path, monkeypatch) -> None:
+    worker_key = signing_state(monkeypatch)
+    license_id = "218f6ac2-8c44-7df0-8f6d-2d34af37b337"
+    device_id = "228f6ac2-8c44-7df0-8f6d-2d34af37b337"
+    transfer_code = "TR-23456-789AB-CDEFG-HJKLM"
+    claim_token = "A" * 32
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        body = json.loads(request.content)
+        unsigned = dict(body)
+        verify_device_request(unsigned)
+        if request.url.path == "/v1/transfers/request":
+            assert body.get("license_id") is None
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "data": {
+                        "transfer_code": transfer_code,
+                        "claim_token": claim_token,
+                        "expires_at": "2026-08-16T18:00:00.000Z",
+                    },
+                },
+            )
+        assert request.url.path == "/v1/transfers/claim"
+        assert body["transfer_code"] == transfer_code
+        assert body["claim_token"] == claim_token
+        now = datetime.now(timezone.utc)
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "data": {
+                    "license_id": license_id,
+                    "device_id": device_id,
+                    "lease": signed_lease(
+                        worker_key,
+                        body,
+                        license_id=license_id,
+                        device_id=device_id,
+                        now=now,
+                    ),
+                },
+            },
+        )
+
+    client = LicenseServiceClient(
+        tmp_path,
+        service_url="https://license.example.test",
+        store=MemoryStore(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    request = client.request_transfer()
+
+    assert request["transfer_code"] == transfer_code
+    assert request["claim_token"] == claim_token
+    assert not (tmp_path / "license").exists()
+
+    claimed = client.claim_transfer(request["transfer_code"], request["claim_token"])
+
+    assert claimed["license_id"] == license_id
+    assert requests == ["/v1/transfers/request", "/v1/transfers/claim"]
+    binding_text = (tmp_path / "license" / "binding.json").read_text()
+    assert claim_token not in binding_text
+    assert claim_token not in (tmp_path / "license" / "lease.json").read_text()
+
+
 def test_tampered_worker_lease_is_not_persisted(tmp_path, monkeypatch) -> None:
     signing_state(monkeypatch)
 

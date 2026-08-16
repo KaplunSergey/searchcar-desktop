@@ -1,7 +1,14 @@
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use chrono::DateTime;
+use ed25519_dalek::{Signature, VerifyingKey};
 use rand::{distr::Alphanumeric, Rng};
+use serde_json::Value;
 use std::{
+    collections::BTreeMap,
+    fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
+    path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex,
@@ -35,6 +42,147 @@ struct TrayStatus {
     enabled: bool,
     paused: bool,
     next_run_at: String,
+}
+
+const LEASE_MESSAGE_PREFIX: &str = "SEARCHCAR-LICENSE-LEASE-V1\n";
+
+/// Defense in depth for production builds.  The Python sidecar enforces the
+/// same signed lease after startup; the native shell verifies it before it
+/// starts any local HTTP server or browser process.
+fn verify_required_lease(config_path: &Path, data_dir: &Path) -> Result<(), String> {
+    let config: Value = read_json_value(config_path, "license configuration")?;
+    if !config
+        .get("enforcement")
+        .and_then(Value::as_str)
+        .unwrap_or("disabled")
+        .eq_ignore_ascii_case("required")
+    {
+        return Ok(());
+    }
+
+    let public_keys = config
+        .get("public_keys")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "license public keys are missing".to_string())?;
+    let binding_path = data_dir.join("license/binding.json");
+    let lease_path = data_dir.join("license/lease.json");
+    // A new desktop needs the sidecar in order to activate a trial or redeem
+    // a code. An expired but authentic lease similarly needs the UI to refresh
+    // it. The Python entitlement guard still blocks every scan in both cases.
+    if !binding_path.exists() && !lease_path.exists() {
+        return Ok(());
+    }
+    if !binding_path.is_file() || !lease_path.is_file() {
+        return Err("license state is incomplete".to_string());
+    }
+    let binding: Value = read_json_value(&binding_path, "license binding")?;
+    let lease: Value = read_json_value(&lease_path, "license lease")?;
+    let payload = lease
+        .get("payload")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "license lease payload is invalid".to_string())?;
+    let signature = lease
+        .get("signature")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "license lease signature is missing".to_string())?;
+    if payload.get("type").and_then(Value::as_str) != Some("searchcar-license-lease")
+        || payload.get("protocol_version").and_then(Value::as_i64) != Some(1)
+    {
+        return Err("license lease protocol is invalid".to_string());
+    }
+    let license_id = binding
+        .get("license_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "license binding is invalid".to_string())?;
+    let device_id = binding
+        .get("device_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "license binding is invalid".to_string())?;
+    if payload.get("license_id").and_then(Value::as_str) != Some(license_id)
+        || payload.get("device_id").and_then(Value::as_str) != Some(device_id)
+    {
+        return Err("license lease is bound to another device".to_string());
+    }
+    let key_id = payload
+        .get("key_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "license signing key is missing".to_string())?;
+    let public_key = public_keys
+        .get(key_id)
+        .and_then(Value::as_str)
+        .ok_or_else(|| "license signing key is not trusted".to_string())?;
+    let public_key: [u8; 32] = URL_SAFE_NO_PAD
+        .decode(public_key)
+        .map_err(|_| "license signing key encoding is invalid".to_string())?
+        .try_into()
+        .map_err(|_| "license signing key length is invalid".to_string())?;
+    let signature = Signature::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(signature)
+            .map_err(|_| "license signature encoding is invalid".to_string())?,
+    )
+    .map_err(|_| "license signature length is invalid".to_string())?;
+    let canonical = canonical_json(&Value::Object(payload.clone()))?;
+    VerifyingKey::from_bytes(&public_key)
+        .map_err(|_| "license signing key is invalid".to_string())?
+        .verify_strict(
+            format!("{LEASE_MESSAGE_PREFIX}{canonical}").as_bytes(),
+            &signature,
+        )
+        .map_err(|_| "license signature is invalid".to_string())?;
+    for field in ["subscription_expires_at", "lease_expires_at"] {
+        let value = payload
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("license {field} is missing"))?;
+        DateTime::parse_from_rfc3339(value)
+            .map_err(|_| format!("license {field} is invalid"))?;
+    }
+    Ok(())
+}
+
+fn read_json_value(path: &Path, label: &str) -> Result<Value, String> {
+    let content = fs::read_to_string(path).map_err(|_| format!("{label} is unavailable"))?;
+    serde_json::from_str(&content).map_err(|_| format!("{label} is invalid"))
+}
+
+/// Matches the Worker/Python canonical JSON contract rather than relying on a
+/// serializer's object-order implementation detail.
+fn canonical_json(value: &Value) -> Result<String, String> {
+    match value {
+        Value::Null | Value::Bool(_) | Value::String(_) => {
+            serde_json::to_string(value).map_err(|_| "license payload is invalid".to_string())
+        }
+        Value::Number(number) => {
+            if let Some(value) = number.as_i64() {
+                Ok(value.to_string())
+            } else if let Some(value) = number.as_u64() {
+                Ok(value.to_string())
+            } else {
+                Err("license payload number is invalid".to_string())
+            }
+        }
+        Value::Array(items) => items
+            .iter()
+            .map(canonical_json)
+            .collect::<Result<Vec<_>, _>>()
+            .map(|items| format!("[{}]", items.join(","))),
+        Value::Object(items) => {
+            let ordered: BTreeMap<_, _> = items.iter().collect();
+            ordered
+                .into_iter()
+                .map(|(key, value)| {
+                    Ok(format!(
+                        "{}:{}",
+                        serde_json::to_string(key)
+                            .map_err(|_| "license payload key is invalid".to_string())?,
+                        canonical_json(value)?
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()
+                .map(|items| format!("{{{}}}", items.join(",")))
+        }
+    }
 }
 
 fn available_port() -> Result<u16, String> {
@@ -255,6 +403,8 @@ pub fn run() {
                 .join("playwright-driver");
             let license_config = app.path().resource_dir()?.join("license-service.json");
             std::fs::create_dir_all(&data_dir)?;
+            verify_required_lease(&license_config, &data_dir)
+                .map_err(|error| std::io::Error::other(format!("license preflight failed: {error}")))?;
 
             let mut sidecar_arguments = vec![
                 "serve".to_string(),
@@ -430,4 +580,82 @@ pub fn run() {
         RunEvent::Exit => stop_sidecar(app),
         _ => {}
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use ed25519_dalek::{Signer, SigningKey};
+    use serde_json::json;
+    use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+
+    fn temporary_directory() -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock is after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("searchcar-license-test-{}-{nonce}", std::process::id()))
+    }
+
+    #[test]
+    fn required_preflight_accepts_only_a_matching_signed_unexpired_lease() {
+        let directory = temporary_directory();
+        let data_dir = directory.join("data");
+        let config_path = directory.join("license-service.json");
+        let license_id = "018f6ac2-8c44-7df0-8f6d-2d34af37b337";
+        let device_id = "028f6ac2-8c44-7df0-8f6d-2d34af37b337";
+        let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+        let public_key = URL_SAFE_NO_PAD.encode(signing_key.verifying_key().as_bytes());
+        let expires_at = (Utc::now() + ChronoDuration::hours(1)).to_rfc3339();
+        fs::create_dir_all(&directory).expect("temporary directory");
+        let payload = json!({
+            "type": "searchcar-license-lease",
+            "protocol_version": 1,
+            "key_id": "test-v1",
+            "server_time": Utc::now().to_rfc3339(),
+            "issued_at": Utc::now().to_rfc3339(),
+            "license_id": license_id,
+            "device_id": device_id,
+            "license_type": "SUBSCRIPTION",
+            "subscription_expires_at": expires_at,
+            "lease_expires_at": expires_at,
+            "entitlements": {"search": true}
+        });
+        let canonical = canonical_json(&payload).expect("canonical payload");
+        let signature = URL_SAFE_NO_PAD.encode(
+            signing_key.sign(format!("{LEASE_MESSAGE_PREFIX}{canonical}").as_bytes()).to_bytes(),
+        );
+        fs::write(
+            &config_path,
+            json!({
+                "enforcement": "required",
+                "public_keys": {"test-v1": public_key}
+            })
+            .to_string(),
+        )
+        .expect("configuration");
+        assert!(verify_required_lease(&config_path, &data_dir).is_ok());
+        fs::create_dir_all(data_dir.join("license")).expect("license directory");
+        fs::write(
+            data_dir.join("license/binding.json"),
+            json!({"license_id": license_id, "device_id": device_id}).to_string(),
+        )
+        .expect("binding");
+        fs::write(
+            data_dir.join("license/lease.json"),
+            json!({"payload": payload, "signature": signature}).to_string(),
+        )
+        .expect("lease");
+
+        assert!(verify_required_lease(&config_path, &data_dir).is_ok());
+
+        fs::write(
+            data_dir.join("license/binding.json"),
+            json!({"license_id": license_id, "device_id": "different-device"}).to_string(),
+        )
+        .expect("tampered binding");
+        assert!(verify_required_lease(&config_path, &data_dir).is_err());
+        fs::remove_dir_all(directory).expect("temporary directory cleanup");
+    }
 }

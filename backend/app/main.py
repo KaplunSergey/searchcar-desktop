@@ -79,6 +79,7 @@ from .schemas import (
     SchedulerIn,
     DesktopMigrationIn,
     DesktopLicenseRedeemIn,
+    DesktopLicenseTransferClaimIn,
     DesktopLicenseTrialIn,
     ExternalUrlIn,
     RegistrationIn,
@@ -2220,6 +2221,26 @@ def redeem_desktop_license(
     return _desktop_license_operation(
         "redeem",
         lambda client: client.redeem(body.activation_code)
+    )
+
+
+@app.post("/api/desktop/license/transfer/request")
+def request_desktop_license_transfer(current: User = Depends(require_csrf)) -> dict:
+    """Start a device transfer from the destination desktop only."""
+
+    _desktop_license_admin(current)
+    return _desktop_license_operation("transfer_request", lambda client: client.request_transfer())
+
+
+@app.post("/api/desktop/license/transfer/claim")
+def claim_desktop_license_transfer(
+    body: DesktopLicenseTransferClaimIn,
+    current: User = Depends(require_csrf),
+) -> dict:
+    _desktop_license_admin(current)
+    return _desktop_license_operation(
+        "transfer_claim",
+        lambda client: client.claim_transfer(body.transfer_code, body.claim_token),
     )
 
 
