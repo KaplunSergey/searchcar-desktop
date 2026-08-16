@@ -1,6 +1,8 @@
 {
   "protocol_version": 1,
-  "service_url": "",
-  "public_keys": {},
+  "service_url": "https://searchcar-license-service.mapatar23.workers.dev",
+  "public_keys": {
+    "searchcar-license-v1": "yuEaFu6U3l53W4umYMqu3wj_-uLcvEQpS-U4lq8eqyI"
+  },
   "enforcement": "disabled"
 }
