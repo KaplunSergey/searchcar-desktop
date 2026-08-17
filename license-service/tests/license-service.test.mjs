@@ -6,9 +6,10 @@ import { webcrypto } from "node:crypto";
 import { Miniflare } from "miniflare";
 
 const encoder = new TextEncoder();
-const migration = await readFile(
-  new URL("../migrations/0001_initial.sql", import.meta.url),
-  "utf8",
+const migrations = await Promise.all(
+  ["0001_initial.sql", "0002_owner_admin.sql"].map((name) =>
+    readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"),
+  ),
 );
 
 function splitMigrationStatements(sql) {
@@ -136,6 +137,7 @@ before(async () => {
       CODE_PEPPER: "test-code-pepper-with-enough-entropy",
       RATE_LIMIT_PEPPER: "test-rate-pepper-with-enough-entropy",
       ADMIN_API_TOKEN: "test-admin-token-with-enough-entropy",
+      OWNER_PASSWORD_PEPPER: "test-owner-password-pepper-with-enough-entropy",
       LEASE_HOURS: "48",
       TRIAL_DAYS: "30",
       PUBLIC_RATE_LIMIT_PER_MINUTE: "100",
@@ -144,8 +146,10 @@ before(async () => {
   });
   await mf.ready;
   database = await mf.getD1Database("LICENSE_DB");
-  for (const statement of splitMigrationStatements(migration)) {
-    await database.prepare(statement).run();
+  for (const migration of migrations) {
+    for (const statement of splitMigrationStatements(migration)) {
+      await database.prepare(statement).run();
+    }
   }
   localRuntimeAvailable = true;
 });
@@ -175,6 +179,22 @@ async function admin(path, body) {
   });
 }
 
+async function ownerApi(path, body, cookie) {
+  const response = await mf.dispatchFetch(`https://license.test${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: cookie,
+      Origin: "https://license.test",
+      "Idempotency-Key": crypto.randomUUID(),
+      "X-Request-Id": crypto.randomUUID(),
+      "CF-Connecting-IP": "203.0.113.25",
+    },
+    body: JSON.stringify(body),
+  });
+  return { response, json: await response.json() };
+}
+
 async function verifyLease(lease) {
   const valid = await webcrypto.subtle.verify(
     { name: "Ed25519" },
@@ -197,6 +217,86 @@ test("Worker signing identity matches the desktop trust store", async () => {
   const keyId = worker.vars.LICENSE_SIGNING_KEY_ID;
   assert.equal(keyId, "searchcar-license-v1");
   assert.equal(worker.vars.LICENSE_SIGNING_PUBLIC_KEY, desktop.public_keys[keyId]);
+});
+
+test("owner bootstrap creates a protected cookie session exactly once", async (context) => {
+  if (!localRuntimeAvailable) return context.skip("loopback sockets are blocked by this sandbox");
+  const password = "correct-horse-battery-staple-owner";
+  const created = await api(
+    "/v1/owner/bootstrap",
+    { login: "searchcar-owner", password },
+    { Authorization: "Bearer test-admin-token-with-enough-entropy" },
+  );
+  assert.equal(created.response.status, 201);
+  assert.equal(created.json.data.login, "searchcar-owner");
+  const cookie = created.response.headers.get("Set-Cookie");
+  assert.match(cookie, /__Host-searchcar_owner=[A-Za-z0-9_-]{43}; Path=\/; HttpOnly; Secure; SameSite=Strict/u);
+
+  const invalidLogin = await api("/v1/owner/login", {
+    login: "searchcar-owner",
+    password: "wrong-password-which-is-long-enough",
+  });
+  assert.equal(invalidLogin.response.status, 401);
+  assert.equal(invalidLogin.json.error.code, "OWNER_LOGIN_FAILED");
+
+  const login = await api("/v1/owner/login", { login: "searchcar-owner", password });
+  assert.equal(login.response.status, 200);
+  const loginCookie = login.response.headers.get("Set-Cookie");
+  const session = await mf.dispatchFetch("https://license.test/v1/owner/session", {
+    headers: { Cookie: loginCookie.split(";", 1)[0] },
+  });
+  assert.equal(session.status, 200);
+  assert.equal((await session.json()).data.login, "searchcar-owner");
+
+  const status = await mf.dispatchFetch("https://license.test/v1/owner/status");
+  assert.equal(status.status, 200);
+  assert.equal((await status.json()).data.configured, true);
+
+  const ownerCookie = loginCookie.split(";", 1)[0];
+  const customer = await ownerApi(
+    "/v1/owner/customers",
+    { display_name: "Owner dashboard customer", contact: "owner-dashboard@example.test" },
+    ownerCookie,
+  );
+  assert.equal(customer.response.status, 200);
+  const license = await ownerApi(
+    "/v1/owner/licenses",
+    { customer_id: customer.json.data.customer_id },
+    ownerCookie,
+  );
+  assert.equal(license.response.status, 200);
+  const activation = await ownerApi(
+    "/v1/owner/activation-codes",
+    { license_id: license.json.data.license_id, duration: "P1M" },
+    ownerCookie,
+  );
+  assert.equal(activation.response.status, 200);
+  assert.match(activation.json.data.activation_code, /^SC-/u);
+  const dashboard = await mf.dispatchFetch("https://license.test/v1/owner/dashboard", {
+    headers: { Cookie: ownerCookie },
+  });
+  assert.equal(dashboard.status, 200);
+  const dashboardData = (await dashboard.json()).data;
+  assert.equal(dashboardData.customers.some((row) => row.id === customer.json.data.customer_id), true);
+  assert.equal(dashboardData.audit_events.some((row) => row.action === "ACTIVATION_CODE_CREATED"), true);
+
+  const logout = await mf.dispatchFetch("https://license.test/v1/owner/logout", {
+    method: "POST",
+    headers: {
+      Cookie: ownerCookie,
+      Origin: "https://license.test",
+    },
+  });
+  assert.equal(logout.status, 200);
+  assert.match(logout.headers.get("Set-Cookie"), /Max-Age=0/u);
+
+  const repeated = await api(
+    "/v1/owner/bootstrap",
+    { login: "another-owner", password },
+    { Authorization: "Bearer test-admin-token-with-enough-entropy" },
+  );
+  assert.equal(repeated.response.status, 409);
+  assert.equal(repeated.json.error.code, "OWNER_ALREADY_CONFIGURED");
 });
 
 test("trial is single-use, idempotent and returns a verifiable server-time lease", async (context) => {
@@ -300,8 +400,10 @@ test("invalid signing key does not consume a trial", async (context) => {
   try {
     await broken.ready;
     const brokenDatabase = await broken.getD1Database("LICENSE_DB");
-    for (const statement of splitMigrationStatements(migration)) {
-      await brokenDatabase.prepare(statement).run();
+    for (const migration of migrations) {
+      for (const statement of splitMigrationStatements(migration)) {
+        await brokenDatabase.prepare(statement).run();
+      }
     }
     const device = await createDevice("invalid-signing-device");
     const body = await signedBody(device, { subject_hash: "d".repeat(64) });
@@ -375,8 +477,10 @@ test("mismatched signing pair consumes neither trial nor activation code", async
   try {
     await mismatched.ready;
     const mismatchedDatabase = await mismatched.getD1Database("LICENSE_DB");
-    for (const statement of splitMigrationStatements(migration)) {
-      await mismatchedDatabase.prepare(statement).run();
+    for (const migration of migrations) {
+      for (const statement of splitMigrationStatements(migration)) {
+        await mismatchedDatabase.prepare(statement).run();
+      }
     }
 
     const trialDevice = await createDevice("mismatched-trial-device");

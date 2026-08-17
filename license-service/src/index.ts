@@ -6,6 +6,8 @@ import {
   enforceRateLimit,
 } from "./database";
 import { ApiError, asApiError } from "./errors";
+import { handleOwnerRoute } from "./owner_auth";
+import { ownerPage } from "./owner_ui";
 import {
   activateTrial,
   approveAdminTransfer,
@@ -227,6 +229,10 @@ async function route(request: Request, env: Env): Promise<Response> {
     requireConfigured(env);
     return jsonResponse(200, { ok: true, data: await latestRelease(env) });
   }
+  if (request.method === "GET" && (url.pathname === "/owner" || url.pathname === "/owner/")) {
+    return ownerPage();
+  }
+  if (url.pathname.startsWith("/v1/owner/")) return handleOwnerRoute(request, env);
   if (request.method !== "POST") {
     throw new ApiError(405, "METHOD_NOT_ALLOWED", "This endpoint only accepts POST.");
   }

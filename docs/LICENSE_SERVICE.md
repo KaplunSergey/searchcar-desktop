@@ -2,8 +2,9 @@
 
 This is the Phase 6 Cloudflare Worker and D1 foundation. Client-side key
 storage, offline lease verification and entitlement enforcement belong to
-Phase 7. The Phase 6 admin endpoints use a bootstrap bearer secret; the
-short-session owner login and web UI replace that bootstrap in Phase 8.
+Phase 7. The Phase 6 admin endpoints use a bootstrap bearer secret. Phase 8
+adds a short-session owner login; the bootstrap secret is then retained only
+for the one-time creation of the first owner and emergency recovery.
 
 ## Security and protocol invariants
 
@@ -90,6 +91,29 @@ These temporary Phase 6 endpoints require `Authorization: Bearer
 Plain activation and transfer codes are returned exactly once. Audit rows never
 contain those plaintext values.
 
+## Owner management panel
+
+The Worker now provides the Phase 8 owner-session foundation:
+
+- `POST /v1/owner/bootstrap` creates the first owner once and requires the
+  bootstrap `ADMIN_API_TOKEN` bearer secret;
+- `POST /v1/owner/login` creates a 12-hour `HttpOnly`, `Secure`,
+  `SameSite=Strict` owner session;
+- `GET /v1/owner/session` returns the currently authenticated owner;
+- `GET /v1/owner/dashboard` returns the owner-visible customers, licenses,
+  activation codes and transfer requests;
+- `POST /v1/owner/logout` requires a same-origin request and clears the
+  session.
+
+Passwords are salted PBKDF2-SHA-256 records with a separate
+`OWNER_PASSWORD_PEPPER` Worker secret. `GET /owner` serves the same-origin
+owner panel: it creates customers and subscription placeholders, generates
+one-time activation codes, approves pending device transfers, and shows recent
+device history plus the audit journal. Each mutation is CSRF-protected and
+idempotent; the plaintext activation code is displayed only at creation time.
+Do not send an owner password or either secret in chat, source control or
+browser query parameters.
+
 ## Local setup
 
 1. Replace `REPLACE_WITH_D1_DATABASE_ID` in
@@ -107,6 +131,7 @@ contain those plaintext values.
    pnpm exec wrangler secret put CODE_PEPPER --config license-service/wrangler.jsonc
    pnpm exec wrangler secret put RATE_LIMIT_PEPPER --config license-service/wrangler.jsonc
    pnpm exec wrangler secret put ADMIN_API_TOKEN --config license-service/wrangler.jsonc
+   pnpm exec wrangler secret put OWNER_PASSWORD_PEPPER --config license-service/wrangler.jsonc
    ```
 
 4. Keep `license-signing-public-key.json` for the Phase 7 client. Never commit
@@ -140,7 +165,7 @@ GitHub workflow runs them in a normal runner.
 ## Deploy
 
 Create a D1 database named `searchcar-license-production`, update its ID in the
-Wrangler config and set all four Worker secrets. Add
+Wrangler config and set all five Worker secrets. Add
 `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` to the GitHub environment
 `license-production`. Run the `License service` workflow with `deploy=true`.
 Tests complete before migrations and deployment.

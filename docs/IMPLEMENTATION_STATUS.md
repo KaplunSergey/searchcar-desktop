@@ -200,3 +200,25 @@ build and installed-OS pilot are deliberately deferred until after the current
 macOS license-service rollout.
 Native tray notifications and installed-OS scheduler tests remain tracked as M5
 polish. OS autostart is explicitly out of scope.
+
+## Milestone M8 — owner license administration
+
+Implemented:
+
+- D1 singleton guard for one-time owner bootstrap;
+- salted PBKDF2 owner password records with a dedicated Worker pepper;
+- 12-hour `HttpOnly`, `Secure`, `SameSite=Strict` owner sessions;
+- owner bootstrap, login, session inspection and same-origin logout endpoints;
+- same-origin `/owner` panel for login, first-owner setup, customer creation,
+  subscription placeholders, activation-code creation and transfer approval;
+- owner dashboard API for recent customers, licenses, code history and device
+  transfer requests, device history and audit events;
+- integration coverage for bootstrap-once, failed login, session, logout and
+  authenticated owner administration.
+
+Still required:
+
+- deploy migration `0002_owner_admin.sql`, provision `OWNER_PASSWORD_PEPPER`
+  and bootstrap the first owner outside source control;
+- add searchable device history, audit export, suspension/revocation and
+  owner-account recovery before opening paid sales beyond the pilot.

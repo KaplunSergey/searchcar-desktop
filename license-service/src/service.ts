@@ -672,7 +672,12 @@ export async function latestRelease(env: Env) {
   };
 }
 
-export async function createAdminCustomer(env: Env, value: unknown, now: Date) {
+export async function createAdminCustomer(
+  env: Env,
+  value: unknown,
+  now: Date,
+  actorId = "bootstrap-token",
+) {
   const body = asObject(value);
   const id = crypto.randomUUID();
   const displayName = requireString(body, "display_name", { min: 1, max: 120 });
@@ -695,7 +700,7 @@ export async function createAdminCustomer(env: Env, value: unknown, now: Date) {
       id: crypto.randomUUID(),
       dedupeKey: `customer-create:${id}`,
       actorType: "ADMIN",
-      actorId: "bootstrap-token",
+      actorId,
       action: "CUSTOMER_CREATED",
       targetType: "CUSTOMER",
       targetId: id,
@@ -705,7 +710,12 @@ export async function createAdminCustomer(env: Env, value: unknown, now: Date) {
   return { customer_id: id };
 }
 
-export async function createAdminLicense(env: Env, value: unknown, now: Date) {
+export async function createAdminLicense(
+  env: Env,
+  value: unknown,
+  now: Date,
+  actorId = "bootstrap-token",
+) {
   const body = asObject(value);
   const customerId = requireString(body, "customer_id", { min: 36, max: 36 });
   const customer = await env.LICENSE_DB.prepare("SELECT id FROM customers WHERE id = ?")
@@ -725,7 +735,7 @@ export async function createAdminLicense(env: Env, value: unknown, now: Date) {
       id: crypto.randomUUID(),
       dedupeKey: `license-create:${id}`,
       actorType: "ADMIN",
-      actorId: "bootstrap-token",
+      actorId,
       action: "LICENSE_CREATED",
       targetType: "LICENSE",
       targetId: id,
@@ -735,7 +745,12 @@ export async function createAdminLicense(env: Env, value: unknown, now: Date) {
   return { license_id: id, expires_at: nowIso };
 }
 
-export async function createAdminActivationCode(env: Env, value: unknown, now: Date) {
+export async function createAdminActivationCode(
+  env: Env,
+  value: unknown,
+  now: Date,
+  actorId = "bootstrap-token",
+) {
   const body = asObject(value);
   const licenseId = requireString(body, "license_id", { min: 36, max: 36 });
   const duration = requireString(body, "duration", { min: 3, max: 10 });
@@ -762,7 +777,7 @@ export async function createAdminActivationCode(env: Env, value: unknown, now: D
       `INSERT INTO activation_codes
          (id, license_id, code_hash, code_hint, duration_months, makes_perpetual,
           expires_at, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'bootstrap-token', ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       id,
       licenseId,
@@ -771,13 +786,14 @@ export async function createAdminActivationCode(env: Env, value: unknown, now: D
       durationMap[duration],
       duration === "PERPETUAL" ? 1 : 0,
       expiresAt,
+      actorId,
       nowIso,
     ),
     auditStatement(env, {
       id: crypto.randomUUID(),
       dedupeKey: `activation-code-create:${id}`,
       actorType: "ADMIN",
-      actorId: "bootstrap-token",
+      actorId,
       action: "ACTIVATION_CODE_CREATED",
       targetType: "ACTIVATION_CODE",
       targetId: id,
@@ -788,17 +804,31 @@ export async function createAdminActivationCode(env: Env, value: unknown, now: D
   return { activation_code_id: id, activation_code: code, expires_at: expiresAt };
 }
 
-export async function approveAdminTransfer(env: Env, value: unknown, now: Date) {
+export async function approveAdminTransfer(
+  env: Env,
+  value: unknown,
+  now: Date,
+  actorId = "bootstrap-token",
+) {
   const body = asObject(value);
-  const transferCode = normalizeCode(requireString(body, "transfer_code", { max: 40 }), "TR");
+  const transferId = body.transfer_id === undefined || body.transfer_id === null
+    ? undefined
+    : requireString(body, "transfer_id", {
+      min: 36,
+      max: 36,
+      pattern: /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/iu,
+    });
+  const transferCode = transferId
+    ? null
+    : normalizeCode(requireString(body, "transfer_code", { max: 40 }), "TR");
   const licenseId = requireString(body, "license_id", { min: 36, max: 36 });
   const transfer = await env.LICENSE_DB.prepare(
     `SELECT id, status, claim_token_hash, requested_public_key,
             requested_fingerprint_hash, requested_label, requested_app_version,
             expires_at, license_id, old_device_id, new_device_id
-       FROM device_transfers WHERE public_code_hash = ?`,
+       FROM device_transfers WHERE ${transferId ? "id = ?" : "public_code_hash = ?"}`,
   )
-    .bind(await pepperedHash(env.CODE_PEPPER, transferCode))
+    .bind(transferId ?? (await pepperedHash(env.CODE_PEPPER, transferCode!)))
     .first<TransferRow>();
   if (
     !transfer ||
@@ -836,9 +866,9 @@ export async function approveAdminTransfer(env: Env, value: unknown, now: Date) 
       env.LICENSE_DB.prepare(
         `UPDATE device_transfers
             SET status = 'APPROVED', license_id = ?, old_device_id = ?,
-                new_device_id = ?, approved_at = ?, approved_by = 'bootstrap-token'
+                new_device_id = ?, approved_at = ?, approved_by = ?
           WHERE id = ? AND status = 'PENDING'`,
-      ).bind(licenseId, oldDevice.id, newDeviceId, nowIso, transfer.id),
+      ).bind(licenseId, oldDevice.id, newDeviceId, nowIso, actorId, transfer.id),
       env.LICENSE_DB.prepare(
         "UPDATE licenses SET activation_count = activation_count + 1, updated_at = ? WHERE id = ?",
       ).bind(nowIso, licenseId),
@@ -846,7 +876,7 @@ export async function approveAdminTransfer(env: Env, value: unknown, now: Date) 
         id: crypto.randomUUID(),
         dedupeKey: `transfer-approve:${transfer.id}`,
         actorType: "ADMIN",
-        actorId: "bootstrap-token",
+        actorId,
         action: "TRANSFER_APPROVED",
         targetType: "DEVICE_TRANSFER",
         targetId: transfer.id,

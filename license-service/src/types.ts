@@ -6,6 +6,7 @@ export interface Env {
   CODE_PEPPER: string;
   RATE_LIMIT_PEPPER: string;
   ADMIN_API_TOKEN: string;
+  OWNER_PASSWORD_PEPPER: string;
   LEASE_HOURS?: string;
   TRIAL_DAYS?: string;
   PUBLIC_RATE_LIMIT_PER_MINUTE?: string;
