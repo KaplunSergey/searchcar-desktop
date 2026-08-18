@@ -2,23 +2,12 @@ name: macOS desktop pilot
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - ".github/workflows/macos-desktop.yml"
-      - "backend/**"
-      - "desktop/**"
-      - "scripts/**"
-      - "package.json"
-      - "pnpm-lock.yaml"
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/macos-desktop.yml"
-      - "backend/**"
-      - "desktop/**"
-      - "scripts/**"
-      - "package.json"
-      - "pnpm-lock.yaml"
+    inputs:
+      include_diagnostic_standalone:
+        description: "Also compile and check the slow standalone diagnostic sidecar"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -94,6 +83,7 @@ jobs:
           python scripts/prepare_desktop_playwright_driver.py
 
       - name: Compile diagnostic standalone sidecar
+        if: ${{ inputs.include_diagnostic_standalone == true }}
         run: |
           python scripts/build_desktop_sidecar.py --mode standalone
           standalone="$(find work/nuitka/aarch64-apple-darwin/standalone -type f -name 'searchcar-core-aarch64-apple-darwin' | head -n 1)"

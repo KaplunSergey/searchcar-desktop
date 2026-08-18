@@ -163,7 +163,7 @@ Implemented:
 - structured audit events and aggregated device/version checks;
 - temporary secret-protected bootstrap admin endpoints for Phase 8 to replace;
 - Miniflare/D1 concurrency and transfer tests;
-- manual deploy workflow plus encrypted scheduled D1 backup workflow;
+- manual deploy workflow plus manually started encrypted D1 backup workflow;
 - documented key generation, deployment, backup and clean-database recovery.
 
 Validation still required before M6 is deployed:
