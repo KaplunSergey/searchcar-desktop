@@ -31,6 +31,7 @@ LICENSE_LEASE_NAME = "lease.json"
 TRUSTED_TIME_NAME = "trusted-time.json"
 CLOCK_ROLLBACK_TOLERANCE = timedelta(minutes=5)
 _BASE64URL = re.compile(r"^[A-Za-z0-9_-]+$")
+_SOURCE_KEY = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 _TRUSTED_TIME_LOCK = threading.Lock()
 
 
@@ -58,6 +59,7 @@ class EntitlementDecision:
     subscription_expires_at: str | None = None
     lease_expires_at: str | None = None
     effective_time: str | None = None
+    sources: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -331,6 +333,22 @@ def evaluate_search_entitlement(
         entitlements = payload.get("entitlements")
         if not isinstance(entitlements, dict) or entitlements.get("search") is not True:
             raise LicenseStateError("LICENSE_SEARCH_DISABLED")
+        # Leases issued before the source catalog existed are valid only for
+        # the originally supported Encar source.  New leases always contain a
+        # signed explicit list, so adding another source never silently grants
+        # it to an older customer.
+        raw_sources = entitlements.get("sources", ["encar"])
+        if (
+            not isinstance(raw_sources, list)
+            or not raw_sources
+            or len(raw_sources) > 32
+            or any(
+                not isinstance(source, str) or not _SOURCE_KEY.fullmatch(source)
+                for source in raw_sources
+            )
+        ):
+            raise LicenseStateError("LICENSE_SOURCES_INVALID")
+        sources = tuple(sorted(set(raw_sources)))
         if effective_time >= lease_expires_at:
             raise LicenseStateError("LICENSE_LEASE_EXPIRED")
         subscription_value = payload.get("subscription_expires_at")
@@ -355,6 +373,7 @@ def evaluate_search_entitlement(
             ),
             lease_expires_at=_iso(lease_expires_at),
             effective_time=_iso(effective_time),
+            sources=sources,
         )
     except LicenseStateError as exc:
         return EntitlementDecision(
@@ -365,8 +384,17 @@ def evaluate_search_entitlement(
         )
 
 
-def require_search_entitlement(**kwargs: Any) -> EntitlementDecision:
+def require_search_entitlement(
+    source_key: str | None = None,
+    **kwargs: Any,
+) -> EntitlementDecision:
     decision = evaluate_search_entitlement(**kwargs)
     if not decision.can_search:
         raise SearchEntitlementError(decision.reason or "LICENSE_REQUIRED")
+    if (
+        source_key is not None
+        and decision.mode == "required"
+        and source_key not in decision.sources
+    ):
+        raise SearchEntitlementError("LICENSE_SOURCE_NOT_ALLOWED")
     return decision

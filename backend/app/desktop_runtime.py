@@ -414,7 +414,7 @@ def create_desktop_app(
     app.add_middleware(DesktopSessionMiddleware)
 
     @app.get("/desktop/bootstrap", include_in_schema=False)
-    def desktop_bootstrap(token: str):
+    def desktop_bootstrap(token: str, request: Request):
         if not hmac.compare_digest(token, session_secret):
             raise HTTPException(403, "invalid_desktop_session")
         response = RedirectResponse(url="/", status_code=303)
@@ -425,6 +425,30 @@ def create_desktop_app(
             secure=False,
             samesite="strict",
         )
+        # A passwordless workspace receives a fresh local browser session on
+        # every application launch.  Legacy installations retain their normal
+        # local login flow and are never converted implicitly.
+        from .auth import create_session, now_utc, sync_csrf_cookie
+        from .database import SessionLocal, settings
+        from .desktop_onboarding import desktop_workspace_user
+
+        with SessionLocal() as db:
+            user = desktop_workspace_user(db)
+            if user is not None:
+                auth_token, _, session = create_session(db, user, request)
+                user.last_login_at = now_utc()
+                user.last_activity_at = user.last_login_at
+                sync_csrf_cookie(request, response, session)
+                db.commit()
+                response.set_cookie(
+                    settings.auth_cookie_name,
+                    auth_token,
+                    httponly=True,
+                    secure=settings.auth_cookie_secure,
+                    samesite="lax",
+                    max_age=settings.auth_session_days * 24 * 60 * 60,
+                    path="/",
+                )
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -833,25 +857,11 @@ def main() -> None:
     initialize_database()
     from sqlalchemy import select
     from .database import SessionLocal, engine
-    from .desktop_onboarding import ensure_initial_admin
     from .desktop_scheduler import prepare_overdue_scheduler_catch_up
     from .job_queue import recover_interrupted_jobs
     from .models import ScanRun
     from .worker import run as run_worker
 
-    created_admin = ensure_initial_admin(
-        SessionLocal,
-        username=os.environ.get("SEARCHCAR_INITIAL_ADMIN_USERNAME", "Serhii"),
-        password=os.environ.get(
-            "SEARCHCAR_INITIAL_ADMIN_PASSWORD",
-            "sergiokap09",
-        ),
-    )
-    if created_admin:
-        logging.getLogger(__name__).info(
-            "Created initial desktop administrator: %s",
-            created_admin.username,
-        )
     recovered_jobs = recover_interrupted_jobs(engine)
     if recovered_jobs:
         logging.getLogger(__name__).warning(

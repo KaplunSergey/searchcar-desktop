@@ -537,7 +537,7 @@ def process_job(job_id: int) -> None:
         try:
             from .desktop_license import require_search_entitlement
 
-            require_search_entitlement()
+            require_search_entitlement("encar")
             from playwright.sync_api import sync_playwright
 
             with sync_playwright() as playwright:
@@ -1165,12 +1165,16 @@ def process_job(job_id: int) -> None:
 
 
 def enqueue_scheduled(*, now: datetime | None = None) -> None:
-    from .desktop_license import evaluate_search_entitlement
+    from .desktop_license import SearchEntitlementError, require_search_entitlement
     from .maintenance import maintenance_active
 
     if maintenance_active():
         return
-    entitlement = evaluate_search_entitlement()
+    try:
+        require_search_entitlement("encar")
+        can_run_scheduled_search = True
+    except SearchEntitlementError:
+        can_run_scheduled_search = False
     with SessionLocal.begin() as db:
         current = now or datetime.now(timezone.utc)
         settings_to_check = list(
@@ -1193,7 +1197,7 @@ def enqueue_scheduled(*, now: datetime | None = None) -> None:
                 continue
             if setting.next_run_at > current:
                 continue
-            if not entitlement.can_search:
+            if not can_run_scheduled_search:
                 setting.next_run_at = current + timedelta(
                     minutes=setting.interval_minutes
                 )

@@ -84,6 +84,9 @@ class DesktopLicenseTrialIn(BaseModel):
 class DesktopLicenseRedeemIn(BaseModel):
     activation_code:str=Field(min_length=10,max_length=40)
 
+class DesktopOnboardingActivateIn(DesktopLicenseRedeemIn):
+    preferred_locale:Literal["ru","uk"]="ru"
+
 class DesktopLicenseTransferClaimIn(BaseModel):
     transfer_code: str = Field(min_length=10, max_length=40)
     claim_token: str = Field(min_length=32, max_length=64)

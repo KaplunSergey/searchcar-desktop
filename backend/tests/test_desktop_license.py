@@ -54,6 +54,7 @@ def license_state(tmp_path, *, lease_hours=48, subscription_days=30):
             "search": True,
             "data_access": True,
             "backup_restore": True,
+            "sources": ["encar"],
         },
         "app_version": "0.1.0",
     }
@@ -95,6 +96,7 @@ def test_valid_signed_lease_allows_offline_search(tmp_path) -> None:
     assert result.can_search is True
     assert result.status == "active"
     assert result.license_type == "SUBSCRIPTION"
+    assert result.sources == ("encar",)
     assert (state["directory"] / "trusted-time.json").is_file()
 
 
@@ -180,6 +182,20 @@ def test_pilot_mode_does_not_require_license_state(tmp_path) -> None:
 
     assert result.can_search is True
     assert result.status == "pilot"
+
+
+def test_required_mode_blocks_a_source_not_granted_by_the_signed_lease(tmp_path) -> None:
+    state = license_state(tmp_path)
+    from app.desktop_license import SearchEntitlementError, require_search_entitlement
+
+    with pytest.raises(SearchEntitlementError, match="LICENSE_SOURCE_NOT_ALLOWED"):
+        require_search_entitlement(
+            "kcar",
+            now=state["now"] + timedelta(hours=1),
+            data_dir=state["directory"].parent,
+            public_keys=state["public_keys"],
+            mode="required",
+        )
 
 
 def database_factory(tmp_path):

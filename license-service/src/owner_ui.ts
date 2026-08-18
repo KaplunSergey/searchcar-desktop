@@ -18,7 +18,7 @@ const OWNER_APP = String.raw`<!doctype html>
     button { min-height:42px; padding:9px 15px; border:0; border-radius:9px; color:#fff; background:#3569d4; font:inherit; font-weight:700; cursor:pointer; }
     button.secondary { color:#29405f; background:#fff; border:1px solid #c9d5e7; } button:disabled { opacity:.55; cursor:wait; }
     .row { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }.actions { display:flex; gap:10px; align-items:end; flex-wrap:wrap; }
-    .message { margin:14px 0 0; padding:12px; border-radius:9px; background:#eef5ff; color:#29405f; }.message.error { background:#fff0f1; color:#a12d3d; }.muted { color:#7083a2; font-size:14px; line-height:1.55; }
+    .message { margin:14px 0 0; padding:12px; border-radius:9px; background:#eef5ff; color:#29405f; }.message.error { background:#fff0f1; color:#a12d3d; }.muted { color:#7083a2; font-size:14px; line-height:1.55; }.source-options { display:grid; gap:8px; padding:10px; border:1px solid #c9d5e7; border-radius:9px; }.source-option { display:flex; align-items:center; gap:8px; color:#29405f; font-size:14px; font-weight:600; }.source-option input { width:auto; min-height:auto; }
     table { width:100%; border-collapse:collapse; font-size:13px; } th,td { text-align:left; padding:10px 8px; border-bottom:1px solid #e4ebf5; vertical-align:top; } th { color:#657896; font-size:12px; text-transform:uppercase; } .table-wrap { overflow-x:auto; }
     code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; } .pill { padding:4px 8px; border-radius:99px; background:#edf4ff; color:#3569d4; font-size:12px; font-weight:700; }
     @media (max-width:760px) { .grid { grid-template-columns:1fr; } main { padding:18px 14px 40px; } header { padding:18px 14px; } }
@@ -54,6 +54,7 @@ const OWNER_APP = String.raw`<!doctype html>
         <section class="card"><h3>Новая лицензия</h3><form id="license-form" class="stack"><label>Клиент<select name="customer_id" id="customer-select" required></select></label><button>Создать подписку</button></form></section>
         <section class="card"><h3>Код продления</h3><form id="code-form" class="stack"><label>Лицензия<select name="license_id" id="license-select" required></select></label><label>Срок<select name="duration"><option value="P1M">1 месяц</option><option value="P3M">3 месяца</option><option value="P6M">6 месяцев</option><option value="P12M">12 месяцев</option><option value="PERPETUAL">Бессрочно</option></select></label><button>Сгенерировать код</button></form><hr style="border:0;border-top:1px solid #e4ebf5;margin:18px 0"><form id="code-diagnostic-form" class="stack"><label>Проверка выданного кода<input name="activation_code" placeholder="SC-XXXXX-XXXXX-XXXXX-XXXXX" autocomplete="off" required></label><button class="secondary">Проверить в D1</button></form></section>
         <section class="card"><h3>Перенос устройства</h3><form id="transfer-form" class="stack"><label>Запрос переноса<select name="transfer_code" id="transfer-select" required></select></label><label>Лицензия<select name="license_id" id="transfer-license-select" required></select></label><button>Одобрить перенос</button></form><p class="muted">После одобрения пользователь завершит перенос в своём приложении.</p></section>
+        <section class="card"><h3>Доступ к источникам</h3><form id="source-form" class="stack"><label>Лицензия<select name="license_id" id="source-license-select" required></select></label><div id="source-options" class="source-options" aria-live="polite"></div><button>Сохранить доступ</button></form><p class="muted">Изменения применятся после нажатия пользователем «Проверить сейчас» в приложении, либо при следующей проверке лицензии.</p></section>
       </div>
       <section class="card" style="margin-bottom:18px"><h3>Лицензии</h3><div id="licenses" class="table-wrap"></div></section>
       <section class="card" style="margin-bottom:18px"><h3>Коды активации</h3><div id="codes" class="table-wrap"></div></section>
@@ -85,11 +86,28 @@ const OWNER_APP = String.raw`<!doctype html>
       fill('license-select', data.licenses, x => x.customer_name + ' · ' + x.kind + ' · ' + x.id.slice(0,8));
       fill('transfer-license-select', data.licenses, x => x.customer_name + ' · ' + x.kind + ' · ' + x.id.slice(0,8));
       fill('transfer-select', data.transfers.filter(x=>x.status==='PENDING'), x => x.public_code_hint + ' · ' + (x.customer_name || 'лицензия не назначена'));
-      table('licenses',['Клиент','Тип','Статус','Действует до','Устройство'],data.licenses.map(x=>[x.customer_name,x.kind,x.status,x.perpetual ? 'Бессрочно' : x.expires_at,x.active_device_label || x.active_device_id]));
+      fill('source-license-select', data.licenses, x => x.customer_name + ' · ' + x.kind + ' · ' + x.id.slice(0,8));
+      renderSourceOptions();
+      const sourceNames = new Map(data.sources.map(x => [x.source_key, x.display_name]));
+      const licenseSources = new Map(data.licenses.map(x => [x.id, []]));
+      data.license_sources.forEach(x => { if (licenseSources.has(x.license_id)) licenseSources.get(x.license_id).push(sourceNames.get(x.source_key) || x.source_key); });
+      table('licenses',['Клиент','Тип','Статус','Источники','Действует до','Устройство'],data.licenses.map(x=>[x.customer_name,x.kind,x.status,(licenseSources.get(x.id) || []).join(', '),x.perpetual ? 'Бессрочно' : x.expires_at,x.active_device_label || x.active_device_id]));
       table('codes',['Клиент','Тип','Срок','Подсказка','Статус'],data.activation_codes.map(x=>[x.customer_name,x.license_kind,x.makes_perpetual ? 'Бессрочно' : x.duration_months+' мес.',x.code_hint,x.used_at ? 'Использован' : 'Активен']));
       table('transfers',['Клиент','Код','Устройство','Статус','Истекает'],data.transfers.map(x=>[x.customer_name,x.public_code_hint,x.requested_label,x.status,x.expires_at]));
       table('devices',['Клиент','Лицензия','Устройство','Состояние','Последняя связь'],data.devices.map(x=>[x.customer_name,x.license_kind,x.label,x.is_active ? 'Активно' : 'Отключено',x.last_seen_at]));
       table('audit-events',['Время','Действие','Объект','Результат'],data.audit_events.map(x=>[x.created_at,x.action,x.target_type+' · '+(x.target_id || '—'),x.outcome]));
+    };
+    const renderSourceOptions = () => {
+      const root=$('source-options');
+      const data=state.data;
+      if (!data) return;
+      const selected=$('source-license-select').value;
+      const granted=new Set(data.license_sources.filter(x=>x.license_id===selected).map(x=>x.source_key));
+      root.replaceChildren();
+      const available=data.sources.filter(x=>x.is_active);
+      if (!selected) { root.textContent='Сначала выберите лицензию.'; return; }
+      if (!available.length) { root.textContent='Нет доступных источников.'; return; }
+      available.forEach(source => { const label=document.createElement('label'), input=document.createElement('input'), text=document.createElement('span'); label.className='source-option'; input.type='checkbox'; input.name='source_key'; input.value=source.source_key; input.checked=granted.has(source.source_key); text.textContent=source.display_name+' ('+source.source_key+')'; label.append(input,text); root.append(label); });
     };
     const load = async () => { const data=await request('/v1/owner/dashboard'); render(data); };
     const showDashboard = async login => { $('loading').classList.add('hidden'); $('setup').classList.add('hidden'); $('login').classList.add('hidden'); $('dashboard').classList.remove('hidden'); $('logout').classList.remove('hidden'); $('owner-login').textContent='Владелец: '+login; try { await load(); } catch(e) { message('dashboard-message','Не удалось загрузить данные: '+e.message,true); } };
@@ -104,7 +122,9 @@ const OWNER_APP = String.raw`<!doctype html>
     form('license-form', f => mutation('/v1/owner/licenses',{customer_id:f.get('customer_id')}), 'dashboard-message');
     form('code-form', async f => { const data=await mutation('/v1/owner/activation-codes',{license_id:f.get('license_id'),duration:f.get('duration')}); return {notice:'Код создан. Скопируйте и передайте пользователю: '+data.activation_code}; }, 'dashboard-message');
     form('code-diagnostic-form', async f => { const data=await mutation('/v1/owner/activation-codes/diagnose',{activation_code:f.get('activation_code')}); const labels={STABLE_V2:'Код найден: текущий стабильный формат.',LEGACY_CURRENT_PEPPER:'Код найден: старый формат с текущим CODE_PEPPER.',NOT_FOUND:'Точный код не найден.'}; const states={AVAILABLE:' Код доступен для активации.',USED:' Код уже использован.',EXPIRED:' Срок кода истёк.',LICENSE_NOT_ACTIVE:' Лицензия кода неактивна.',NOT_FOUND:''}; const hint=data.hint_matches.length ? ' Записей с такой подсказкой в D1: '+data.hint_matches.length+'.' : ' Записей с такой подсказкой в D1 нет.'; return {notice:labels[data.matched_by]+states[data.availability]+hint}; }, 'dashboard-message');
+    form('source-form', f => mutation('/v1/owner/license-sources',{license_id:f.get('license_id'),source_keys:f.getAll('source_key')}), 'dashboard-message');
     form('transfer-form', f => mutation('/v1/owner/transfers/approve',{transfer_id:f.get('transfer_code'),license_id:f.get('license_id')}), 'dashboard-message');
+    $('source-license-select').addEventListener('change', renderSourceOptions);
     $('refresh').addEventListener('click', () => load().catch(e=>message('dashboard-message','Ошибка: '+e.message,true)));
     $('logout').addEventListener('click', async () => { try { await request('/v1/owner/logout',{method:'POST'}); location.reload(); } catch(e) { message('dashboard-message','Ошибка выхода: '+e.message,true); } });
     init().catch(e => { $('loading').textContent='Сервис недоступен: '+e.message; });

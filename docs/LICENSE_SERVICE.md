@@ -104,7 +104,10 @@ The Worker now provides the Phase 8 owner-session foundation:
   `SameSite=Strict` owner session;
 - `GET /v1/owner/session` returns the currently authenticated owner;
 - `GET /v1/owner/dashboard` returns the owner-visible customers, licenses,
-  activation codes and transfer requests;
+  activation codes, source grants and transfer requests;
+- `POST /v1/owner/license-sources` replaces the allowed sources for one
+  license. Its JSON body is `{ "license_id": "…", "source_keys": ["encar"] }`;
+  an empty array deliberately disables all parser sources for that license;
 - `POST /v1/owner/activation-codes/diagnose` checks a supplied code against
   the current D1 binding and hash formats without exposing stored hashes;
 - `POST /v1/owner/logout` requires a same-origin request and clears the
@@ -120,6 +123,27 @@ shows recent device history plus the audit journal. Each mutation is
 CSRF-protected and idempotent; the plaintext activation code is displayed only
 at creation time. Do not send an owner password or either secret in chat,
 source control or browser query parameters.
+
+## Source entitlements
+
+Migration `0003_source_entitlements.sql` creates `source_catalog` and
+`license_sources`. It grants `encar` to existing active licenses, and new
+trials/new owner-created licenses also receive it by default. The current
+signed lease contains `entitlements.sources`; the desktop backend permits an
+Encar scan only when that signed list contains `encar`.
+
+Before deploying this version, apply the migration once to the production D1
+database, then deploy the Worker:
+
+```bash
+pnpm dlx --yes wrangler@4.123.0 d1 migrations apply searchcar-license-production \
+  --remote --config license-service/wrangler.jsonc
+pnpm exec wrangler deploy --config license-service/wrangler.jsonc
+```
+
+After changing a source grant, the customer uses **«Проверить сейчас»** in the
+desktop license settings to receive a fresh signed lease. Existing cached
+leases remain valid only until their normal short lease expiry.
 
 ## Local setup
 

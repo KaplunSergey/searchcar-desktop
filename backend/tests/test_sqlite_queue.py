@@ -8,7 +8,11 @@ from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import create_database_engine
-from app.desktop_onboarding import ensure_initial_admin
+from app.desktop_onboarding import (
+    create_desktop_workspace,
+    desktop_workspace_user,
+    has_local_users,
+)
 from app.desktop_scheduler import (
     prepare_overdue_scheduler_catch_up,
     toggle_all_schedulers,
@@ -144,29 +148,26 @@ def test_pre_migration_desktop_database_is_adopted(tmp_path: Path) -> None:
         assert row.finished_at is not None
 
 
-def test_first_run_admin_is_created_only_once(tmp_path: Path) -> None:
+def test_first_run_creates_one_passwordless_desktop_workspace(tmp_path: Path) -> None:
     engine = sqlite_engine(tmp_path)
     migrate_sqlite(engine)
-    factory = sessionmaker(bind=engine, expire_on_commit=False)
-
-    created = ensure_initial_admin(
-        factory,
-        username="Serhii",
-        password="sergiokap09",
-    )
-    repeated = ensure_initial_admin(
-        factory,
-        username="Another admin",
-        password="another-password",
-    )
-
-    assert created is not None
-    assert created.username == "Serhii"
-    assert created.role == "ADMIN"
-    assert created.must_change_password
-    assert repeated is None
     with Session(engine) as db:
-        assert db.scalar(select(User).where(User.username_key == "serhii"))
+        assert not has_local_users(db)
+        created = create_desktop_workspace(db, preferred_locale="uk")
+        db.commit()
+        assert created.username == "SearchCar"
+        assert created.role == "USER"
+        assert created.password_hash == "!desktop-workspace"
+        assert not created.must_change_password
+        assert created.preferred_locale == "uk"
+        assert desktop_workspace_user(db).id == created.id
+        assert has_local_users(db)
+        try:
+            create_desktop_workspace(db)
+        except ValueError as exc:
+            assert str(exc) == "desktop_workspace_already_initialized"
+        else:  # pragma: no cover - assertion failure reports the unexpected state.
+            raise AssertionError("desktop workspace was recreated")
         assert len(list(db.scalars(select(User)))) == 1
 
 

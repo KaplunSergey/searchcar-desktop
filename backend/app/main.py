@@ -79,6 +79,7 @@ from .schemas import (
     SchedulerIn,
     DesktopMigrationIn,
     DesktopLicenseRedeemIn,
+    DesktopOnboardingActivateIn,
     DesktopLicenseTransferClaimIn,
     DesktopLicenseTrialIn,
     ExternalUrlIn,
@@ -113,6 +114,10 @@ def user_out(user: User, db: Session, *, include_usage: bool = True) -> dict:
         "status": user.status,
         "project_limit": user.project_limit,
         "must_change_password": user.must_change_password,
+        "passwordless_workspace": (
+            user.username_key == "searchcar-workspace"
+            and user.password_hash == "!desktop-workspace"
+        ),
         "preferred_locale": user.preferred_locale,
         "created_at": user.created_at,
         "updated_at": user.updated_at,
@@ -1538,7 +1543,7 @@ def enqueue(kind: str, payload: dict, owner: User, db: Session) -> dict:
     if maintenance_active():
         raise HTTPException(409, "desktop_maintenance_active")
     try:
-        require_search_entitlement()
+        require_search_entitlement("encar")
     except SearchEntitlementError as exc:
         raise HTTPException(402, exc.code.lower()) from exc
     requested_projects = set(payload.get("project_ids") or [])
@@ -2145,6 +2150,64 @@ def desktop_data_root() -> Path:
     return Path(configured).expanduser().resolve()
 
 
+@app.get("/api/desktop/onboarding")
+def desktop_onboarding_status(db: Session = Depends(get_db)) -> dict:
+    """Expose desktop first-run state without creating a local user."""
+
+    desktop_data_root()
+    from .desktop_onboarding import has_local_users
+
+    return {"required": not has_local_users(db)}
+
+
+@app.post("/api/desktop/onboarding/activate")
+def activate_desktop_workspace(
+    body: DesktopOnboardingActivateIn,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Redeem an owner-issued code and create one non-interactive workspace."""
+
+    verify_request_origin(request)
+    desktop_data_root()
+    from .desktop_onboarding import create_desktop_workspace, has_local_users
+
+    if has_local_users(db):
+        raise HTTPException(409, "desktop_workspace_already_initialized")
+
+    # The Worker has semantic replay protection for the same device.  Thus a
+    # local SQLite failure after redeeming can safely be retried with the same
+    # code instead of consuming the customer license.
+    _desktop_license_operation(
+        "desktop_onboarding_redeem",
+        lambda client: client.redeem(body.activation_code),
+    )
+    try:
+        user = create_desktop_workspace(
+            db,
+            preferred_locale=body.preferred_locale,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    token, _, session = create_session(db, user, request)
+    csrf_token, _ = sync_csrf_cookie(request, response, session)
+    user.last_login_at = now_utc()
+    user.last_activity_at = user.last_login_at
+    db.commit()
+    response.set_cookie(
+        settings.auth_cookie_name,
+        token,
+        httponly=True,
+        secure=settings.auth_cookie_secure,
+        samesite="lax",
+        max_age=settings.auth_session_days * 24 * 60 * 60,
+        path="/",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return {"user": user_out(user, db), "csrf_token": csrf_token}
+
+
 @app.get("/api/desktop/license")
 def desktop_license_status(_: User = Depends(require_user)) -> dict:
     desktop_data_root()
@@ -2209,7 +2272,6 @@ def activate_desktop_trial(
 
 @app.post("/api/desktop/license/refresh")
 def refresh_desktop_license(current: User = Depends(require_csrf)) -> dict:
-    _desktop_license_admin(current)
     return _desktop_license_operation("refresh", lambda client: client.refresh())
 
 
@@ -2218,7 +2280,6 @@ def redeem_desktop_license(
     body: DesktopLicenseRedeemIn,
     current: User = Depends(require_csrf),
 ) -> dict:
-    _desktop_license_admin(current)
     return _desktop_license_operation(
         "redeem",
         lambda client: client.redeem(body.activation_code)
@@ -2229,7 +2290,6 @@ def redeem_desktop_license(
 def request_desktop_license_transfer(current: User = Depends(require_csrf)) -> dict:
     """Start a device transfer from the destination desktop only."""
 
-    _desktop_license_admin(current)
     return _desktop_license_operation("transfer_request", lambda client: client.request_transfer())
 
 
@@ -2238,7 +2298,6 @@ def claim_desktop_license_transfer(
     body: DesktopLicenseTransferClaimIn,
     current: User = Depends(require_csrf),
 ) -> dict:
-    _desktop_license_admin(current)
     return _desktop_license_operation(
         "transfer_claim",
         lambda client: client.claim_transfer(body.transfer_code, body.claim_token),

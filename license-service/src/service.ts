@@ -23,7 +23,11 @@ interface LeaseSource {
   device: DeviceRow;
   appVersion: string;
   now: Date;
+  sourceKeys?: string[];
 }
+
+const DEFAULT_SOURCE_KEY = "encar";
+const SOURCE_KEY = /^[a-z][a-z0-9-]{1,31}$/u;
 
 interface AdminCodeRow extends LicenseRow {
   activation_code_id: string;
@@ -146,6 +150,7 @@ function canSearch(license: LicenseRow, now: Date): boolean {
 }
 
 async function createLease(env: Env, source: LeaseSource) {
+  const sourceKeys = source.sourceKeys ?? await sourceKeysForLicense(env, source.license.id);
   const nowIso = source.now.toISOString();
   const payload: LeasePayload = {
     type: "searchcar-license-lease",
@@ -161,13 +166,25 @@ async function createLease(env: Env, source: LeaseSource) {
       source.now.getTime() + leaseHours(env) * 60 * 60 * 1000,
     ).toISOString(),
     entitlements: {
-      search: canSearch(source.license, source.now),
+      search: canSearch(source.license, source.now) && sourceKeys.length > 0,
       data_access: true,
       backup_restore: true,
+      sources: sourceKeys,
     },
     app_version: source.appVersion,
   };
   return signLease(env, payload);
+}
+
+async function sourceKeysForLicense(env: Env, licenseId: string): Promise<string[]> {
+  const rows = await env.LICENSE_DB.prepare(
+    `SELECT ls.source_key
+       FROM license_sources ls
+       JOIN source_catalog sc ON sc.source_key = ls.source_key AND sc.is_active = 1
+      WHERE ls.license_id = ?
+      ORDER BY ls.source_key ASC`,
+  ).bind(licenseId).all<{ source_key: string }>();
+  return (rows.results ?? []).map((row) => row.source_key);
 }
 
 function isConstraintError(error: unknown): boolean {
@@ -348,7 +365,13 @@ export async function activateTrial(
   // Validate the signing secret and create the response before consuming the
   // single-use trial. A malformed private key must not leave a trial claim in
   // D1 when no verifiable lease can be returned to the desktop application.
-  const lease = await createLease(env, { license, device, appVersion: body.app_version, now });
+  const lease = await createLease(env, {
+    license,
+    device,
+    appVersion: body.app_version,
+    now,
+    sourceKeys: [DEFAULT_SOURCE_KEY],
+  });
   try {
     await env.LICENSE_DB.batch([
       env.LICENSE_DB.prepare(
@@ -376,6 +399,10 @@ export async function activateTrial(
         `INSERT INTO trial_claims (license_id, subject_hash, fingerprint_hash, claimed_at)
          VALUES (?, ?, ?, ?)`,
       ).bind(licenseId, subjectHash, device.fingerprint_hash, nowIso),
+      env.LICENSE_DB.prepare(
+        `INSERT INTO license_sources (license_id, source_key, granted_at, granted_by)
+         VALUES (?, ?, ?, 'trial-default')`,
+      ).bind(licenseId, DEFAULT_SOURCE_KEY, nowIso),
       auditStatement(env, {
         id: crypto.randomUUID(),
         dedupeKey: `trial:${licenseId}`,
@@ -812,6 +839,10 @@ export async function createAdminLicense(
           activation_count, created_at, updated_at)
        VALUES (?, ?, 'SUBSCRIPTION', 'ACTIVE', ?, ?, 0, 0, ?, ?)`,
     ).bind(id, customerId, nowIso, nowIso, nowIso, nowIso),
+    env.LICENSE_DB.prepare(
+      `INSERT INTO license_sources (license_id, source_key, granted_at, granted_by)
+       VALUES (?, ?, ?, ?)`,
+    ).bind(id, DEFAULT_SOURCE_KEY, nowIso, actorId),
     auditStatement(env, {
       id: crypto.randomUUID(),
       dedupeKey: `license-create:${id}`,
@@ -824,6 +855,57 @@ export async function createAdminLicense(
     }),
   ]);
   return { license_id: id, expires_at: nowIso };
+}
+
+export async function setAdminLicenseSources(
+  env: Env,
+  value: unknown,
+  now: Date,
+  actorId = "bootstrap-token",
+) {
+  const body = asObject(value);
+  const licenseId = requireString(body, "license_id", { min: 36, max: 36 });
+  const rawSourceKeys = body.source_keys;
+  if (!Array.isArray(rawSourceKeys) || rawSourceKeys.length > 32) {
+    throw new ApiError(400, "INVALID_SOURCE_KEYS", "source_keys must be an array of up to 32 source keys.");
+  }
+  const sourceKeys = [...new Set(rawSourceKeys)].sort();
+  if (sourceKeys.some((sourceKey) => typeof sourceKey !== "string" || !SOURCE_KEY.test(sourceKey))) {
+    throw new ApiError(400, "INVALID_SOURCE_KEYS", "source_keys contains an invalid source key.");
+  }
+  const license = await env.LICENSE_DB.prepare("SELECT id FROM licenses WHERE id = ?")
+    .bind(licenseId)
+    .first<{ id: string }>();
+  if (!license) throw new ApiError(404, "LICENSE_NOT_FOUND", "License was not found.");
+
+  const catalog = await env.LICENSE_DB.prepare(
+    "SELECT source_key FROM source_catalog WHERE is_active = 1",
+  ).all<{ source_key: string }>();
+  const activeKeys = new Set((catalog.results ?? []).map((row) => row.source_key));
+  if (sourceKeys.some((sourceKey) => !activeKeys.has(sourceKey))) {
+    throw new ApiError(409, "SOURCE_NOT_AVAILABLE", "One or more sources are not available.");
+  }
+
+  const nowIso = now.toISOString();
+  await env.LICENSE_DB.batch([
+    env.LICENSE_DB.prepare("DELETE FROM license_sources WHERE license_id = ?").bind(licenseId),
+    ...sourceKeys.map((sourceKey) => env.LICENSE_DB.prepare(
+      `INSERT INTO license_sources (license_id, source_key, granted_at, granted_by)
+       VALUES (?, ?, ?, ?)`,
+    ).bind(licenseId, sourceKey, nowIso, actorId)),
+    auditStatement(env, {
+      id: crypto.randomUUID(),
+      dedupeKey: `license-sources:${licenseId}:${nowIso}`,
+      actorType: "ADMIN",
+      actorId,
+      action: "LICENSE_SOURCES_UPDATED",
+      targetType: "LICENSE",
+      targetId: licenseId,
+      metadata: { source_count: sourceKeys.length },
+      createdAt: nowIso,
+    }),
+  ]);
+  return { license_id: licenseId, source_keys: sourceKeys };
 }
 
 export async function createAdminActivationCode(

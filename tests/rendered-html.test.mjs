@@ -92,10 +92,11 @@ test("desktop exit requires confirmation and preserves graceful scan cancellatio
   assert.match(queue,/cancellation_reason.*APPLICATION_SHUTDOWN/s);
 });
 test("desktop licensing keeps device secrets outside portable data",async()=>{
-  const [client,license,page,config,workerConfig]=await Promise.all([
+  const [client,license,page,onboarding,config,workerConfig]=await Promise.all([
     readFile(new URL("backend/app/desktop_license_client.py",root),"utf8"),
     readFile(new URL("backend/app/desktop_license.py",root),"utf8"),
     readFile(new URL("app/page.tsx",root),"utf8"),
+    readFile(new URL("backend/app/desktop_onboarding.py",root),"utf8"),
     readFile(new URL("desktop/license-service.json",root),"utf8"),
     readFile(new URL("license-service/wrangler.jsonc",root),"utf8"),
   ]);
@@ -104,11 +105,13 @@ test("desktop licensing keeps device secrets outside portable data",async()=>{
   assert.match(client,/SEARCHCAR-DEVICE-REQUEST-V1/);
   assert.match(client,/run_periodic_license_sync/);
   assert.match(license,/SEARCHCAR-LICENSE-LEASE-V1/);
-  assert.match(page,/desktop\/license\/trial/);
+  assert.match(page,/desktop\/onboarding\/activate/);
+  assert.match(page,/function DesktopOnboardingScreen/);
   assert.match(page,/desktop\/license\/redeem/);
   assert.match(page,/desktop\/license\/refresh/);
   assert.match(page,/desktop\/license\/transfer\/request/);
   assert.match(page,/desktop\/license\/transfer\/claim/);
+  assert.match(page,/licenseSources/);
   assert.match(client,/def request_transfer/);
   assert.match(client,/def claim_transfer/);
   assert.match(license,/license state lives outside the SQLite backup/i);
@@ -116,6 +119,11 @@ test("desktop licensing keeps device secrets outside portable data",async()=>{
   assert.match(page,/function licenseErrorMessage/);
   assert.match(page,/className="license-action-error" role="alert"/);
   assert.match(page,/LICENSE_SERVICE_CONNECT_FAILED/i);
+  assert.match(onboarding,/DESKTOP_WORKSPACE_PASSWORD_MARKER/);
+  assert.match(onboarding,/DESKTOP_WORKSPACE_CREATED/);
+  assert.doesNotMatch(onboarding,/ensure_initial_admin/);
+  assert.match(license,/LICENSE_SOURCE_NOT_ALLOWED/);
+  assert.match(page,/DesktopOnboardingScreen/);
   const licenseConfig=JSON.parse(config);
   assert.equal(licenseConfig.protocol_version,1);
   assert.equal(licenseConfig.enforcement,"required");

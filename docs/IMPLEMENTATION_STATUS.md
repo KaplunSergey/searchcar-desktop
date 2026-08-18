@@ -248,6 +248,24 @@ Approved product direction:
   an allow-list of keys, included in the signed lease and enforced before a
   scan starts.
 
-M8.5 is not implemented yet. Its completion requires the D1 entitlement
-schema, owner UI controls, signed-lease payload extension, desktop/backend
-guards and migration from the existing local-user first-run flow.
+Implemented locally (deployment still required):
+
+- a first-run device accepts an owner-issued activation code, creates a single
+  passwordless local workspace and immediately signs it in;
+- existing local installations keep their existing login and data rather than
+  being silently rewritten;
+- migration `0003_source_entitlements.sql` creates the source catalog and
+  grants `encar` to all current active licenses;
+- new trials and owner-created licenses receive `encar` by default;
+- signed leases carry an explicit source allow-list; the Python API and worker
+  reject Encar scans when it is absent;
+- `/owner` displays sources per license and lets the owner grant or revoke
+  active catalog sources, with an audit event for each change.
+
+Still required to complete M8.5:
+
+- apply migration `0003_source_entitlements.sql` and deploy the Worker;
+- rebuild and test a fresh macOS and Windows installer against that Worker;
+- perform the documented pilot-local-user migration and transfer checks;
+- add the next parser only together with a catalog migration and its explicit
+  desktop scan guard.

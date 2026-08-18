@@ -85,6 +85,7 @@ export interface LeasePayload {
     search: boolean;
     data_access: true;
     backup_restore: true;
+    sources: string[];
   };
   app_version: string;
 }

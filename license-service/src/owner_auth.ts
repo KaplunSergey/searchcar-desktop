@@ -12,6 +12,7 @@ import {
   createAdminCustomer,
   createAdminLicense,
   diagnoseAdminActivationCode,
+  setAdminLicenseSources,
 } from "./service";
 import type { ApiEnvelope, Env } from "./types";
 import { asObject, requireString } from "./validation";
@@ -326,7 +327,7 @@ async function runOwnerMutation(
 
 async function ownerDashboard(request: Request, env: Env): Promise<Response> {
   await requireSession(request, env);
-  const [customers, licenses, codes, transfers, devices, auditEvents] = await Promise.all([
+  const [customers, licenses, codes, transfers, devices, auditEvents, sources, licenseSources] = await Promise.all([
     env.LICENSE_DB.prepare(
       `SELECT id, display_name, contact, created_at, updated_at
          FROM customers ORDER BY updated_at DESC LIMIT 100`,
@@ -365,6 +366,14 @@ async function ownerDashboard(request: Request, env: Env): Promise<Response> {
       `SELECT action, target_type, target_id, outcome, created_at
          FROM audit_events ORDER BY created_at DESC LIMIT 200`,
     ).all(),
+    env.LICENSE_DB.prepare(
+      `SELECT source_key, display_name, is_active
+         FROM source_catalog ORDER BY display_name ASC`,
+    ).all(),
+    env.LICENSE_DB.prepare(
+      `SELECT license_id, source_key
+         FROM license_sources ORDER BY license_id ASC, source_key ASC`,
+    ).all(),
   ]);
   return jsonResponse(200, {
     ok: true,
@@ -375,6 +384,8 @@ async function ownerDashboard(request: Request, env: Env): Promise<Response> {
       transfers: transfers.results,
       devices: devices.results,
       audit_events: auditEvents.results,
+      sources: sources.results,
+      license_sources: licenseSources.results,
     },
   });
 }
@@ -414,6 +425,11 @@ export async function handleOwnerRoute(request: Request, env: Env): Promise<Resp
     if (request.method === "POST" && path === "/v1/owner/activation-codes") {
       return runOwnerMutation(request, env, "activation-codes", (body, now, owner) =>
         createAdminActivationCode(env, body, now, owner.admin_user_id),
+      );
+    }
+    if (request.method === "POST" && path === "/v1/owner/license-sources") {
+      return runOwnerMutation(request, env, "license-sources", (body, now, owner) =>
+        setAdminLicenseSources(env, body, now, owner.admin_user_id),
       );
     }
     if (request.method === "POST" && path === "/v1/owner/activation-codes/diagnose") {

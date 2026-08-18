@@ -7,7 +7,7 @@ import { Miniflare } from "miniflare";
 
 const encoder = new TextEncoder();
 const migrations = await Promise.all(
-  ["0001_initial.sql", "0002_owner_admin.sql"].map((name) =>
+  ["0001_initial.sql", "0002_owner_admin.sql", "0003_source_entitlements.sql"].map((name) =>
     readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"),
   ),
 );
@@ -205,6 +205,7 @@ async function verifyLease(lease) {
   assert.equal(valid, true);
   assert.equal(lease.payload.server_time, lease.payload.issued_at);
   assert.equal(lease.payload.entitlements.data_access, true);
+  assert.deepEqual(lease.payload.entitlements.sources, ["encar"]);
 }
 
 test("Worker signing identity matches the desktop trust store", async () => {
@@ -273,6 +274,31 @@ test("owner bootstrap creates a protected cookie session exactly once", async (c
     ownerCookie,
   );
   assert.equal(license.response.status, 200);
+  const defaultSource = await database.prepare(
+    "SELECT source_key FROM license_sources WHERE license_id = ?",
+  ).bind(license.json.data.license_id).first();
+  assert.equal(defaultSource.source_key, "encar");
+  const disabledSources = await ownerApi(
+    "/v1/owner/license-sources",
+    { license_id: license.json.data.license_id, source_keys: [] },
+    ownerCookie,
+  );
+  assert.equal(disabledSources.response.status, 200);
+  assert.deepEqual(disabledSources.json.data.source_keys, []);
+  const unavailableSource = await ownerApi(
+    "/v1/owner/license-sources",
+    { license_id: license.json.data.license_id, source_keys: ["future-source"] },
+    ownerCookie,
+  );
+  assert.equal(unavailableSource.response.status, 409);
+  assert.equal(unavailableSource.json.error.code, "SOURCE_NOT_AVAILABLE");
+  const restoredSources = await ownerApi(
+    "/v1/owner/license-sources",
+    { license_id: license.json.data.license_id, source_keys: ["encar"] },
+    ownerCookie,
+  );
+  assert.equal(restoredSources.response.status, 200);
+  assert.deepEqual(restoredSources.json.data.source_keys, ["encar"]);
   const activation = await ownerApi(
     "/v1/owner/activation-codes",
     { license_id: license.json.data.license_id, duration: "P1M" },
@@ -308,7 +334,15 @@ test("owner bootstrap creates a protected cookie session exactly once", async (c
   assert.equal(dashboard.status, 200);
   const dashboardData = (await dashboard.json()).data;
   assert.equal(dashboardData.customers.some((row) => row.id === customer.json.data.customer_id), true);
+  assert.equal(dashboardData.sources.some((row) => row.source_key === "encar"), true);
+  assert.equal(
+    dashboardData.license_sources.some(
+      (row) => row.license_id === license.json.data.license_id && row.source_key === "encar",
+    ),
+    true,
+  );
   assert.equal(dashboardData.audit_events.some((row) => row.action === "ACTIVATION_CODE_CREATED"), true);
+  assert.equal(dashboardData.audit_events.some((row) => row.action === "LICENSE_SOURCES_UPDATED"), true);
 
   const logout = await mf.dispatchFetch("https://license.test/v1/owner/logout", {
     method: "POST",

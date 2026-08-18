@@ -38,6 +38,7 @@ type AuthUser = {
   car_count: number;
   scan_count: number;
   must_change_password: boolean;
+  passwordless_workspace?: boolean;
   preferred_locale: Locale;
   created_at: string;
   updated_at: string;
@@ -48,6 +49,9 @@ type AuthResponse = {
   user: AuthUser;
   csrf_token: string;
   registration_enabled?: boolean;
+};
+type DesktopOnboardingStatus = {
+  required: boolean;
 };
 type AdminStats = {
   users: number;
@@ -229,6 +233,7 @@ type DesktopLicenseStatus = {
   subscription_expires_at?: string | null;
   lease_expires_at?: string | null;
   effective_time?: string | null;
+  sources?: string[];
   service_configured?: boolean;
   enforcement_required?: boolean;
 };
@@ -320,6 +325,7 @@ function licenseErrorMessage(error: unknown, t: Translate): string {
       "license_device_key_invalid",
       "license_device_key_persistence_failed",
     ]), "licenseErrorDeviceStorage"],
+    [new Set(["license_source_not_allowed", "license_search_disabled"]), "licenseErrorSourceAccess"],
     [new Set([
       "trial_unavailable",
       "license_trial_subject_invalid",
@@ -351,6 +357,13 @@ function licenseErrorMessage(error: unknown, t: Translate): string {
   ];
   const key = groups.find(([codes]) => codes.has(code))?.[1] || "licenseErrorUnknown";
   return `${t(key)} (${code.toUpperCase()})`;
+}
+
+function scanActionErrorMessage(error: unknown, t: Translate): string {
+  const code = error instanceof ApiError ? error.code : undefined;
+  return code?.startsWith("license_")
+    ? licenseErrorMessage(error, t)
+    : t("scanAlreadyActive");
 }
 
 function assetUrl(path?: string | null) {
@@ -577,7 +590,7 @@ function App({
       notify(t("scanQueued"));
       void client.invalidateQueries({ queryKey: ["scans"] });
     },
-    onError: () => notify(t("scanAlreadyActive")),
+    onError: (error) => notify(scanActionErrorMessage(error, t)),
   });
   const cancelScanMutation = useMutation({
     mutationFn: (scanId: number) =>
@@ -721,12 +734,14 @@ function App({
               {locale === "uk" ? "Користувач" : "Пользователь"}:
               <b>{currentUser.username}</b>
             </span>
-            <button
-              onClick={() => setShowPassword(true)}
-              title={locale === "uk" ? "Змінити пароль" : "Изменить пароль"}
-            >
-              ◉
-            </button>
+            {!currentUser.passwordless_workspace ? (
+              <button
+                onClick={() => setShowPassword(true)}
+                title={locale === "uk" ? "Змінити пароль" : "Изменить пароль"}
+              >
+                ◉
+              </button>
+            ) : null}
             <button
               disabled={localeMutation.isPending}
               onClick={() => localeMutation.mutate("ru")}
@@ -741,17 +756,19 @@ function App({
             >
               UA
             </button>
-            <button
-              onClick={async () => {
-                await request<void>("/auth/logout", { method: "POST" });
-                csrfToken = "";
-                client.clear();
-                onSessionChanged();
-              }}
-              title={locale === "uk" ? "Вийти" : "Выйти"}
-            >
-              ↪
-            </button>
+            {!currentUser.passwordless_workspace ? (
+              <button
+                onClick={async () => {
+                  await request<void>("/auth/logout", { method: "POST" });
+                  csrfToken = "";
+                  client.clear();
+                  onSessionChanged();
+                }}
+                title={locale === "uk" ? "Вийти" : "Выйти"}
+              >
+                ↪
+              </button>
+            ) : null}
           </div>
         </header>
         <main>
@@ -921,6 +938,12 @@ function AuthRoot() {
     void client.invalidateQueries();
     setVersion((value) => value + 1);
   };
+  const onboardingQuery = useQuery<DesktopOnboardingStatus>({
+    queryKey: ["desktop-onboarding"],
+    queryFn: () => request("/desktop/onboarding"),
+    enabled: !authQuery.isLoading && !authQuery.data,
+    retry: false,
+  });
   if (authQuery.isLoading) {
     return (
       <div className="auth-page">
@@ -932,6 +955,9 @@ function AuthRoot() {
     );
   }
   if (!authQuery.data) {
+    if (onboardingQuery.data?.required) {
+      return <DesktopOnboardingScreen retry={refresh} />;
+    }
     return <LoginScreen retry={refresh} />;
   }
   return (
@@ -939,6 +965,76 @@ function AuthRoot() {
       currentUser={authQuery.data.user}
       onSessionChanged={refresh}
     />
+  );
+}
+
+function DesktopOnboardingScreen({ retry }: { retry: () => void }) {
+  const [locale, setLocale] = useState<Locale>("ru");
+  const [activationCode, setActivationCode] = useState("");
+  const activation = useMutation({
+    mutationFn: () => request<AuthResponse>("/desktop/onboarding/activate", {
+      method: "POST",
+      body: JSON.stringify({
+        activation_code: activationCode,
+        preferred_locale: locale,
+      }),
+    }),
+    onSuccess: (result) => {
+      csrfToken = result.csrf_token;
+      retry();
+    },
+  });
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    activation.mutate();
+  };
+  const error = activation.error instanceof ApiError && activation.error.code
+    ? activation.error.code
+    : "activation_failed";
+  return (
+    <div className="auth-page">
+      <form className="auth-card" onSubmit={submit}>
+        <div className="auth-heading">
+          <span className="auth-logo">S</span>
+          <div>
+            <h1>SearchCar</h1>
+            <p>{locale === "uk" ? "Підключіть робочий простір" : "Подключите рабочее пространство"}</p>
+          </div>
+          <div className="auth-locales">
+            <button type="button" className={locale === "ru" ? "on" : ""} onClick={() => setLocale("ru")}>RU</button>
+            <button type="button" className={locale === "uk" ? "on" : ""} onClick={() => setLocale("uk")}>UA</button>
+          </div>
+        </div>
+        <p className="onboarding-help">
+          {locale === "uk"
+            ? "Введіть одноразовий код, який надав власник SearchCar. Логін і пароль не потрібні."
+            : "Введите одноразовый код, который выдал владелец SearchCar. Логин и пароль не нужны."}
+        </p>
+        <label>
+          {locale === "uk" ? "Код підключення" : "Код подключения"}
+          <input
+            autoComplete="one-time-code"
+            autoFocus
+            required
+            value={activationCode}
+            placeholder="SC-XXXXX-XXXXX-XXXXX-XXXXX"
+            onChange={(event) => setActivationCode(event.target.value)}
+          />
+        </label>
+        {activation.isError ? (
+          <p className="auth-error">
+            {locale === "uk"
+              ? `Не вдалося підключити робочий простір (${error}). Перевірте код або зверніться до власника.`
+              : `Не удалось подключить рабочее пространство (${error}). Проверьте код или обратитесь к владельцу.`}
+          </p>
+        ) : null}
+        <Button kind="primary" type="submit" disabled={activation.isPending || activationCode.trim().length < 10}>
+          {activation.isPending
+            ? locale === "uk" ? "Підключення…" : "Подключение…"
+            : locale === "uk" ? "Підключити" : "Подключить"}
+        </Button>
+      </form>
+    </div>
   );
 }
 
@@ -2504,7 +2600,7 @@ function Car({
         method: "POST",
       }),
     onSuccess: () => notify(t("scanQueued")),
-    onError: () => notify(t("scanAlreadyActive")),
+    onError: (error) => notify(scanActionErrorMessage(error, t)),
   });
   useEffect(() => {
     if (!projectId) return;
@@ -3063,10 +3159,8 @@ function Settings({
   const desktopLicenseQuery = useQuery<DesktopLicenseStatus>({
     queryKey: ["desktop-license"],
     queryFn: () => request("/desktop/license"),
-    enabled: isAdmin,
     retry: false,
   });
-  const [trialSubject, setTrialSubject] = useState("");
   const [activationCode, setActivationCode] = useState("");
   const [transferRequest, setTransferRequest] = useState<DesktopLicenseTransferRequest | null>(null);
   const [licenseError, setLicenseError] = useState<string | null>(null);
@@ -3142,26 +3236,6 @@ function Settings({
       void client.invalidateQueries({ queryKey: ["desktop-data"] });
     },
     onError: () => notify(t("migrationFailed")),
-  });
-  const trialMutation = useMutation({
-    mutationFn: () =>
-      request<DesktopLicenseStatus>("/desktop/license/trial", {
-        method: "POST",
-        body: JSON.stringify({ subject: trialSubject }),
-      }),
-    onMutate: () => setLicenseError(null),
-    onSuccess: (status) => {
-      client.setQueryData(["desktop-license"], status);
-      void client.invalidateQueries({ queryKey: ["desktop-license"] });
-      setTrialSubject("");
-      setLicenseError(null);
-      notify(t("licenseActivated"));
-    },
-    onError: (error) => {
-      const message = licenseErrorMessage(error, t);
-      setLicenseError(message);
-      notify(message);
-    },
   });
   const redeemMutation = useMutation({
     mutationFn: () =>
@@ -3363,7 +3437,7 @@ function Settings({
           </Button>
         </div>
       </section>
-      {isAdmin && desktopLicenseQuery.data ? (
+      {desktopLicenseQuery.data ? (
         <section className="panel settings import-panel license-panel">
           <div className="setting-row">
             <div>
@@ -3384,6 +3458,7 @@ function Settings({
               <div><dt>{t("licenseExpires")}</dt><dd>{formatDate(desktopLicenseQuery.data.subscription_expires_at, locale)}</dd></div>
               <div><dt>{t("licenseOfflineUntil")}</dt><dd>{formatDate(desktopLicenseQuery.data.lease_expires_at, locale)}</dd></div>
               <div><dt>{t("licenseDevice")}</dt><dd>{desktopLicenseQuery.data.device_id?.slice(0, 8) || "—"}</dd></div>
+              <div><dt>{t("licenseSources")}</dt><dd>{desktopLicenseQuery.data.sources?.join(", ") || "—"}</dd></div>
             </dl>
           ) : null}
           {desktopLicenseQuery.data.reason ? (
@@ -3395,25 +3470,6 @@ function Settings({
             <div className="license-actions">
               {licenseError ? (
                 <p className="license-action-error" role="alert">{licenseError}</p>
-              ) : null}
-              {!desktopLicenseQuery.data.license_id ? (
-                <label>
-                  {t("trialSubject")}
-                  <div>
-                    <input
-                      value={trialSubject}
-                      placeholder={t("trialSubjectPlaceholder")}
-                      onChange={(event) => setTrialSubject(event.target.value)}
-                    />
-                    <Button
-                      kind="primary"
-                      disabled={trialMutation.isPending || trialSubject.trim().length < 3}
-                      onClick={() => trialMutation.mutate()}
-                    >
-                      {trialMutation.isPending ? t("licenseWorking") : t("startTrial")}
-                    </Button>
-                  </div>
-                </label>
               ) : null}
               <label>
                 {t("activationCode")}

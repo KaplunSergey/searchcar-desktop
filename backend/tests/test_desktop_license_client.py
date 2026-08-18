@@ -73,7 +73,12 @@ def signed_lease(private_key, request_body, *, license_id, device_id, now):
         "lease_expires_at": (now + timedelta(hours=48))
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z"),
-        "entitlements": {"search": True, "data_access": True, "backup_restore": True},
+        "entitlements": {
+            "search": True,
+            "data_access": True,
+            "backup_restore": True,
+            "sources": ["encar"],
+        },
         "app_version": request_body["app_version"],
     }
     signature = private_key.sign(
