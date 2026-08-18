@@ -2,6 +2,12 @@ name: Windows desktop pilot
 
 on:
   workflow_dispatch:
+    inputs:
+      include_diagnostic_standalone:
+        description: "Also compile and check the slow standalone diagnostic sidecar"
+        required: false
+        default: false
+        type: boolean
   pull_request:
     paths:
       - ".github/workflows/windows-desktop.yml"
@@ -95,6 +101,7 @@ jobs:
           python scripts/prepare_desktop_playwright_driver.py
 
       - name: Compile diagnostic standalone sidecar
+        if: ${{ inputs.include_diagnostic_standalone == true }}
         shell: pwsh
         run: |
           python scripts/build_desktop_sidecar.py --mode standalone
