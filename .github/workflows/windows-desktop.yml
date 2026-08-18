@@ -8,23 +8,6 @@ on:
         required: false
         default: false
         type: boolean
-  pull_request:
-    paths:
-      - ".github/workflows/windows-desktop.yml"
-      - "backend/**"
-      - "desktop/**"
-      - "scripts/**"
-      - "package.json"
-      - "pnpm-lock.yaml"
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/windows-desktop.yml"
-      - "backend/**"
-      - "desktop/**"
-      - "scripts/**"
-      - "package.json"
-      - "pnpm-lock.yaml"
 
 permissions:
   contents: read
