@@ -84,6 +84,7 @@ jobs:
           export STORAGE_ROOT="$RUNNER_TEMP/searchcar-test-storage"
           export DATABASE_URL="sqlite+pysqlite:///$RUNNER_TEMP/searchcar-tests.sqlite3"
           python -m pytest backend/tests -q
+          pnpm build
           pnpm test
           pnpm desktop:frontend:build
 

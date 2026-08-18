@@ -84,6 +84,7 @@ jobs:
           $testDatabase = Join-Path $env:RUNNER_TEMP "searchcar-tests.sqlite3"
           $env:DATABASE_URL = "sqlite+pysqlite:///$($testDatabase.Replace('\', '/'))"
           python -m pytest backend/tests -q
+          pnpm build
           pnpm test
           pnpm desktop:frontend:build
 
