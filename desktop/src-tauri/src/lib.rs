@@ -279,6 +279,13 @@ fn scheduler_status(app: &tauri::AppHandle) -> Option<TrayStatus> {
     })
 }
 
+fn notify_sidecar_resumed(app: &tauri::AppHandle) {
+    // The server marks a running scan as sleep-interrupted and makes the
+    // overdue scheduler eligible again. It is intentionally best-effort: the
+    // normal startup reconciliation handles a sidecar that is still booting.
+    let _ = sidecar_request(app, "POST", "/desktop/scheduler/resumed");
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -578,6 +585,7 @@ pub fn run() {
             }
         }
         RunEvent::Exit => stop_sidecar(app),
+        RunEvent::Resumed => notify_sidecar_resumed(app),
         _ => {}
     });
 }

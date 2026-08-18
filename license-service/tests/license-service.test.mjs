@@ -259,6 +259,14 @@ test("owner bootstrap creates a protected cookie session exactly once", async (c
     ownerCookie,
   );
   assert.equal(customer.response.status, 200);
+  const sameCustomer = await ownerApi(
+    "/v1/owner/customers",
+    { display_name: "Owner dashboard customer again", contact: "owner-dashboard@example.test" },
+    ownerCookie,
+  );
+  assert.equal(sameCustomer.response.status, 200);
+  assert.equal(sameCustomer.json.data.customer_id, customer.json.data.customer_id);
+  assert.equal(sameCustomer.json.data.already_exists, true);
   const license = await ownerApi(
     "/v1/owner/licenses",
     { customer_id: customer.json.data.customer_id },
@@ -272,6 +280,28 @@ test("owner bootstrap creates a protected cookie session exactly once", async (c
   );
   assert.equal(activation.response.status, 200);
   assert.match(activation.json.data.activation_code, /^SC-/u);
+  const storedActivation = await database.prepare(
+    "SELECT code_hash FROM activation_codes WHERE id = ?",
+  ).bind(activation.json.data.activation_code_id).first();
+  const expectedActivationHash = Buffer.from(
+    await webcrypto.subtle.digest(
+      "SHA-256",
+      encoder.encode(`SEARCHCAR-ACTIVATION-CODE-V2\n${activation.json.data.activation_code}`),
+    ),
+  ).toString("base64url");
+  assert.equal(storedActivation.code_hash, expectedActivationHash);
+  const diagnostic = await ownerApi(
+    "/v1/owner/activation-codes/diagnose",
+    { activation_code: activation.json.data.activation_code },
+    ownerCookie,
+  );
+  assert.equal(diagnostic.response.status, 200);
+  assert.equal(diagnostic.json.data.matched_by, "STABLE_V2");
+  assert.equal(diagnostic.json.data.availability, "AVAILABLE");
+  assert.equal(
+    diagnostic.json.data.activation_code_id,
+    activation.json.data.activation_code_id,
+  );
   const dashboard = await mf.dispatchFetch("https://license.test/v1/owner/dashboard", {
     headers: { Cookie: ownerCookie },
   });

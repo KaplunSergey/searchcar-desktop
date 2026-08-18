@@ -180,10 +180,10 @@ type ScanRecord = {
 type SchedulerRecord = {
   enabled: boolean;
   paused: boolean;
-  catch_up_enabled: boolean;
   interval_minutes: 60 | 180 | 360 | 720 | 1440;
   project_ids: number[];
   next_run_at?: string | null;
+  last_completed_run_at?: string | null;
 };
 type CarLookupResult = {
   found: boolean;
@@ -443,6 +443,7 @@ function scanStatusKey(status: string): Key {
     CANCEL_REQUESTED: "cancelling",
     CANCELLED: "cancelled",
     INTERRUPTED: "interrupted",
+    INTERRUPTED_SLEEP: "interruptedSleep",
     SUCCEEDED: "success",
     PARTIAL: "partial",
     FAILED: "failed",
@@ -656,23 +657,27 @@ function App({
             className={["projects", "project", "favorites", "car"].includes(view) ? "active" : ""}
             onClick={() => navigate("projects")}
           >
-            ▣ {t("projects")}
+            <span className="nav-icon" aria-hidden="true">▣</span>
+            <span className="nav-label">{t("projects")}</span>
           </button>
           <button className={view === "scans" ? "active" : ""} onClick={() => navigate("scans")}>
-            ▷ {t("scans")}
+            <span className="nav-icon" aria-hidden="true">▷</span>
+            <span className="nav-label">{t("scans")}</span>
           </button>
           <button
             className={view === "settings" ? "active" : ""}
             onClick={() => navigate("settings")}
           >
-            ⚙ {t("settings")}
+            <span className="nav-icon" aria-hidden="true">⚙</span>
+            <span className="nav-label">{t("settings")}</span>
           </button>
           {currentUser.role === "ADMIN" ? (
             <button
               className={view === "admin" ? "active" : ""}
               onClick={() => navigate("admin")}
             >
-              ◈ {locale === "uk" ? "Адмінка" : "Админка"}
+              <span className="nav-icon" aria-hidden="true">◈</span>
+              <span className="nav-label">{locale === "uk" ? "Адмінка" : "Админка"}</span>
             </button>
           ) : null}
         </nav>
@@ -763,7 +768,7 @@ function App({
               latestReport={(scansQuery.data || []).find(
                 (scan) =>
                   scan.payload?.project_ids?.length &&
-                  ["SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED", "INTERRUPTED"].includes(scan.status),
+                  ["SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED", "INTERRUPTED", "INTERRUPTED_SLEEP"].includes(scan.status),
               )}
               refresh={(ids) => refreshMutation.mutate(ids)}
               cancelScan={cancelScan}
@@ -3074,7 +3079,6 @@ function Settings({
     schedulerQuery.data ?? {
       enabled: false,
       paused: false,
-      catch_up_enabled: true,
       interval_minutes: 180 as const,
       project_ids: [],
     };
@@ -3264,6 +3268,9 @@ function Settings({
                   ? formatDate(scheduler.next_run_at, locale)
                   : "—"}
               </span>
+              <span>
+                {t("lastCompletedRun")}: {formatDate(scheduler.last_completed_run_at, locale)}
+              </span>
             </div>
           </div>
           <button
@@ -3313,22 +3320,10 @@ function Settings({
               <small>{t("pauseSchedulerHelp")}</small>
             </span>
           </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={scheduler.catch_up_enabled}
-              onChange={(event) =>
-                setSchedulerDraft({
-                  ...scheduler,
-                  catch_up_enabled: event.target.checked,
-                })
-              }
-            />
-            <span>
-              <b>{t("catchUpScans")}</b>
-              <small>{t("catchUpScansHelp")}</small>
-            </span>
-          </label>
+          <p className="scheduler-policy">
+            <b>{t("catchUpScans")}</b>
+            <small>{t("catchUpScansHelp")}</small>
+          </p>
         </fieldset>
         <fieldset>
           <legend>{t("scheduledProjects")}</legend>

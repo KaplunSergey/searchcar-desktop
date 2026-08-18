@@ -9,11 +9,16 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import create_database_engine
 from app.desktop_onboarding import ensure_initial_admin
-from app.desktop_scheduler import toggle_all_schedulers, tray_scheduler_status
+from app.desktop_scheduler import (
+    prepare_overdue_scheduler_catch_up,
+    toggle_all_schedulers,
+    tray_scheduler_status,
+)
 from app.job_queue import (
     claim_next_job,
     detach_project_from_active_jobs,
     recover_interrupted_jobs,
+    request_sleep_interruption,
     request_shutdown_cancellation,
 )
 from app.main import enqueue
@@ -26,7 +31,11 @@ from app.models import (
     User,
 )
 from app.sqlite_migrations import migrate_sqlite, sqlite_schema_version
-from app.worker import _reanchor_scheduler_after_manual_projects, enqueue_scheduled
+from app.worker import (
+    _reanchor_scheduler_after_manual_projects,
+    _record_completed_scheduler_run,
+    enqueue_scheduled,
+)
 
 
 def sqlite_engine(tmp_path: Path):
@@ -52,9 +61,9 @@ def add_user(db: Session, username: str = "owner") -> User:
 def test_sqlite_migrations_are_versioned_and_idempotent(tmp_path: Path) -> None:
     engine = sqlite_engine(tmp_path)
 
-    assert migrate_sqlite(engine) == 3
-    assert migrate_sqlite(engine) == 3
-    assert sqlite_schema_version(engine) == 3
+    assert migrate_sqlite(engine) == 4
+    assert migrate_sqlite(engine) == 4
+    assert sqlite_schema_version(engine) == 4
 
     with engine.connect() as connection:
         columns = {
@@ -72,7 +81,7 @@ def test_sqlite_migrations_are_versioned_and_idempotent(tmp_path: Path) -> None:
             column["name"]
             for column in inspect(connection).get_columns("scheduler_settings")
         }
-        assert {"paused", "catch_up_enabled"} <= scheduler_columns
+        assert {"paused", "catch_up_enabled", "last_completed_run_at"} <= scheduler_columns
         assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
         assert connection.execute(text("PRAGMA integrity_check")).scalar_one() == "ok"
 
@@ -120,7 +129,7 @@ def test_pre_migration_desktop_database_is_adopted(tmp_path: Path) -> None:
             )
         )
 
-    assert migrate_sqlite(engine) == 3
+    assert migrate_sqlite(engine) == 4
     with engine.connect() as connection:
         row = connection.execute(
             text(
@@ -444,7 +453,7 @@ def test_finished_manual_project_run_reanchors_scheduler(tmp_path: Path) -> None
         assert run.payload["scheduler_reanchored_at"] == finished_at.isoformat()
 
 
-def test_scheduler_skips_stale_run_when_catch_up_is_disabled(
+def test_scheduler_always_enqueues_one_overdue_run(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -479,7 +488,9 @@ def test_scheduler_skips_stale_run_when_catch_up_is_disabled(
     enqueue_scheduled(now=now)
 
     with factory() as db:
-        assert db.scalar(select(ScanRun)) is None
+        runs = list(db.scalars(select(ScanRun)))
+        assert len(runs) == 1
+        assert runs[0].payload["trigger"] == "AUTOMATIC"
         setting = db.scalar(select(SchedulerSetting))
         assert setting.next_run_at == now + timedelta(hours=1)
 
@@ -528,3 +539,138 @@ def test_scheduler_enqueues_one_catch_up_and_tray_can_pause(
         assert status["paused"] is False
         toggled = toggle_all_schedulers(db, now=now)
         assert toggled["paused"] is True
+
+
+def test_sleep_interruption_preserves_active_report_and_makes_catch_up_due(
+    tmp_path: Path,
+) -> None:
+    engine = sqlite_engine(tmp_path)
+    migrate_sqlite(engine)
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    with Session(engine) as db:
+        user = add_user(db)
+        project = Project(
+            owner_id=user.id,
+            name="Sleep test",
+            name_key="sleep test",
+            search_url="https://example.invalid/search",
+        )
+        db.add(project)
+        db.flush()
+        setting = SchedulerSetting(
+            user_id=user.id,
+            enabled=True,
+            paused=False,
+            interval_minutes=60,
+            next_run_at=now + timedelta(minutes=40),
+            last_completed_run_at=now - timedelta(minutes=20),
+        )
+        running = ScanRun(
+            owner_id=user.id,
+            kind="PROJECTS",
+            status="RUNNING",
+            payload={"report": [{"car_id": 7}], "trigger": "AUTOMATIC"},
+        )
+        db.add_all([setting, running])
+        db.flush()
+        db.add_all(
+            [
+                ScheduledProject(scheduler_id=setting.id, project_id=project.id),
+                ProjectScanRun(
+                    scan_run_id=running.id,
+                    project_id=project.id,
+                    status="RUNNING",
+                ),
+            ]
+        )
+        db.commit()
+        running_id = running.id
+        owner_id = user.id
+
+    interruption = request_sleep_interruption(engine, now=now)
+    assert interruption == {
+        "cancel_requested": [running_id],
+        "catch_up_owner_ids": [owner_id],
+    }
+
+    with Session(engine) as db:
+        assert prepare_overdue_scheduler_catch_up(
+            db,
+            now=now,
+            force_user_ids=set(interruption["catch_up_owner_ids"]),
+        )
+        run = db.get(ScanRun, running_id)
+        setting = db.scalar(select(SchedulerSetting))
+        assert run.status == "CANCEL_REQUESTED"
+        assert run.payload["report"] == [{"car_id": 7}]
+        assert run.payload["cancellation_reason"] == "SYSTEM_SLEEP"
+        assert setting.next_run_at == now
+
+
+def test_resume_uses_last_completed_run_even_when_old_timer_is_in_future(
+    tmp_path: Path,
+) -> None:
+    engine = sqlite_engine(tmp_path)
+    migrate_sqlite(engine)
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    with Session(engine) as db:
+        user = add_user(db)
+        project = Project(
+            owner_id=user.id,
+            name="Resume checkpoint test",
+            name_key="resume checkpoint test",
+            search_url="https://example.invalid/search",
+        )
+        db.add(project)
+        db.flush()
+        setting = SchedulerSetting(
+            user_id=user.id,
+            enabled=True,
+            paused=False,
+            interval_minutes=60,
+            last_completed_run_at=now - timedelta(hours=2),
+            next_run_at=now + timedelta(minutes=30),
+        )
+        db.add(setting)
+        db.flush()
+        db.add(ScheduledProject(scheduler_id=setting.id, project_id=project.id))
+
+        assert prepare_overdue_scheduler_catch_up(db, now=now) == [setting.id]
+        assert setting.next_run_at == now
+
+
+def test_completed_scheduler_run_records_full_update_timestamp(tmp_path: Path) -> None:
+    engine = sqlite_engine(tmp_path)
+    migrate_sqlite(engine)
+    finished_at = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    with Session(engine) as db:
+        user = add_user(db)
+        project = Project(
+            owner_id=user.id,
+            name="Completion test",
+            name_key="completion test",
+            search_url="https://example.invalid/search",
+        )
+        db.add(project)
+        db.flush()
+        setting = SchedulerSetting(
+            user_id=user.id,
+            enabled=True,
+            interval_minutes=180,
+        )
+        run = ScanRun(
+            owner_id=user.id,
+            kind="PROJECTS",
+            status="SUCCEEDED",
+            payload={"trigger": "AUTOMATIC", "scheduled": True},
+        )
+        db.add_all([setting, run])
+        db.flush()
+        db.add(ScheduledProject(scheduler_id=setting.id, project_id=project.id))
+
+        _record_completed_scheduler_run(db, run, finished_at)
+        db.commit()
+
+        assert setting.last_completed_run_at == finished_at
+        assert setting.next_run_at == finished_at + timedelta(hours=3)
+        assert run.payload["scheduler_last_completed_run_at"] == finished_at.isoformat()

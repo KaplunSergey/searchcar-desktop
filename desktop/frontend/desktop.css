@@ -1,1 +1,35 @@
 /* Desktop reuses the shared dropdown styling from app/globals.css. */
+
+/* Keep the navigation glyphs clearly separated from their labels. */
+nav button {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+nav .nav-icon {
+  width: 18px;
+  flex: 0 0 18px;
+  line-height: 1;
+  text-align: center;
+}
+
+nav .nav-label {
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  nav button {
+    justify-content: center;
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  nav .nav-icon {
+    font-size: 18px;
+  }
+
+  nav .nav-label {
+    display: none;
+  }
+}

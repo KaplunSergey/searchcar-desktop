@@ -1,5 +1,12 @@
 import { auditStatement, ipHash } from "./database";
-import { constantTimeEqual, pepperedHash, randomFriendlyCode, randomToken, signLease } from "./crypto";
+import {
+  constantTimeEqual,
+  pepperedHash,
+  randomFriendlyCode,
+  randomToken,
+  sha256,
+  signLease,
+} from "./crypto";
 import { ApiError } from "./errors";
 import type {
   DeviceRow,
@@ -45,6 +52,69 @@ async function findActivationCode(
   )
     .bind(codeHash)
     .first<AdminCodeRow>();
+}
+
+// Activation codes contain 100 bits of CSPRNG entropy. A domain-separated SHA-256
+// digest is therefore safe to store, while unlike a peppered digest it remains
+// redeemable after CODE_PEPPER is rotated. The legacy lookup below keeps codes
+// created by older Worker versions usable as long as their original pepper is live.
+async function activationCodeHash(code: string): Promise<string> {
+  return sha256(`SEARCHCAR-ACTIVATION-CODE-V2\n${code}`);
+}
+
+async function findActivationCodeForRedeem(
+  env: Env,
+  code: string,
+): Promise<AdminCodeRow | null> {
+  const stableHash = await activationCodeHash(code);
+  const stableRow = await findActivationCode(env, stableHash);
+  if (stableRow) return stableRow;
+  return findActivationCode(env, await pepperedHash(env.CODE_PEPPER, code));
+}
+
+export async function diagnoseAdminActivationCode(env: Env, value: unknown, now: Date) {
+  const body = asObject(value);
+  const code = normalizeCode(
+    requireString(body, "activation_code", { min: 10, max: 40 }),
+    "SC",
+  );
+  const stableRow = await findActivationCode(env, await activationCodeHash(code));
+  const legacyRow = stableRow
+    ? null
+    : await findActivationCode(env, await pepperedHash(env.CODE_PEPPER, code));
+  const hint = code.slice(-5);
+  const hinted = await env.LICENSE_DB.prepare(
+    `SELECT id, used_at, expires_at, created_at
+       FROM activation_codes
+      WHERE code_hint = ?
+      ORDER BY created_at DESC
+      LIMIT 10`,
+  ).bind(hint).all<{
+    id: string;
+    used_at: string | null;
+    expires_at: string | null;
+    created_at: string;
+  }>();
+  const matched = stableRow ?? legacyRow;
+  const availability = !matched
+    ? "NOT_FOUND"
+    : matched.used_at !== null
+      ? "USED"
+      : matched.status !== "ACTIVE"
+        ? "LICENSE_NOT_ACTIVE"
+        : matched.code_expires_at !== null && new Date(matched.code_expires_at).getTime() <= now.getTime()
+          ? "EXPIRED"
+          : "AVAILABLE";
+  return {
+    code_hint: hint,
+    matched_by: stableRow ? "STABLE_V2" : legacyRow ? "LEGACY_CURRENT_PEPPER" : "NOT_FOUND",
+    activation_code_id: matched?.activation_code_id ?? null,
+    used_at: matched?.used_at ?? null,
+    expires_at: matched?.code_expires_at ?? null,
+    license_status: matched?.status ?? null,
+    availability,
+    hint_matches: hinted.results,
+  };
 }
 
 export function addCalendarMonths(date: Date, months: number): Date {
@@ -379,8 +449,7 @@ export async function redeemActivationCode(
   now: Date,
 ) {
   const code = normalizeCode(requireString(body, "activation_code", { min: 10, max: 40 }), "SC");
-  const codeHash = await pepperedHash(env.CODE_PEPPER, code);
-  const row = await findActivationCode(env, codeHash);
+  const row = await findActivationCodeForRedeem(env, code);
   if (!row) {
     throw new ApiError(409, "CODE_NOT_AVAILABLE", "The activation code cannot be used.");
   }
@@ -509,7 +578,7 @@ export async function redeemActivationCode(
     await env.LICENSE_DB.batch(statements);
   } catch (error) {
     if (isConstraintError(error)) {
-      const racedRow = await findActivationCode(env, codeHash);
+      const racedRow = await findActivationCodeForRedeem(env, code);
       const recovered = racedRow
         ? await recoveredRedemptionResponse(env, racedRow, body, now)
         : null;
@@ -682,31 +751,43 @@ export async function createAdminCustomer(
   const id = crypto.randomUUID();
   const displayName = requireString(body, "display_name", { min: 1, max: 120 });
   const contact = optionalString(body, "contact", { max: 240 }) ?? null;
+  const contactHash = contact
+    ? await pepperedHash(env.CODE_PEPPER, contact.trim().toLowerCase())
+    : null;
+  if (contactHash) {
+    const existing = await env.LICENSE_DB.prepare(
+      "SELECT id FROM customers WHERE contact_hash = ?",
+    ).bind(contactHash).first<{ id: string }>();
+    if (existing) return { customer_id: existing.id, already_exists: true };
+  }
   const nowIso = now.toISOString();
-  await env.LICENSE_DB.batch([
-    env.LICENSE_DB.prepare(
-      `INSERT INTO customers
-         (id, display_name, contact, contact_hash, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).bind(
-      id,
-      displayName,
-      contact,
-      contact ? await pepperedHash(env.CODE_PEPPER, contact.trim().toLowerCase()) : null,
-      nowIso,
-      nowIso,
-    ),
-    auditStatement(env, {
-      id: crypto.randomUUID(),
-      dedupeKey: `customer-create:${id}`,
-      actorType: "ADMIN",
-      actorId,
-      action: "CUSTOMER_CREATED",
-      targetType: "CUSTOMER",
-      targetId: id,
-      createdAt: nowIso,
-    }),
-  ]);
+  try {
+    await env.LICENSE_DB.batch([
+      env.LICENSE_DB.prepare(
+        `INSERT INTO customers
+           (id, display_name, contact, contact_hash, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).bind(id, displayName, contact, contactHash, nowIso, nowIso),
+      auditStatement(env, {
+        id: crypto.randomUUID(),
+        dedupeKey: `customer-create:${id}`,
+        actorType: "ADMIN",
+        actorId,
+        action: "CUSTOMER_CREATED",
+        targetType: "CUSTOMER",
+        targetId: id,
+        createdAt: nowIso,
+      }),
+    ]);
+  } catch {
+    if (contactHash) {
+      const existing = await env.LICENSE_DB.prepare(
+        "SELECT id FROM customers WHERE contact_hash = ?",
+      ).bind(contactHash).first<{ id: string }>();
+      if (existing) return { customer_id: existing.id, already_exists: true };
+    }
+    throw new ApiError(503, "CUSTOMER_SAVE_FAILED", "Customer could not be saved.");
+  }
   return { customer_id: id };
 }
 
@@ -781,7 +862,7 @@ export async function createAdminActivationCode(
     ).bind(
       id,
       licenseId,
-      await pepperedHash(env.CODE_PEPPER, code),
+      await activationCodeHash(code),
       code.slice(-5),
       durationMap[duration],
       duration === "PERPETUAL" ? 1 : 0,

@@ -2012,10 +2012,10 @@ def scheduler_out(user_id: int, db: Session) -> dict:
         return {
             "enabled": False,
             "paused": False,
-            "catch_up_enabled": True,
             "interval_minutes": 180,
             "project_ids": [],
             "next_run_at": None,
+            "last_completed_run_at": None,
         }
     project_ids = list(
         db.scalars(
@@ -2027,10 +2027,12 @@ def scheduler_out(user_id: int, db: Session) -> dict:
     return {
         "enabled": setting.enabled and bool(project_ids),
         "paused": setting.paused,
-        "catch_up_enabled": setting.catch_up_enabled,
         "interval_minutes": setting.interval_minutes,
         "project_ids": project_ids,
         "next_run_at": setting.next_run_at if project_ids else None,
+        "last_completed_run_at": (
+            setting.last_completed_run_at if project_ids else None
+        ),
     }
 
 
@@ -2083,7 +2085,6 @@ def set_scheduler(
     )
     setting.enabled = body.enabled
     setting.paused = body.paused if body.enabled else False
-    setting.catch_up_enabled = body.catch_up_enabled
     setting.interval_minutes = body.interval_minutes
     if not body.enabled:
         setting.next_run_at = None

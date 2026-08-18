@@ -131,6 +131,12 @@ Implemented:
   sidecar shutdown;
 - Russian and Ukrainian settings UI for pause and catch-up behavior;
 - unit scenarios for stale wake-up, single catch-up and tray pause state.
+- deterministic sleep/resume handling: an active scan is marked
+  `INTERRUPTED_SLEEP` with its partial report preserved; the next automatic
+  scan is made immediately eligible exactly once when the completed-run
+  interval is overdue;
+- Tauri resume signal forwarded to the protected sidecar on macOS and Windows,
+  plus startup reconciliation for an automatic scan abandoned before restart.
 
 Still required to complete M5 validation/polish:
 
@@ -206,7 +212,8 @@ polish. OS autostart is explicitly out of scope.
 Implemented:
 
 - D1 singleton guard for one-time owner bootstrap;
-- salted PBKDF2 owner password records with a dedicated Worker pepper;
+- salted, peppered owner password records designed to stay within the
+  Cloudflare Workers Free CPU budget;
 - 12-hour `HttpOnly`, `Secure`, `SameSite=Strict` owner sessions;
 - owner bootstrap, login, session inspection and same-origin logout endpoints;
 - same-origin `/owner` panel for login, first-owner setup, customer creation,
@@ -216,9 +223,31 @@ Implemented:
 - integration coverage for bootstrap-once, failed login, session, logout and
   authenticated owner administration.
 
-Still required:
+Production validation completed:
 
-- deploy migration `0002_owner_admin.sql`, provision `OWNER_PASSWORD_PEPPER`
-  and bootstrap the first owner outside source control;
-- add searchable device history, audit export, suspension/revocation and
-  owner-account recovery before opening paid sales beyond the pilot.
+- migration `0002_owner_admin.sql`, owner bootstrap and the basic owner
+  workflow were verified manually against the production Worker and D1.
+
+Still required before sales beyond the pilot:
+
+- searchable device history,
+  audit export, suspension/revocation и owner-account recovery.
+
+## Next milestone M8.5 — unified owner administration and source entitlements
+
+Approved product direction:
+
+- one client equals one active device in the first commercial model;
+- the client has no Cloudflare password account: the first run consumes an
+  invite/activation code and creates one local workspace automatically;
+- the Cloudflare owner panel is the source of truth for customer, license,
+  active device and source access;
+- projects, listings and images remain local. Cloud synchronization is an
+  explicitly deferred later phase;
+- each future parser source receives a stable source key. A license receives
+  an allow-list of keys, included in the signed lease and enforced before a
+  scan starts.
+
+M8.5 is not implemented yet. Its completion requires the D1 entitlement
+schema, owner UI controls, signed-lease payload extension, desktop/backend
+guards and migration from the existing local-user first-run flow.

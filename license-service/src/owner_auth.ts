@@ -11,6 +11,7 @@ import {
   createAdminActivationCode,
   createAdminCustomer,
   createAdminLicense,
+  diagnoseAdminActivationCode,
 } from "./service";
 import type { ApiEnvelope, Env } from "./types";
 import { asObject, requireString } from "./validation";
@@ -18,8 +19,6 @@ import { asObject, requireString } from "./validation";
 const encoder = new TextEncoder();
 const OWNER_COOKIE = "__Host-searchcar_owner";
 const SESSION_SECONDS = 12 * 60 * 60;
-const PASSWORD_ITERATIONS = 310_000;
-const PASSWORD_BYTES = 32;
 
 interface OwnerRow {
   id: string;
@@ -109,29 +108,23 @@ async function passwordDigest(env: Env, password: string, salt: string): Promise
   if (saltBytes.byteLength !== 16) {
     throw new ApiError(500, "OWNER_PASSWORD_STATE_INVALID", "Owner credentials are unavailable.");
   }
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(`SEARCHCAR-OWNER-PASSWORD-V1\u0000${env.OWNER_PASSWORD_PEPPER}\u0000${password}`),
-    "PBKDF2",
-    false,
-    ["deriveBits"],
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    encoder.encode(
+      `SEARCHCAR-OWNER-PASSWORD-V2\u0000${salt}\u0000${env.OWNER_PASSWORD_PEPPER}\u0000${password}`,
+    ),
   );
-  const derived = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", hash: "SHA-256", salt: saltBytes, iterations: PASSWORD_ITERATIONS },
-    key,
-    PASSWORD_BYTES * 8,
-  );
-  return base64UrlEncode(derived);
+  return base64UrlEncode(digest);
 }
 
 async function createPasswordHash(env: Env, password: string): Promise<string> {
   const salt = randomToken(16);
-  return `pbkdf2-sha256-v1.${salt}.${await passwordDigest(env, password, salt)}`;
+  return `sha256-pepper-v2.${salt}.${await passwordDigest(env, password, salt)}`;
 }
 
 async function passwordMatches(env: Env, password: string, stored: string): Promise<boolean> {
   const [version, salt, digest, ...extra] = stored.split(".");
-  if (version !== "pbkdf2-sha256-v1" || !salt || !digest || extra.length > 0) return false;
+  if (version !== "sha256-pepper-v2" || !salt || !digest || extra.length > 0) return false;
   try {
     return constantTimeEqual(await passwordDigest(env, password, salt), digest);
   } catch {
@@ -204,12 +197,30 @@ async function bootstrapOwner(request: Request, env: Env, now: Date): Promise<Re
   const { login, password } = readCredentials(await readOwnerJson(request));
   const id = crypto.randomUUID();
   const nowIso = now.toISOString();
+  let passwordHash: string;
+  try {
+    passwordHash = await createPasswordHash(env, password);
+  } catch {
+    throw new ApiError(
+      503,
+      "OWNER_PASSWORD_HASHING_FAILED",
+      "Owner password setup is temporarily unavailable.",
+    );
+  }
+  try {
+    await env.LICENSE_DB.prepare(
+      `INSERT INTO admin_users (id, login, password_hash, is_active, created_at, updated_at)
+       VALUES (?, ?, ?, 1, ?, ?)`,
+    ).bind(id, login, passwordHash, nowIso, nowIso).run();
+  } catch {
+    const existingOwner = await env.LICENSE_DB.prepare(
+      "SELECT singleton FROM owner_bootstrap WHERE singleton = 1",
+    ).first();
+    if (existingOwner) throw new ApiError(409, "OWNER_ALREADY_CONFIGURED", "An owner is already configured.");
+    throw new ApiError(409, "OWNER_LOGIN_ALREADY_USED", "The owner login is already in use.");
+  }
   try {
     await env.LICENSE_DB.batch([
-      env.LICENSE_DB.prepare(
-        `INSERT INTO admin_users (id, login, password_hash, is_active, created_at, updated_at)
-         VALUES (?, ?, ?, 1, ?, ?)`,
-      ).bind(id, login, await createPasswordHash(env, password), nowIso, nowIso),
       env.LICENSE_DB.prepare(
         "INSERT INTO owner_bootstrap (singleton, admin_user_id, created_at) VALUES (1, ?, ?)",
       ).bind(id, nowIso),
@@ -224,10 +235,16 @@ async function bootstrapOwner(request: Request, env: Env, now: Date): Promise<Re
       }),
     ]);
   } catch {
+    await env.LICENSE_DB.prepare(
+      `DELETE FROM admin_users
+        WHERE id = ? AND NOT EXISTS (
+          SELECT 1 FROM owner_bootstrap WHERE admin_user_id = ?
+        )`,
+    ).bind(id, id).run();
     const existing = await env.LICENSE_DB.prepare("SELECT singleton FROM owner_bootstrap WHERE singleton = 1")
       .first();
     if (existing) throw new ApiError(409, "OWNER_ALREADY_CONFIGURED", "An owner is already configured.");
-    throw new ApiError(409, "OWNER_SETUP_FAILED", "Owner setup could not be completed.");
+    throw new ApiError(503, "OWNER_BOOTSTRAP_WRITE_FAILED", "Owner setup could not be saved.");
   }
   return jsonResponse(201, { ok: true, data: { login } }, await createSession(env, { id, login, password_hash: "", is_active: 1 }, now));
 }
@@ -397,6 +414,11 @@ export async function handleOwnerRoute(request: Request, env: Env): Promise<Resp
     if (request.method === "POST" && path === "/v1/owner/activation-codes") {
       return runOwnerMutation(request, env, "activation-codes", (body, now, owner) =>
         createAdminActivationCode(env, body, now, owner.admin_user_id),
+      );
+    }
+    if (request.method === "POST" && path === "/v1/owner/activation-codes/diagnose") {
+      return runOwnerMutation(request, env, "activation-codes-diagnose", (body, now) =>
+        diagnoseAdminActivationCode(env, body, now),
       );
     }
     if (request.method === "POST" && path === "/v1/owner/transfers/approve") {

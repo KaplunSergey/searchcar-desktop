@@ -17,6 +17,7 @@ TERMINAL_SCAN_STATUSES = (
     "FAILED",
     "CANCELLED",
     "INTERRUPTED",
+    "INTERRUPTED_SLEEP",
 )
 
 
@@ -254,3 +255,54 @@ def request_shutdown_cancellation(
                 project_run.error_code = None
         db.commit()
     return {"cancelled": cancelled, "cancel_requested": requested}
+
+
+def request_sleep_interruption(
+    engine: Engine,
+    *,
+    now: datetime | None = None,
+) -> dict[str, list[int]]:
+    """Ask the worker to stop scans that became invalid during system sleep.
+
+    The call is made only after the native desktop shell receives its resume
+    event. A running Playwright action is allowed to reach its normal bounded
+    checkpoint, where the worker preserves all committed report rows and turns
+    the job into a visible ``INTERRUPTED_SLEEP`` history entry.
+    """
+
+    timestamp = now or utc_now()
+    requested: list[int] = []
+    catch_up_owner_ids: list[int] = []
+    with Session(engine, expire_on_commit=False) as db:
+        jobs = list(
+            db.scalars(
+                select(ScanRun)
+                .where(ScanRun.status == "RUNNING")
+                .order_by(ScanRun.id)
+            )
+        )
+        for job in jobs:
+            payload = dict(job.payload or {})
+            payload.update(
+                {
+                    "cancellation_reason": "SYSTEM_SLEEP",
+                    "cancellation_requested_at": timestamp.isoformat(),
+                }
+            )
+            job.status = "CANCEL_REQUESTED"
+            job.heartbeat_at = timestamp
+            job.payload = payload
+            requested.append(job.id)
+            if (
+                (
+                    payload.get("trigger") == "AUTOMATIC"
+                    or payload.get("scheduled") is True
+                )
+                and job.owner_id not in catch_up_owner_ids
+            ):
+                catch_up_owner_ids.append(job.owner_id)
+        db.commit()
+    return {
+        "cancel_requested": requested,
+        "catch_up_owner_ids": catch_up_owner_ids,
+    }

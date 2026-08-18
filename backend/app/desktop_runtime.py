@@ -398,6 +398,7 @@ def create_desktop_app(
                 "/desktop/shutdown",
                 "/desktop/tray-status",
                 "/desktop/scheduler/toggle",
+                "/desktop/scheduler/resumed",
             }:
                 return await call_next(request)
             supplied = request.cookies.get(DESKTOP_COOKIE_NAME, "")
@@ -467,6 +468,32 @@ def create_desktop_app(
             f"{int(bool(status['enabled']))}|"
             f"{int(bool(status['paused']))}|{next_value}"
         )
+
+    @app.post("/desktop/scheduler/resumed", include_in_schema=False, status_code=202)
+    def desktop_scheduler_resumed(token: str):
+        if not hmac.compare_digest(token, session_secret):
+            raise HTTPException(403, "invalid_desktop_session")
+        from .database import SessionLocal, engine
+        from .desktop_scheduler import prepare_overdue_scheduler_catch_up
+        from .job_queue import request_sleep_interruption
+        from .worker import enqueue_scheduled
+
+        resumed_at = datetime.now(timezone.utc)
+        interruption = request_sleep_interruption(engine, now=resumed_at)
+        with SessionLocal() as db:
+            due_scheduler_ids = prepare_overdue_scheduler_catch_up(
+                db,
+                now=resumed_at,
+                force_user_ids=set(interruption["catch_up_owner_ids"]),
+            )
+        # Queue creation remains idempotent and refuses to overlap the scan
+        # that is still unwinding after the sleep interruption.
+        enqueue_scheduled(now=resumed_at)
+        return {
+            "status": "resume_processed",
+            "cancel_requested": interruption["cancel_requested"],
+            "catch_up_scheduler_ids": due_scheduler_ids,
+        }
 
     app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="desktop-ui")
     return app
@@ -804,9 +831,12 @@ def main() -> None:
     clear_stale_maintenance_lock()
     apply_pending_restore(paths)
     initialize_database()
+    from sqlalchemy import select
     from .database import SessionLocal, engine
     from .desktop_onboarding import ensure_initial_admin
+    from .desktop_scheduler import prepare_overdue_scheduler_catch_up
     from .job_queue import recover_interrupted_jobs
+    from .models import ScanRun
     from .worker import run as run_worker
 
     created_admin = ensure_initial_admin(
@@ -828,6 +858,19 @@ def main() -> None:
             "Recovered interrupted scan jobs: %s",
             ",".join(str(job_id) for job_id in recovered_jobs),
         )
+        with SessionLocal() as db:
+            recovered_owner_ids = {
+                run.owner_id
+                for run in db.scalars(
+                    select(ScanRun).where(ScanRun.id.in_(recovered_jobs))
+                )
+                if (run.payload or {}).get("trigger") == "AUTOMATIC"
+                or (run.payload or {}).get("scheduled") is True
+            }
+            prepare_overdue_scheduler_catch_up(
+                db,
+                force_user_ids=recovered_owner_ids,
+            )
     worker_stop = threading.Event()
     worker_thread = threading.Thread(
         target=run_worker,

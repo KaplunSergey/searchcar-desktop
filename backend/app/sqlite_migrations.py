@@ -119,10 +119,20 @@ def _desktop_scheduler_controls(connection: Connection) -> None:
     )
 
 
+def _scheduler_completion_checkpoint(connection: Connection) -> None:
+    _add_column_if_missing(
+        connection,
+        "scheduler_settings",
+        "last_completed_run_at",
+        "DATETIME",
+    )
+
+
 MIGRATIONS = (
     SQLiteMigration(1, "current_web_schema_baseline", _baseline),
     SQLiteMigration(2, "durable_single_worker_scan_queue", _durable_scan_queue),
     SQLiteMigration(3, "desktop_scheduler_controls", _desktop_scheduler_controls),
+    SQLiteMigration(4, "scheduler_completion_checkpoint", _scheduler_completion_checkpoint),
 )
 
 

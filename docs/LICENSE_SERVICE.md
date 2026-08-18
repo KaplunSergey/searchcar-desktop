@@ -14,7 +14,10 @@ for the one-time creation of the first owner and emergency recovery.
 - Every POST requires an idempotency key and a unique request UUID.
 - Trial uniqueness is enforced independently for the privacy-safe subject hash
   and fingerprint hash.
-- Activation and transfer codes are persisted only as peppered SHA-256 hashes.
+- Activation codes are persisted only as stable, domain-separated SHA-256 hashes.
+  They contain 100 bits of random entropy, so their digest is not practically
+  brute-forceable and remains valid if an unrelated server secret is rotated.
+  Transfer codes and tokens remain peppered.
 - Idempotency responses are AES-GCM encrypted with a domain-separated key
   derived from the code pepper, so cached delivery never persists plaintext
   activation codes or transfer claim tokens.
@@ -102,17 +105,21 @@ The Worker now provides the Phase 8 owner-session foundation:
 - `GET /v1/owner/session` returns the currently authenticated owner;
 - `GET /v1/owner/dashboard` returns the owner-visible customers, licenses,
   activation codes and transfer requests;
+- `POST /v1/owner/activation-codes/diagnose` checks a supplied code against
+  the current D1 binding and hash formats without exposing stored hashes;
 - `POST /v1/owner/logout` requires a same-origin request and clears the
   session.
 
-Passwords are salted PBKDF2-SHA-256 records with a separate
-`OWNER_PASSWORD_PEPPER` Worker secret. `GET /owner` serves the same-origin
-owner panel: it creates customers and subscription placeholders, generates
-one-time activation codes, approves pending device transfers, and shows recent
-device history plus the audit journal. Each mutation is CSRF-protected and
-idempotent; the plaintext activation code is displayed only at creation time.
-Do not send an owner password or either secret in chat, source control or
-browser query parameters.
+Passwords use a unique random salt plus the separate
+`OWNER_PASSWORD_PEPPER` Worker secret. The owner routes enforce a strict
+login rate limit; this intentionally avoids a high-iteration KDF that exceeds
+the 10 ms CPU allowance on a Workers Free plan. `GET /owner` serves the
+same-origin owner panel: it creates customers and subscription placeholders,
+generates one-time activation codes, approves pending device transfers, and
+shows recent device history plus the audit journal. Each mutation is
+CSRF-protected and idempotent; the plaintext activation code is displayed only
+at creation time. Do not send an owner password or either secret in chat,
+source control or browser query parameters.
 
 ## Local setup
 
@@ -133,6 +140,12 @@ browser query parameters.
    pnpm exec wrangler secret put ADMIN_API_TOKEN --config license-service/wrangler.jsonc
    pnpm exec wrangler secret put OWNER_PASSWORD_PEPPER --config license-service/wrangler.jsonc
    ```
+
+   `wrangler.jsonc` declares these five names as required secrets, so a future
+   deployment fails before publishing if any of them is missing. Do not rotate
+   `CODE_PEPPER` during normal operation: it invalidates unused legacy activation
+   codes, transfer codes and cached idempotency responses. Activation codes issued
+   by the current service use a stable versioned hash and survive this rotation.
 
 4. Keep `license-signing-public-key.json` for the Phase 7 client. Never commit
    the private `.key` file. Copy `public_key` into the non-secret

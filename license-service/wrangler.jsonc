@@ -7,6 +7,15 @@
   "observability": {
     "enabled": true
   },
+  "secrets": {
+    "required": [
+      "LICENSE_SIGNING_PRIVATE_KEY",
+      "CODE_PEPPER",
+      "RATE_LIMIT_PEPPER",
+      "ADMIN_API_TOKEN",
+      "OWNER_PASSWORD_PEPPER"
+    ]
+  },
   "triggers": {
     "crons": ["17 3 * * *"]
   },

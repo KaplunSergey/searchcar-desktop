@@ -44,9 +44,6 @@ class ScanCancelled(Exception):
     pass
 
 
-SCHEDULER_DUE_GRACE_SECONDS = 90
-
-
 def _reanchor_scheduler_after_manual_projects(
     db,
     job: ScanRun,
@@ -81,8 +78,43 @@ def _reanchor_scheduler_after_manual_projects(
     }
 
 
+def _record_completed_scheduler_run(
+    db,
+    job: ScanRun,
+    finished_at: datetime,
+) -> None:
+    """Persist the successful-run checkpoint used after resume or restart."""
+
+    payload = dict(job.payload or {})
+    if job.status != "SUCCEEDED" or job.kind != "PROJECTS" or not (
+        payload.get("trigger") == "MANUAL"
+        or payload.get("trigger") == "AUTOMATIC"
+        or payload.get("scheduled") is True
+    ):
+        return
+    setting = db.scalar(
+        select(SchedulerSetting).where(
+            SchedulerSetting.user_id == job.owner_id,
+            SchedulerSetting.enabled.is_(True),
+        )
+    )
+    if not setting or not db.scalar(
+        select(ScheduledProject.project_id)
+        .where(ScheduledProject.scheduler_id == setting.id)
+        .limit(1)
+    ):
+        return
+    setting.last_completed_run_at = finished_at
+    setting.next_run_at = finished_at + timedelta(minutes=setting.interval_minutes)
+    job.payload = {
+        **payload,
+        "scheduler_last_completed_run_at": finished_at.isoformat(),
+        "scheduler_next_run_at": setting.next_run_at.isoformat(),
+    }
+
+
 def _raise_if_cancelled(db, job: ScanRun) -> None:
-    db.refresh(job, attribute_names=["status"])
+    db.refresh(job, attribute_names=["status", "payload"])
     if job.status in {"CANCEL_REQUESTED", "CANCELLED"}:
         raise ScanCancelled()
     job.heartbeat_at = datetime.now(timezone.utc)
@@ -118,25 +150,40 @@ def _finish_cancelled_job(
         )
     )
     project_statuses = dict((job.payload or {}).get("project_statuses") or {})
+    interruption_reason = (job.payload or {}).get("cancellation_reason")
+    interrupted_by_sleep = interruption_reason == "SYSTEM_SLEEP"
+    terminal_status = "INTERRUPTED_SLEEP" if interrupted_by_sleep else "CANCELLED"
     for project_run in project_runs:
         if project_run.status in {"QUEUED", "RUNNING"}:
-            project_run.status = "CANCELLED"
-            project_run.error_code = None
+            project_run.status = terminal_status
+            project_run.error_code = "SYSTEM_SLEEP" if interrupted_by_sleep else None
         project_statuses[str(project_run.project_id)] = project_run.status
 
     report = _dedupe_report(report)
     finished_at = datetime.now(timezone.utc)
     timestamp = finished_at.isoformat()
-    job.status = "CANCELLED"
+    job.status = terminal_status
     job.finished_at = finished_at
     job.heartbeat_at = finished_at
-    job.error = "\n".join(failures) or None
+    job.error = "\n".join(failures) or (
+        "Computer entered sleep before the scan finished"
+        if interrupted_by_sleep
+        else None
+    )
     job.payload = {
         **payload,
         **(job.payload or {}),
         "current_project_id": None,
         "project_statuses": project_statuses,
-        "cancelled_at": timestamp,
+        **(
+            {
+                "interrupted_at": timestamp,
+                "interruption_reason": "SYSTEM_SLEEP",
+                "partial_report": True,
+            }
+            if interrupted_by_sleep
+            else {"cancelled_at": timestamp}
+        ),
         "report": report,
         "failures": failure_details,
         "summary": {
@@ -1070,6 +1117,7 @@ def process_job(job_id: int) -> None:
                     "failed": len(failures),
                 },
             }
+            _record_completed_scheduler_run(db, job, job.finished_at)
             _reanchor_scheduler_after_manual_projects(
                 db,
                 job,
@@ -1146,15 +1194,6 @@ def enqueue_scheduled(*, now: datetime | None = None) -> None:
             if setting.next_run_at > current:
                 continue
             if not entitlement.can_search:
-                setting.next_run_at = current + timedelta(
-                    minutes=setting.interval_minutes
-                )
-                continue
-            overdue_seconds = (current - setting.next_run_at).total_seconds()
-            if (
-                not setting.catch_up_enabled
-                and overdue_seconds > SCHEDULER_DUE_GRACE_SECONDS
-            ):
                 setting.next_run_at = current + timedelta(
                     minutes=setting.interval_minutes
                 )

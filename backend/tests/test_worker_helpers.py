@@ -366,7 +366,7 @@ def test_partial_detail_does_not_erase_reliable_values():
 def test_cancel_request_interrupts_at_checkpoint():
     class FakeDb:
         def refresh(self, job, attribute_names):
-            assert attribute_names == ["status"]
+            assert attribute_names == ["status", "payload"]
 
     with pytest.raises(ScanCancelled):
         _raise_if_cancelled(FakeDb(), SimpleNamespace(status="CANCEL_REQUESTED"))
@@ -414,6 +414,37 @@ def test_cancelled_job_keeps_partial_report_and_progress():
     assert job.payload["project_statuses"] == {"4": "CANCELLED"}
     assert project_run.status == "CANCELLED"
     assert project_run.error_code is None
+
+
+def test_sleep_interrupted_job_keeps_partial_report_and_reason():
+    project_run = SimpleNamespace(project_id=4, status="RUNNING", error_code=None)
+
+    class FakeDb:
+        committed = False
+
+        def scalars(self, statement):
+            return [project_run]
+
+        def commit(self):
+            self.committed = True
+
+    job = SimpleNamespace(
+        id=36,
+        status="CANCEL_REQUESTED",
+        progress=37,
+        error=None,
+        payload={"cancellation_reason": "SYSTEM_SLEEP"},
+    )
+    report = [{"project_id": 4, "car_id": 1, "change": "NEW"}]
+
+    _finish_cancelled_job(FakeDb(), job, {}, report, [], [])
+
+    assert job.status == "INTERRUPTED_SLEEP"
+    assert job.payload["interruption_reason"] == "SYSTEM_SLEEP"
+    assert job.payload["partial_report"] is True
+    assert job.payload["report"] == report
+    assert project_run.status == "INTERRUPTED_SLEEP"
+    assert project_run.error_code == "SYSTEM_SLEEP"
 
 
 def test_completed_project_publishes_a_live_report_before_the_scan_finishes():
