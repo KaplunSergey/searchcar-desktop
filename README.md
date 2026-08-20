@@ -17,6 +17,8 @@ documented in [`docs/LICENSE_SERVICE.md`](docs/LICENSE_SERVICE.md).
 The Phase 7 desktop entitlement, secure device identity and activation flow are
 documented in
 [`docs/DESKTOP_LICENSE_ENFORCEMENT.md`](docs/DESKTOP_LICENSE_ENFORCEMENT.md).
+The maintainer checklist for preparing, building, validating and rolling back
+a desktop pilot release is in [`docs/RELEASE_RUNBOOK.md`](docs/RELEASE_RUNBOOK.md).
 
 Until the desktop milestones are implemented, the baseline application below
 continues to run through Docker exactly as it did in the source repository.

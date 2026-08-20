@@ -18,6 +18,7 @@ import {
 } from "recharts";
 import { FormEvent, PointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { dict, type Key, type Locale } from "./translations";
+import { APP_VERSION } from "./version";
 
 type View =
   | "projects"
@@ -707,6 +708,7 @@ function App({
             </strong>
           </div>
         </div>
+        <p className="app-version">v{APP_VERSION}</p>
       </aside>
       <section className="workspace">
         <header>

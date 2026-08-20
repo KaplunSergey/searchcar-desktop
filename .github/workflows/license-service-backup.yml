@@ -25,6 +25,8 @@ jobs:
           corepack enable
           corepack prepare pnpm@11.17.0 --activate
       - run: pnpm install --frozen-lockfile
+      - name: Verify product version metadata
+        run: pnpm version:check
       - name: Export D1
         run: |
           mkdir -p artifacts/license-service-backup

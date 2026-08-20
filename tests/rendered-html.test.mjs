@@ -70,6 +70,25 @@ test("web and desktop dropdown controls use the same cross-platform styling",asy
   assert.match(sharedStyles,/padding-right:44px!important/);
   assert.match(sharedStyles,/select:not\(\[multiple\]\):focus-visible/);
 });
+test("product version metadata has one checked source of truth", async () => {
+  const [pkg, cargo, tauri, backend, frontend, script, page] = await Promise.all([
+    "package.json",
+    "desktop/src-tauri/Cargo.toml",
+    "desktop/src-tauri/tauri.conf.json",
+    "backend/app/version.py",
+    "app/version.ts",
+    "scripts/sync_app_version.mjs",
+    "app/page.tsx",
+  ].map((path) => readFile(new URL(path, root), "utf8")));
+  const version = JSON.parse(pkg).version;
+  assert.match(cargo, new RegExp(`^version\\s*=\\s*"${version}"`, "m"));
+  assert.equal(JSON.parse(tauri).version, version);
+  assert.match(backend, new RegExp(`APP_VERSION\\s*=\\s*"${version}"`));
+  assert.match(frontend, new RegExp(`APP_VERSION\\s*=\\s*"${version}"`));
+  assert.match(script, /package\.json version must be SemVer/);
+  assert.match(page, /import \{ APP_VERSION \} from "\.\/version"/);
+  assert.match(page, /className="app-version">v\{APP_VERSION\}/);
+});
 test("desktop exit requires confirmation and preserves graceful scan cancellation",async()=>{
   const [shell,runtime,queue]=await Promise.all([
     readFile(new URL("desktop/src-tauri/src/lib.rs",root),"utf8"),

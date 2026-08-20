@@ -67,6 +67,9 @@ jobs:
           python -m pip install -r backend/requirements-desktop-build.txt
           pnpm install --frozen-lockfile
 
+      - name: Verify product version metadata
+        run: pnpm version:check
+
       - name: Run backend and frontend tests
         run: |
           export PYTHONPATH="$PWD/backend"

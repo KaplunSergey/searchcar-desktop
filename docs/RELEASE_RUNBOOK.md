@@ -1,0 +1,205 @@
+# SearchCar Desktop — release runbook
+
+This is the operational checklist for an owner or future coding agent. Follow
+the steps in order. The current process produces **pilot artifacts**: macOS
+uses an ad-hoc signature and Windows uses an unsigned NSIS installer. It does
+not yet create automatic updates or a GitHub Release.
+
+## Safety rules
+
+- All GitHub workflows are manual. A push must not deploy a Worker, create a
+  backup, or build an installer by itself.
+- Never place Cloudflare tokens, private signing keys, owner passwords or
+  generated activation codes in Git, issues, workflow files or release notes.
+- Do not run the License service workflow with `deploy: true` unless the
+  release changes `license-service/` or `license-service/migrations/`.
+- Stop at the first failed check. Fix it in a new commit; do not distribute an
+  artifact from a failed or partially rerun job.
+
+## 1. Prepare the release commit
+
+Work from the repository root on the branch that is intended for release.
+
+```bash
+git status --short
+git pull --ff-only
+pnpm install --frozen-lockfile
+pnpm version:check
+pnpm test
+pnpm lint
+```
+
+`git status --short` must be empty before changing the version. Lint currently
+may show known `next/image` warnings, but it must show no errors.
+
+Choose a [SemVer](https://semver.org/) version:
+
+- patch (`0.1.1`) — bug fix without user-visible functionality changes;
+- minor (`0.2.0`) — backward-compatible user-visible functionality;
+- major (`1.0.0`) — incompatible data, license or workflow change.
+
+Edit only the `version` field in `package.json`, then synchronize the generated
+metadata:
+
+```bash
+pnpm version:sync
+pnpm version:check
+pnpm build
+pnpm desktop:frontend:build
+```
+
+`package.json` is the only authoritative version. `version:sync` updates the
+Tauri bundle, Cargo package, backend health endpoint and frontend label. Do
+not hand-edit their version strings.
+
+Run relevant Python tests when Python 3.12 and project dependencies are
+available:
+
+```bash
+export PYTHONPATH="$PWD/backend"
+export STORAGE_ROOT="/private/tmp/searchcar-release-storage"
+export DATABASE_URL="sqlite+pysqlite:////private/tmp/searchcar-release.sqlite3"
+python -m pytest backend/tests -q
+```
+
+Commit and push the completed release candidate:
+
+```bash
+git add -A
+git commit -m "release: vX.Y.Z"
+git push
+git tag -a vX.Y.Z -m "SearchCar Desktop vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+Replace `X.Y.Z` with the selected version. Do not tag until the commit has
+passed local checks.
+
+## 2. Run Cloudflare checks only when needed
+
+If the release contains no changes below `license-service/`, skip this section.
+
+1. In GitHub, open **Actions → Backup license service → Run workflow**.
+   Wait for it to complete and download/store the encrypted backup artifact.
+2. Open **Actions → License service → Run workflow** with `deploy` set to
+   `false`. It runs typechecking and Worker/D1 tests only.
+3. If that run is green, start the same workflow again with `deploy` set to
+   `true`. It applies pending D1 migrations, then deploys the Worker.
+4. Open the Worker `/health` endpoint and perform one owner-panel smoke check.
+
+Run the backup before every remote D1 migration. Never use `deploy: true` just
+to build desktop installers.
+
+## 3. Build the installers in GitHub Actions
+
+Open **Actions** in the GitHub repository and start both workflows from the
+release tag or the release commit:
+
+1. **macOS desktop pilot → Run workflow**
+2. **Windows desktop pilot → Run workflow**
+
+Leave `include_diagnostic_standalone` disabled. It is a slow troubleshooting
+build, not a normal release prerequisite. Each normal workflow runs tests,
+checks version metadata, creates its native installer artifact and uploads a
+SHA-256 checksum.
+
+Wait for both runs to be green. A workflow blocked by billing or a cancelled
+run is not a successful build and must be re-run after the account issue is
+resolved.
+
+## 4. Verify and distribute artifacts
+
+Download the artifacts from the successful workflow runs:
+
+- macOS: `SearchCar-Desktop-macOS-arm64.zip` and `SHA256SUMS.txt`;
+- Windows: the NSIS `.exe` installer and its checksum file.
+
+On macOS, verify the archive before distribution:
+
+```bash
+shasum -a 256 SearchCar-Desktop-macOS-arm64.zip
+cat SHA256SUMS.txt
+```
+
+The calculated value must match the artifact checksum. Use the corresponding
+SHA-256 command on Windows or compare it in PowerShell:
+
+```powershell
+Get-FileHash .\SearchCar-Desktop-Setup.exe -Algorithm SHA256
+```
+
+Install and smoke-test each artifact on a clean target machine before sending
+it to customers:
+
+1. Start the application.
+2. Enter a newly issued activation code on a clean local database.
+3. Create a project and perform one real Encar scan.
+4. Verify that the license panel displays the expected license and source
+   entitlement.
+5. Create a local backup and verify it.
+6. Close the application during a scan and confirm that it asks for exit and
+   saves a partial/cancelled result safely.
+
+Because pilot artifacts are not commercially signed/notarized, macOS Gatekeeper
+and Windows SmartScreen may show warnings. Do not advise customers to disable
+system security globally. Commercial signing is a later phase.
+
+After both clean-machine checks pass, create a GitHub Release manually from
+tag `vX.Y.Z`, attach the verified artifacts and checksums, and write concise
+release notes. The current updater does not consume this release yet; it is a
+distribution record and rollback source.
+
+### Future updater manifest (prepared, but not enabled)
+
+The repository includes a strict generator for the static `latest.json` format
+used by the Tauri updater. It is intentionally not part of the current pilot
+release: enabling it first requires a separately generated Tauri updater key,
+the public key embedded in the application, the matching private key stored as
+a GitHub Secret, and signed updater artifacts. Those prerequisites must be
+completed together; never publish an unsigned manifest.
+
+Once that later setup is complete, generate `latest.json` only after both
+signed updater bundles and their `.sig` files have been uploaded to the GitHub
+Release:
+
+```bash
+pnpm release:updater-manifest -- \
+  --version X.Y.Z \
+  --notes-file release-notes.md \
+  --darwin-aarch64-url "https://github.com/KaplunSergey/searchcar-desktop/releases/download/vX.Y.Z/SearchCar-mac.tar.gz" \
+  --darwin-aarch64-signature-file SearchCar-mac.tar.gz.sig \
+  --windows-x86_64-url "https://github.com/KaplunSergey/searchcar-desktop/releases/download/vX.Y.Z/SearchCar-Setup.nsis.zip" \
+  --windows-x86_64-signature-file SearchCar-Setup.nsis.zip.sig \
+  --output latest.json
+```
+
+The generator refuses non-HTTPS URLs, malformed versions and missing
+signatures. Upload the resulting `latest.json` to that same public release.
+
+## 5. Rollback
+
+There is no automatic updater rollback yet. If an installer is defective:
+
+1. Remove or mark the GitHub Release as a bad release; do not delete its audit
+   trail or checksums.
+2. Stop distributing its files.
+3. Keep Worker/D1 unchanged unless the fault is in the license service.
+4. Give pilot customers the last verified installer and document the affected
+   version.
+5. Fix the issue, increment the patch version and repeat this runbook.
+
+If a Worker/D1 migration is involved, restore only through the documented D1
+backup and recovery procedure in `docs/LICENSE_SERVICE.md`; do not attempt SQL
+changes by guesswork during an incident.
+
+## Completion record
+
+For every released version, record in the GitHub Release notes or internal
+release issue:
+
+- version, commit SHA and tag;
+- links to the green macOS and Windows workflow runs;
+- checksums of the distributed artifacts;
+- whether a Worker/D1 deploy occurred and its Worker version ID;
+- names of the clean test machines and the result;
+- known limitations or required customer instructions.

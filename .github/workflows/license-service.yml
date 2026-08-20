@@ -28,6 +28,8 @@ jobs:
           corepack prepare pnpm@11.17.0 --activate
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Verify product version metadata
+        run: pnpm version:check
       - name: Check Worker types
         run: pnpm license:typecheck
       - name: Run Worker/D1 tests
@@ -53,6 +55,8 @@ jobs:
           corepack enable
           corepack prepare pnpm@11.17.0 --activate
       - run: pnpm install --frozen-lockfile
+      - name: Verify product version metadata
+        run: pnpm version:check
       - name: Apply D1 migrations
         run: pnpm exec wrangler d1 migrations apply LICENSE_DB --remote --config license-service/wrangler.jsonc
       - name: Deploy Worker

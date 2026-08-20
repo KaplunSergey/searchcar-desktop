@@ -3,8 +3,10 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
+from .version import APP_VERSION
+
 class Settings(BaseSettings):
-    app_version: str = "0.1.0"
+    app_version: str = APP_VERSION
     database_url: str = "postgresql+psycopg://encar:encar@localhost:5432/encar"
     storage_root: str = "/storage"
     worker_poll_seconds: float = 2

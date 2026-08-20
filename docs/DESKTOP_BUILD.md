@@ -200,14 +200,27 @@ pilot larger, but installation does not depend on internet access or an
 existing WebView2 runtime. The application itself may still require internet
 for search and license checks.
 
-On a new local database the current pilot creates the agreed initial
-administrator `Serhii` with password `sergiokap09` and requires a password
-change after the first login.
-Development builds can override both bootstrap values with
-`SEARCHCAR_INITIAL_ADMIN_USERNAME` and `SEARCHCAR_INITIAL_ADMIN_PASSWORD`.
-This temporary bootstrap is replaced by licensed first-run onboarding in the
-licensing milestone.
+On a new local database, the current desktop pilot asks the customer for an
+owner-issued one-time activation code. It creates one passwordless local
+workspace only after that code is accepted by the license service; no default
+customer username or password is embedded in the installer.
 
 The workflow can be started manually from GitHub Actions. A successful CI build
 proves Windows Server runner compatibility; Windows 10 and Windows 11 pilot
 machines remain mandatory before customer release.
+
+## Product version
+
+`package.json` is the canonical product version. Before making a release,
+change its `version` to the required SemVer value and run:
+
+```bash
+pnpm version:sync
+pnpm version:check
+```
+
+The first command synchronizes the Tauri bundle, Rust package, desktop backend
+and frontend version metadata. The second command only verifies them. All
+manual GitHub build and license-service workflows run the verification before
+doing work, so a mismatched desktop build cannot be published. The application
+shows the resulting version in its sidebar.

@@ -269,3 +269,20 @@ Still required to complete M8.5:
 - perform the documented pilot-local-user migration and transfer checks;
 - add the next parser only together with a catalog migration and its explicit
   desktop scan guard.
+
+## Milestone M10 — release foundation (in progress)
+
+Implemented:
+
+- `package.json` is the canonical SemVer source for the desktop product;
+- `pnpm version:sync` synchronizes the Tauri bundle, Cargo package, backend
+  health version and frontend version label;
+- `pnpm version:check` runs in every manually launched GitHub workflow and
+  rejects a build or Worker operation when version metadata differs;
+- the current product version is visible in the application sidebar.
+- a strict generator and tests exist for the signed static Tauri updater
+  manifest; activation is intentionally deferred until updater keys and signed
+  native artifacts are configured.
+
+Still required: signed update manifests, a secure update download/install
+path, release notes and production signing.
