@@ -106,7 +106,25 @@ jobs:
             "$RUNNER_TEMP/searchcar-compiled-smoke" \
             work/macos-smoke
 
-      - name: Build unsigned macOS application
+      - name: Verify updater signing secrets
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" ]]; then
+            echo "Missing GitHub secret: TAURI_SIGNING_PRIVATE_KEY" >&2
+            exit 1
+          fi
+          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]]; then
+            echo "Missing GitHub secret: TAURI_SIGNING_PRIVATE_KEY_PASSWORD" >&2
+            exit 1
+          fi
+
+      - name: Build unsigned macOS application and updater bundle
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           pnpm desktop:tauri:build \
             --target aarch64-apple-darwin \
@@ -116,6 +134,9 @@ jobs:
 
       - name: Verify and archive application
         shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           app="$(find desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -type d -name '*.app' | head -n 1)"
           test -n "$app"
@@ -126,9 +147,22 @@ jobs:
           codesign --force --deep --sign - "$app"
           codesign --verify --deep --strict "$app"
           mkdir -p work/macos-artifact
+
+          updater="$app.tar.gz"
+          rm -f "$updater" "$updater.sig"
+          tar -czf "$updater" -C "$(dirname "$app")" "$(basename "$app")"
+          pnpm exec tauri signer sign "$updater"
+          test -s "$updater"
+          test -s "$updater.sig"
+          updater_artifact="work/macos-artifact/SearchCar-Desktop-macOS-arm64.app.tar.gz"
+          cp "$updater" "$updater_artifact"
+          cp "$updater.sig" "$updater_artifact.sig"
+
           ditto -c -k --sequesterRsrc --keepParent "$app" \
             work/macos-artifact/SearchCar-Desktop-macOS-arm64.zip
-          shasum -a 256 work/macos-artifact/SearchCar-Desktop-macOS-arm64.zip \
+          shasum -a 256 \
+            work/macos-artifact/SearchCar-Desktop-macOS-arm64.zip \
+            "$updater_artifact" \
             > work/macos-artifact/SHA256SUMS.txt
           cat work/macos-artifact/SHA256SUMS.txt
 

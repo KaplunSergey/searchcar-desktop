@@ -23,6 +23,7 @@ use tauri::{
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
+use tauri_plugin_updater::{Update, UpdaterExt};
 
 struct SidecarProcess {
     child: CommandChild,
@@ -37,6 +38,10 @@ struct LifecycleState {
     confirmation_open: AtomicBool,
 }
 
+struct UpdaterState {
+    busy: AtomicBool,
+}
+
 #[derive(Default)]
 struct TrayStatus {
     enabled: bool,
@@ -45,6 +50,7 @@ struct TrayStatus {
 }
 
 const LEASE_MESSAGE_PREFIX: &str = "SEARCHCAR-LICENSE-LEASE-V1\n";
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Defense in depth for production builds.  The Python sidecar enforces the
 /// same signed lease after startup; the native shell verifies it before it
@@ -378,6 +384,155 @@ fn request_exit_confirmation(app: &tauri::AppHandle) {
         });
 }
 
+fn finish_update_operation(app: &tauri::AppHandle) {
+    app.state::<UpdaterState>()
+        .busy
+        .store(false, Ordering::SeqCst);
+}
+
+fn allow_programmatic_exit(app: &tauri::AppHandle) {
+    app.state::<LifecycleState>()
+        .explicit_exit
+        .store(true, Ordering::SeqCst);
+}
+
+fn show_update_result(app: &tauri::AppHandle, title: &str, message: String, kind: MessageDialogKind) {
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(kind)
+        .buttons(MessageDialogButtons::Ok)
+        .show(|_| {});
+}
+
+fn restart_after_update_failure(app: tauri::AppHandle, message: String) {
+    let restart_handle = app.clone();
+    app.dialog()
+        .message(format!(
+            "Не удалось установить обновление. SearchCar будет перезапущен.\n\n{message}"
+        ))
+        .title("Ошибка обновления")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::Ok)
+        .show(move |_| {
+            allow_programmatic_exit(&restart_handle);
+            restart_handle.restart();
+        });
+}
+
+fn prompt_update_install(app: tauri::AppHandle, update: Update) {
+    let version = update.version.clone();
+    let notes = update
+        .body
+        .as_deref()
+        .unwrap_or("Описание изменений не указано.")
+        .chars()
+        .take(2_000)
+        .collect::<String>();
+    let prompt_handle = app.clone();
+    app.dialog()
+        .message(format!(
+            "Доступна версия {version}.\n\n{notes}\n\nСкачать и установить сейчас?"
+        ))
+        .title("Обновление SearchCar")
+        .kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Скачать и установить".to_string(),
+            "Позже".to_string(),
+        ))
+        .show(move |confirmed| {
+            if !confirmed {
+                finish_update_operation(&prompt_handle);
+                return;
+            }
+            let install_handle = prompt_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let bytes = match update.download(|_, _| {}, || {}).await {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        finish_update_operation(&install_handle);
+                        show_update_result(
+                            &install_handle,
+                            "Ошибка обновления",
+                            format!("Не удалось скачать или проверить подпись обновления.\n\n{error}"),
+                            MessageDialogKind::Error,
+                        );
+                        return;
+                    }
+                };
+
+                // The Windows installer cannot safely replace the bundled
+                // sidecar while it is still running. The signature has already
+                // been verified by `download`, so stop local work immediately
+                // before handing the verified bytes to the native installer.
+                stop_sidecar(&install_handle);
+                if let Err(error) = update.install(bytes) {
+                    finish_update_operation(&install_handle);
+                    restart_after_update_failure(install_handle, error.to_string());
+                    return;
+                }
+
+                finish_update_operation(&install_handle);
+                allow_programmatic_exit(&install_handle);
+                #[cfg(not(windows))]
+                install_handle.restart();
+                #[cfg(windows)]
+                install_handle.exit(0);
+            });
+        });
+}
+
+fn start_update_check(app: &tauri::AppHandle, interactive: bool) {
+    if app
+        .state::<UpdaterState>()
+        .busy
+        .swap(true, Ordering::SeqCst)
+    {
+        if interactive {
+            show_update_result(
+                app,
+                "Обновление SearchCar",
+                "Проверка или установка обновления уже выполняется.".to_string(),
+                MessageDialogKind::Info,
+            );
+        }
+        return;
+    }
+
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = match app_handle.updater() {
+            Ok(updater) => updater.check().await.map_err(|error| error.to_string()),
+            Err(error) => Err(error.to_string()),
+        };
+        match result {
+            Ok(Some(update)) => prompt_update_install(app_handle, update),
+            Ok(None) => {
+                finish_update_operation(&app_handle);
+                if interactive {
+                    show_update_result(
+                        &app_handle,
+                        "Обновление SearchCar",
+                        "Установлена актуальная версия SearchCar.".to_string(),
+                        MessageDialogKind::Info,
+                    );
+                }
+            }
+            Err(error) => {
+                finish_update_operation(&app_handle);
+                if interactive {
+                    show_update_result(
+                        &app_handle,
+                        "Ошибка обновления",
+                        format!("Не удалось проверить наличие обновлений.\n\n{error}"),
+                        MessageDialogKind::Error,
+                    );
+                }
+            }
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -394,7 +549,12 @@ pub fn run() {
             explicit_exit: AtomicBool::new(false),
             confirmation_open: AtomicBool::new(false),
         })
+        .manage(UpdaterState {
+            busy: AtomicBool::new(false),
+        })
         .setup(|app| {
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
             let port = available_port().map_err(std::io::Error::other)?;
             let secret: String = rand::rng()
                 .sample_iter(&Alphanumeric)
@@ -470,8 +630,18 @@ pub fn run() {
                 false,
                 None::<&str>,
             )?;
+            let update_item = MenuItem::with_id(
+                app,
+                "update",
+                "Check for updates…",
+                true,
+                None::<&str>,
+            )?;
             let exit_item = MenuItem::with_id(app, "exit", "Exit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open_item, &next_item, &pause_item, &exit_item])?;
+            let menu = Menu::with_items(
+                app,
+                &[&open_item, &next_item, &pause_item, &update_item, &exit_item],
+            )?;
             let next_for_menu = next_item.clone();
             let pause_for_menu = pause_item.clone();
             TrayIconBuilder::new()
@@ -494,6 +664,7 @@ pub fn run() {
                     "exit" => {
                         request_exit_confirmation(app);
                     }
+                    "update" => start_update_check(app, true),
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -534,6 +705,16 @@ pub fn run() {
                     .inner_size(1280.0, 820.0)
                     .min_inner_size(980.0, 680.0)
                     .build();
+                });
+
+                start_update_check(&app_handle, false);
+                let periodic_update_handle = app_handle.clone();
+                thread::spawn(move || loop {
+                    thread::sleep(UPDATE_CHECK_INTERVAL);
+                    if !health_is_ready(port) {
+                        break;
+                    }
+                    start_update_check(&periodic_update_handle, false);
                 });
 
                 let status_handle = app_handle.clone();
@@ -596,7 +777,10 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use ed25519_dalek::{Signer, SigningKey};
     use serde_json::json;
-    use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn temporary_directory() -> std::path::PathBuf {
         let nonce = SystemTime::now()

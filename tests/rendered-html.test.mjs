@@ -89,6 +89,52 @@ test("product version metadata has one checked source of truth", async () => {
   assert.match(page, /import \{ APP_VERSION \} from "\.\/version"/);
   assert.match(page, /className="app-version">v\{APP_VERSION\}/);
 });
+test("updater key generation keeps the private key outside Git with strict permissions", async () => {
+  const [script, ignore, runbook] = await Promise.all([
+    "scripts/generate_tauri_updater_key.command",
+    ".gitignore",
+    "docs/RELEASE_RUNBOOK.md",
+  ].map((path) => readFile(new URL(path, root), "utf8")));
+  assert.match(script, /umask 077/);
+  assert.match(script, /Refusing to store the updater private key inside the Git repository/);
+  assert.match(script, /chmod 600 "\$TEMP_PRIVATE"/);
+  assert.match(script, /TAURI_SIGNING_PRIVATE_KEY_PASSWORD/);
+  assert.doesNotMatch(script, /cat "\$PRIVATE_KEY"/);
+  assert.match(ignore, /\.searchcar-release-secrets\//);
+  assert.match(runbook, /generate_tauri_updater_key\.command/);
+  assert.match(runbook, /independent from the Cloudflare license signing key/i);
+});
+test("desktop updater uses the checked public key and signed CI artifacts", async () => {
+  const [tauriConfig, updaterPublicKey, shell, macWorkflow, windowsWorkflow] = await Promise.all([
+    "desktop/src-tauri/tauri.conf.json",
+    "desktop/updater-public-key.txt",
+    "desktop/src-tauri/src/lib.rs",
+    ".github/workflows/macos-desktop.yml",
+    ".github/workflows/windows-desktop.yml",
+  ].map((path) => readFile(new URL(path, root), "utf8")));
+  const tauri = JSON.parse(tauriConfig);
+  const publicKey = updaterPublicKey.trim();
+  assert.equal(tauri.bundle.createUpdaterArtifacts, true);
+  assert.equal(tauri.plugins.updater.pubkey, publicKey);
+  assert.deepEqual(tauri.plugins.updater.endpoints, [
+    "https://github.com/KaplunSergey/searchcar-desktop/releases/latest/download/latest.json",
+  ]);
+  assert.equal(tauri.plugins.updater.windows.installMode, "passive");
+  assert.match(publicKey, /^[A-Za-z0-9+/=]+$/u);
+  assert.match(shell, /tauri_plugin_updater::\{Update, UpdaterExt\}/);
+  assert.match(shell, /fn start_update_check/);
+  assert.match(shell, /UPDATE_CHECK_INTERVAL/);
+  assert.match(shell, /update\.download/);
+  assert.match(shell, /stop_sidecar\(&install_handle\)/);
+  assert.match(shell, /allow_programmatic_exit\(&install_handle\)/);
+  assert.match(macWorkflow, /TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/);
+  assert.match(macWorkflow, /pnpm exec tauri signer sign "\$updater"/);
+  assert.match(macWorkflow, /test -s "\$updater\.sig"/);
+  assert.match(windowsWorkflow, /TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/);
+  assert.match(windowsWorkflow, /updater_signed = \$true/);
+  assert.match(windowsWorkflow, /SearchCar-Desktop-Windows-x64-setup\.exe/);
+  assert.match(windowsWorkflow, /\$artifactSignature = "\$artifactInstaller\.sig"/);
+});
 test("desktop exit requires confirmation and preserves graceful scan cancellation",async()=>{
   const [shell,runtime,queue]=await Promise.all([
     readFile(new URL("desktop/src-tauri/src/lib.rs",root),"utf8"),

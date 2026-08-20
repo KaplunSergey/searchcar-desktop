@@ -2,8 +2,9 @@
 
 This is the operational checklist for an owner or future coding agent. Follow
 the steps in order. The current process produces **pilot artifacts**: macOS
-uses an ad-hoc signature and Windows uses an unsigned NSIS installer. It does
-not yet create automatic updates or a GitHub Release.
+uses an ad-hoc OS signature and Windows uses an OS-unsigned NSIS installer.
+Both workflows additionally create updater artifacts protected by the separate
+Tauri updater signature. GitHub Releases are still created manually.
 
 ## Safety rules
 
@@ -90,6 +91,39 @@ If the release contains no changes below `license-service/`, skip this section.
 Run the backup before every remote D1 migration. Never use `deploy: true` just
 to build desktop installers.
 
+## Updater signing key setup (one time)
+
+The Tauri updater key is independent from the Cloudflare license signing key.
+Generate it once on the owner's trusted Mac:
+
+```bash
+zsh scripts/generate_tauri_updater_key.command
+```
+
+The script asks for a strong password and writes the pair outside the Git
+repository, by default to the sibling directory
+`.searchcar-release-secrets`. The private file is mode `600`; the directory is
+mode `700`. Back up the private key and password separately. Losing either one
+prevents future installed applications from accepting new updates.
+
+In GitHub open **Settings → Secrets and variables → Actions → New repository
+secret** and add:
+
+- `TAURI_SIGNING_PRIVATE_KEY`: the complete contents of
+  `searchcar-updater.key`;
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: the password chosen during generation.
+
+Copy the private key to the clipboard without printing it:
+
+```bash
+pbcopy < ../.searchcar-release-secrets/searchcar-updater.key
+```
+
+The `.pub` file is not secret. Its checked copy is
+`desktop/updater-public-key.txt`, and tests require `tauri.conf.json` to contain
+the same value. Do not replace it with a placeholder or with the Cloudflare
+license public key.
+
 ## 3. Build the installers in GitHub Actions
 
 Open **Actions** in the GitHub repository and start both workflows from the
@@ -100,7 +134,8 @@ release tag or the release commit:
 
 Leave `include_diagnostic_standalone` disabled. It is a slow troubleshooting
 build, not a normal release prerequisite. Each normal workflow runs tests,
-checks version metadata, creates its native installer artifact and uploads a
+checks version metadata, creates its native installer and updater artifact,
+requires both updater signing secrets, verifies the `.sig` file and uploads a
 SHA-256 checksum.
 
 Wait for both runs to be green. A workflow blocked by billing or a cancelled
@@ -111,8 +146,11 @@ resolved.
 
 Download the artifacts from the successful workflow runs:
 
-- macOS: `SearchCar-Desktop-macOS-arm64.zip` and `SHA256SUMS.txt`;
-- Windows: the NSIS `.exe` installer and its checksum file.
+- macOS: `SearchCar-Desktop-macOS-arm64.zip`,
+  `SearchCar-Desktop-macOS-arm64.app.tar.gz`, its `.sig`, and
+  `SHA256SUMS.txt`;
+- Windows: `SearchCar-Desktop-Windows-x64-setup.exe`, its `.sig`, and
+  `SHA256SUMS.txt` plus smoke metadata.
 
 On macOS, verify the archive before distribution:
 
@@ -146,17 +184,14 @@ system security globally. Commercial signing is a later phase.
 
 After both clean-machine checks pass, create a GitHub Release manually from
 tag `vX.Y.Z`, attach the verified artifacts and checksums, and write concise
-release notes. The current updater does not consume this release yet; it is a
-distribution record and rollback source.
+release notes.
 
-### Future updater manifest (prepared, but not enabled)
+### Publish the updater manifest
 
 The repository includes a strict generator for the static `latest.json` format
-used by the Tauri updater. It is intentionally not part of the current pilot
-release: enabling it first requires a separately generated Tauri updater key,
-the public key embedded in the application, the matching private key stored as
-a GitHub Secret, and signed updater artifacts. Those prerequisites must be
-completed together; never publish an unsigned manifest.
+used by the enabled native Tauri updater. The application checks at startup,
+then every six hours, and manually from the tray menu. Never publish a manifest
+until both platform artifacts and signatures are from successful workflows.
 
 Once that later setup is complete, generate `latest.json` only after both
 signed updater bundles and their `.sig` files have been uploaded to the GitHub
@@ -166,15 +201,20 @@ Release:
 pnpm release:updater-manifest -- \
   --version X.Y.Z \
   --notes-file release-notes.md \
-  --darwin-aarch64-url "https://github.com/KaplunSergey/searchcar-desktop/releases/download/vX.Y.Z/SearchCar-mac.tar.gz" \
-  --darwin-aarch64-signature-file SearchCar-mac.tar.gz.sig \
-  --windows-x86_64-url "https://github.com/KaplunSergey/searchcar-desktop/releases/download/vX.Y.Z/SearchCar-Setup.nsis.zip" \
-  --windows-x86_64-signature-file SearchCar-Setup.nsis.zip.sig \
+  --darwin-aarch64-url "https://github.com/KaplunSergey/searchcar-desktop/releases/download/vX.Y.Z/SearchCar-Desktop-macOS-arm64.app.tar.gz" \
+  --darwin-aarch64-signature-file SearchCar-Desktop-macOS-arm64.app.tar.gz.sig \
+  --windows-x86_64-url "https://github.com/KaplunSergey/searchcar-desktop/releases/download/vX.Y.Z/SearchCar-Desktop-Windows-x64-setup.exe" \
+  --windows-x86_64-signature-file SearchCar-Desktop-Windows-x64-setup.exe.sig \
   --output latest.json
 ```
 
 The generator refuses non-HTTPS URLs, malformed versions and missing
-signatures. Upload the resulting `latest.json` to that same public release.
+signatures. Upload the resulting `latest.json` to that same public release as
+the final step. The configured GitHub endpoint is anonymous HTTPS: if the
+source repository remains private, customers cannot download it. Before the
+first external updater release, either make release assets public or change
+the checked endpoint to a separate public releases-only repository while
+keeping the source repository private.
 
 ## 5. Rollback
 

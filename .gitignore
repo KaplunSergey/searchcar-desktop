@@ -78,6 +78,7 @@ ms-playwright/
 *.searchcar-backup
 
 # Cloudflare local secrets and signing material
+.searchcar-release-secrets/
 .dev.vars
 .dev.vars.*
 *.key

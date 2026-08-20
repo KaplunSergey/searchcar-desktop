@@ -279,10 +279,17 @@ Implemented:
   health version and frontend version label;
 - `pnpm version:check` runs in every manually launched GitHub workflow and
   rejects a build or Worker operation when version metadata differs;
-- the current product version is visible in the application sidebar.
+- the current product version is visible in the application sidebar;
 - a strict generator and tests exist for the signed static Tauri updater
-  manifest; activation is intentionally deferred until updater keys and signed
-  native artifacts are configured.
+  manifest;
+- the native shell checks the HTTPS manifest after startup, every six hours
+  and manually from the tray, displays release notes, verifies the updater
+  signature before stopping the sidecar, then installs and restarts;
+- the updater public key is embedded and checked against a repository copy;
+- manual macOS and Windows workflows require the updater secrets and reject a
+  build without a non-empty matching `.sig` artifact.
 
-Still required: signed update manifests, a secure update download/install
-path, release notes and production signing.
+Still required: a public releases-only download endpoint (or public GitHub
+release assets), first end-to-end old-to-new update test, pre-update data
+backup/active-scan coordination, richer in-window progress states, and
+commercial OS signing/notarization.

@@ -122,13 +122,32 @@ jobs:
             -RuntimeRoot "$env:RUNNER_TEMP/searchcar-compiled-smoke" `
             -OutputDir "work/windows-smoke"
 
-      - name: Build unsigned offline NSIS installer
+      - name: Verify updater signing secrets
         shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "Missing GitHub secret: TAURI_SIGNING_PRIVATE_KEY"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+            throw "Missing GitHub secret: TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+          }
+
+      - name: Build unsigned offline NSIS installer and updater signature
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           pnpm desktop:tauri:build --bundles nsis --no-sign --ci
 
       - name: Verify installer and write checksum
         shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           $installers = @(
             Get-ChildItem `
@@ -139,13 +158,35 @@ jobs:
             throw "Expected one NSIS installer, found $($installers.Count)"
           }
           New-Item -ItemType Directory -Force "work/windows-smoke" | Out-Null
+          New-Item -ItemType Directory -Force "work/windows-artifact" | Out-Null
           $installer = $installers[0]
+          $signature = "$($installer.FullName).sig"
+          if (-not (Test-Path -LiteralPath $signature -PathType Leaf)) {
+            pnpm exec tauri signer sign $installer.FullName
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to sign the Windows updater artifact"
+            }
+          }
+          if (-not (Test-Path -LiteralPath $signature -PathType Leaf)) {
+            throw "Windows updater signature was not produced"
+          }
+          if ((Get-Item -LiteralPath $signature).Length -eq 0) {
+            throw "Windows updater signature is empty"
+          }
+          $artifactInstaller = "work/windows-artifact/SearchCar-Desktop-Windows-x64-setup.exe"
+          $artifactSignature = "$artifactInstaller.sig"
+          Copy-Item -LiteralPath $installer.FullName -Destination $artifactInstaller
+          Copy-Item -LiteralPath $signature -Destination $artifactSignature
+          $artifactHash = (Get-FileHash $artifactInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$artifactHash  SearchCar-Desktop-Windows-x64-setup.exe" | Set-Content `
+            "work/windows-artifact/SHA256SUMS.txt" -Encoding ascii
           $summary = [ordered]@{
-            file = $installer.Name
-            bytes = $installer.Length
-            sha256 = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            file = "SearchCar-Desktop-Windows-x64-setup.exe"
+            bytes = (Get-Item $artifactInstaller).Length
+            sha256 = $artifactHash
             target = "x86_64-pc-windows-msvc"
-            signed = $false
+            os_code_signed = $false
+            updater_signed = $true
           }
           $summary | ConvertTo-Json | Set-Content `
             "work/windows-smoke/installer.json" -Encoding utf8
@@ -156,7 +197,7 @@ jobs:
         with:
           name: searchcar-desktop-windows-x64-pilot
           path: |
-            desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+            work/windows-artifact/**
             work/windows-smoke/**
           if-no-files-found: error
           retention-days: 14
