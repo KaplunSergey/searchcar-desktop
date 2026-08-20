@@ -190,8 +190,10 @@ release notes.
 
 The repository includes a strict generator for the static `latest.json` format
 used by the enabled native Tauri updater. The application checks at startup,
-then every six hours, and manually from the tray menu. Never publish a manifest
-until both platform artifacts and signatures are from successful workflows.
+then every six hours, and manually from the tray menu or the button next to the
+sidebar version. A native dialog appears when an update is found. Never publish
+a manifest until both platform artifacts and signatures are from successful
+workflows.
 
 Once that later setup is complete, generate `latest.json` only after both
 signed updater bundles and their `.sig` files have been uploaded to the GitHub

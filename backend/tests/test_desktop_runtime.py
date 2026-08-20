@@ -11,6 +11,7 @@ from sqlalchemy import text
 from app.database import create_database_engine
 from app.desktop_runtime import (
     DesktopInstanceLock,
+    DesktopUpdateCheckRelay,
     bundled_headless_chromium,
     configure_desktop_environment,
     configure_playwright_driver,
@@ -18,6 +19,16 @@ from app.desktop_runtime import (
     parent_process_is_alive,
     watch_parent_process,
 )
+
+
+def test_desktop_update_check_relay_collapses_requests_and_consumes_once() -> None:
+    relay = DesktopUpdateCheckRelay()
+
+    assert relay.consume() is False
+    relay.request()
+    relay.request()
+    assert relay.consume() is True
+    assert relay.consume() is False
 
 
 def test_desktop_instance_lock_allows_only_one_backend(tmp_path: Path) -> None:

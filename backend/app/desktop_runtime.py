@@ -20,6 +20,24 @@ GRACEFUL_SHUTDOWN_SECONDS = 35
 PARENT_WATCH_INTERVAL_SECONDS = 2.0
 
 
+class DesktopUpdateCheckRelay:
+    """Pass one user-requested update check from localhost UI to Tauri."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._requested = False
+
+    def request(self) -> None:
+        with self._lock:
+            self._requested = True
+
+    def consume(self) -> bool:
+        with self._lock:
+            requested = self._requested
+            self._requested = False
+        return requested
+
+
 class DesktopInstanceLock:
     """Hold one backend process per desktop data directory."""
 
@@ -389,6 +407,7 @@ def create_desktop_app(
     from .main import app
 
     expected_cookie = _session_cookie(session_secret)
+    update_check_relay = DesktopUpdateCheckRelay()
 
     class DesktopSessionMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
@@ -399,6 +418,7 @@ def create_desktop_app(
                 "/desktop/tray-status",
                 "/desktop/scheduler/toggle",
                 "/desktop/scheduler/resumed",
+                "/desktop/update-check/consume",
             }:
                 return await call_next(request)
             supplied = request.cookies.get(DESKTOP_COOKIE_NAME, "")
@@ -518,6 +538,21 @@ def create_desktop_app(
             "cancel_requested": interruption["cancel_requested"],
             "catch_up_scheduler_ids": due_scheduler_ids,
         }
+
+    @app.get("/api/desktop/runtime", include_in_schema=False)
+    def desktop_runtime_info():
+        return {"desktop": True, "updater": True}
+
+    @app.post("/api/desktop/update-check", include_in_schema=False, status_code=202)
+    def desktop_update_check_request():
+        update_check_relay.request()
+        return {"status": "requested"}
+
+    @app.get("/desktop/update-check/consume", include_in_schema=False)
+    def desktop_update_check_consume(token: str):
+        if not hmac.compare_digest(token, session_secret):
+            raise HTTPException(403, "invalid_desktop_session")
+        return PlainTextResponse("1" if update_check_relay.consume() else "0")
 
     app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="desktop-ui")
     return app

@@ -292,6 +292,10 @@ fn notify_sidecar_resumed(app: &tauri::AppHandle) {
     let _ = sidecar_request(app, "POST", "/desktop/scheduler/resumed");
 }
 
+fn consume_update_check_request(app: &tauri::AppHandle) -> bool {
+    sidecar_request(app, "GET", "/desktop/update-check/consume").as_deref() == Some("1")
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -708,6 +712,17 @@ pub fn run() {
                 });
 
                 start_update_check(&app_handle, false);
+                let update_request_handle = app_handle.clone();
+                thread::spawn(move || loop {
+                    if !health_is_ready(port) {
+                        break;
+                    }
+                    if consume_update_check_request(&update_request_handle) {
+                        start_update_check(&update_request_handle, true);
+                    }
+                    thread::sleep(Duration::from_millis(500));
+                });
+
                 let periodic_update_handle = app_handle.clone();
                 thread::spawn(move || loop {
                     thread::sleep(UPDATE_CHECK_INTERVAL);

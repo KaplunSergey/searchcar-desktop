@@ -250,6 +250,10 @@ type DesktopMigrationReport = {
   target_counts: Record<string, number>;
   storage_files: number;
 };
+type DesktopRuntimeInfo = {
+  desktop: boolean;
+  updater: boolean;
+};
 type ProjectForm = {
   name: string;
   search_url: string;
@@ -530,6 +534,12 @@ function App({
     queryFn: () => request("/settings"),
     refetchInterval: 5000,
   });
+  const desktopRuntimeQuery = useQuery<DesktopRuntimeInfo>({
+    queryKey: ["desktop-runtime"],
+    queryFn: () => request("/desktop/runtime"),
+    retry: false,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
   const [, tickCountdown] = useState(0);
   useEffect(() => {
     const timer = window.setInterval(() => tickCountdown((value) => value + 1), 1000);
@@ -580,6 +590,15 @@ function App({
     setToast(message);
     window.setTimeout(() => setToast(""), 4500);
   };
+
+  const updateCheckMutation = useMutation({
+    mutationFn: () =>
+      request<{ status: "requested" }>("/desktop/update-check", { method: "POST" }),
+    onSuccess: () =>
+      notify(locale === "uk" ? "Перевіряємо наявність оновлень…" : "Проверяем наличие обновлений…"),
+    onError: () =>
+      notify(locale === "uk" ? "Не вдалося запустити перевірку оновлень" : "Не удалось запустить проверку обновлений"),
+  });
 
   const refreshMutation = useMutation({
     mutationFn: (projectIds: number[]) =>
@@ -708,7 +727,21 @@ function App({
             </strong>
           </div>
         </div>
-        <p className="app-version">v{APP_VERSION}</p>
+        <div className="app-version">
+          <span>v{APP_VERSION}</span>
+          {desktopRuntimeQuery.data?.desktop && desktopRuntimeQuery.data.updater ? (
+            <button
+              type="button"
+              disabled={updateCheckMutation.isPending}
+              onClick={() => updateCheckMutation.mutate()}
+              title={locale === "uk" ? "Перевірити оновлення" : "Проверить обновления"}
+              aria-label={locale === "uk" ? "Перевірити оновлення" : "Проверить обновления"}
+            >
+              <b aria-hidden="true">↻</b>
+              <em>{locale === "uk" ? "Оновлення" : "Обновления"}</em>
+            </button>
+          ) : null}
+        </div>
       </aside>
       <section className="workspace">
         <header>

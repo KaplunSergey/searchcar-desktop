@@ -87,7 +87,9 @@ test("product version metadata has one checked source of truth", async () => {
   assert.match(frontend, new RegExp(`APP_VERSION\\s*=\\s*"${version}"`));
   assert.match(script, /package\.json version must be SemVer/);
   assert.match(page, /import \{ APP_VERSION \} from "\.\/version"/);
-  assert.match(page, /className="app-version">v\{APP_VERSION\}/);
+  assert.match(page, /className="app-version"/);
+  assert.match(page, /<span>v\{APP_VERSION\}<\/span>/);
+  assert.match(page, /request<\{ status: "requested" \}>\("\/desktop\/update-check"/);
 });
 test("updater key generation keeps the private key outside Git with strict permissions", async () => {
   const [script, ignore, runbook] = await Promise.all([
@@ -105,10 +107,11 @@ test("updater key generation keeps the private key outside Git with strict permi
   assert.match(runbook, /independent from the Cloudflare license signing key/i);
 });
 test("desktop updater uses the checked public key and signed CI artifacts", async () => {
-  const [tauriConfig, updaterPublicKey, shell, macWorkflow, windowsWorkflow] = await Promise.all([
+  const [tauriConfig, updaterPublicKey, shell, runtime, macWorkflow, windowsWorkflow] = await Promise.all([
     "desktop/src-tauri/tauri.conf.json",
     "desktop/updater-public-key.txt",
     "desktop/src-tauri/src/lib.rs",
+    "backend/app/desktop_runtime.py",
     ".github/workflows/macos-desktop.yml",
     ".github/workflows/windows-desktop.yml",
   ].map((path) => readFile(new URL(path, root), "utf8")));
@@ -123,6 +126,9 @@ test("desktop updater uses the checked public key and signed CI artifacts", asyn
   assert.match(publicKey, /^[A-Za-z0-9+/=]+$/u);
   assert.match(shell, /tauri_plugin_updater::\{Update, UpdaterExt\}/);
   assert.match(shell, /fn start_update_check/);
+  assert.match(shell, /fn consume_update_check_request/);
+  assert.match(runtime, /class DesktopUpdateCheckRelay/);
+  assert.match(runtime, /"\/desktop\/update-check\/consume"/);
   assert.match(shell, /UPDATE_CHECK_INTERVAL/);
   assert.match(shell, /update\.download/);
   assert.match(shell, /stop_sidecar\(&install_handle\)/);
@@ -134,6 +140,22 @@ test("desktop updater uses the checked public key and signed CI artifacts", asyn
   assert.match(windowsWorkflow, /updater_signed = \$true/);
   assert.match(windowsWorkflow, /SearchCar-Desktop-Windows-x64-setup\.exe/);
   assert.match(windowsWorkflow, /\$artifactSignature = "\$artifactInstaller\.sig"/);
+});
+test("local desktop launchers keep macOS and Windows builds reproducible", async () => {
+  const [macLauncher, windowsLauncher, windowsBuild, buildGuide] = await Promise.all([
+    "Build SearchCar for macOS.command",
+    "Build SearchCar for Windows.cmd",
+    "Build SearchCar for Windows.ps1",
+    "docs/DESKTOP_BUILD.md",
+  ].map((path) => readFile(new URL(path, root), "utf8")));
+  assert.match(macLauncher, /scripts\/build_mac_fixed\.command/);
+  assert.match(windowsLauncher, /pwsh\.exe -NoLogo -NoProfile -ExecutionPolicy Bypass/);
+  assert.match(windowsBuild, /stable-x86_64-pc-windows-msvc/);
+  assert.match(windowsBuild, /scripts\\windows_desktop_smoke\.ps1/);
+  assert.match(windowsBuild, /desktop:tauri:build --bundles nsis --no-sign --ci/);
+  assert.match(windowsBuild, /SearchCar-Desktop-Windows-x64-setup\.exe/);
+  assert.match(windowsBuild, /TAURI_SIGNING_PRIVATE_KEY/);
+  assert.match(buildGuide, /Local Windows x64 build without GitHub Actions/);
 });
 test("desktop exit requires confirmation and preserves graceful scan cancellation",async()=>{
   const [shell,runtime,queue]=await Promise.all([

@@ -84,10 +84,18 @@ pnpm desktop:tauri:build --debug --bundles app --no-sign
 
 For an isolated local Rust installation on macOS, run
 `scripts/install_local_rust.command`. It stores rustup and Cargo under
-`Documents/Codex/.toolchains` and does not modify the shell profile. Then run
-`scripts/build_mac_fixed.command` to rebuild the sidecar, Tauri shell and
-`SearchCar Desktop Fixed.app`. The previous app bundle is retained with a UTC
-timestamp instead of being deleted.
+`Documents/Codex/.toolchains` and does not modify the shell profile.
+
+For a local macOS test build, double-click `Build SearchCar for macOS.command`
+in Finder or run:
+
+```bash
+./"Build SearchCar for macOS.command"
+```
+
+The launcher calls `scripts/build_mac_fixed.command` to rebuild the sidecar and
+Tauri shell, then installs `SearchCar Desktop Fixed.app`. The previous app
+bundle is retained with a UTC timestamp instead of being deleted.
 
 GitHub Actions builds are split by native platform:
 
@@ -98,6 +106,46 @@ Both workflows install pinned Python/Node dependencies, run backend/frontend
 tests, stage Chromium plus the external Playwright Node driver, run the compiled
 smoke suite and upload checksums with the build artifact. Code-signing and
 notarization credentials are intentionally not required for pilot builds.
+
+### Local Windows x64 build without GitHub Actions
+
+The Windows installer must be built inside 64-bit Windows. Use a Windows x64
+computer or a Windows virtual machine with x64 application support. Install:
+
+- Git;
+- PowerShell 7 x64;
+- Python 3.12 x64;
+- Node.js 22 x64 and `pnpm@11.17.0`;
+- Rustup;
+- Visual Studio 2022 Build Tools with **Desktop development with C++** and a
+  Windows SDK.
+
+Clone or copy the repository to Windows, close SearchCar Desktop, then
+double-click `Build SearchCar for Windows.cmd`. The launcher runs the checked
+PowerShell build script and produces:
+
+```text
+work\windows-artifact\SearchCar-Desktop-Windows-x64-setup.exe
+work\windows-artifact\SHA256SUMS.txt
+```
+
+From PowerShell 7 the same build can be started without the final pause:
+
+```powershell
+& ".\Build SearchCar for Windows.ps1" -NoPause
+```
+
+The slow diagnostic standalone backend is intentionally disabled. Enable it
+only for troubleshooting:
+
+```powershell
+& ".\Build SearchCar for Windows.ps1" -IncludeDiagnosticStandalone
+```
+
+This produces a pilot installer without a commercial Windows code-signing
+certificate, so SmartScreen can warn on a clean computer. When the Tauri
+updater signing environment variables are present, Tauri also creates the
+separate updater `.sig`; those secrets must never be committed to Git.
 
 The pilot build is intentionally unsigned. Production release automation will
 add platform signing and updater signatures in a later milestone.

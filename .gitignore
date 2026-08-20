@@ -3,6 +3,7 @@
 # dependencies
 /node_modules
 /.desktop-build-venv/
+/.desktop-build-venv-windows/
 /.pnp
 .pnp.*
 .yarn/*
@@ -76,6 +77,7 @@ ms-playwright/
 *.sqlite3-wal
 *.sqlite3-shm
 *.searchcar-backup
+SearchCar Desktop Windows build.log
 
 # Cloudflare local secrets and signing material
 .searchcar-release-secrets/
