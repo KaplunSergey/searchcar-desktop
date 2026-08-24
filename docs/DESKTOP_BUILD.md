@@ -149,10 +149,13 @@ the smoke or installer stage, continue without rebuilding Nuitka:
 & ".\Build SearchCar for Windows.ps1" -ResumeAfterSidecar -NoPause
 ```
 
-The first local onefile launch is hidden and may take up to five minutes while
-Windows Defender scans and extracts the payload. On failure the smoke script
+The first local onefile launch is hidden and may take several minutes while
+Windows Defender scans and extracts the payload. The pilot smoke test allows
+up to ten minutes and bypasses any system proxy for loopback requests. On failure it
 prints the tails of stdout, stderr and the structured backend log, and stops
-the complete Nuitka process tree.
+the complete Nuitka process tree. This timeout is only a build diagnostic;
+before external Windows distribution the packaging/startup path must be
+optimized and verified against the product startup-time target.
 
 This produces a pilot installer without a commercial Windows code-signing
 certificate, so SmartScreen can warn on a clean computer. When the Tauri

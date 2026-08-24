@@ -19,7 +19,7 @@ param(
     [string]$OutputDir,
 
     [ValidateRange(30, 900)]
-    [int]$HealthTimeoutSeconds = 300
+    [int]$HealthTimeoutSeconds = 600
 )
 
 $ErrorActionPreference = "Stop"
@@ -150,6 +150,7 @@ try {
             $health = Invoke-WebRequest `
                 -Uri "$baseUrl/api/health" `
                 -TimeoutSec 1 `
+                -NoProxy `
                 -SkipHttpErrorCheck
             if ($health.StatusCode -eq 200) {
                 $healthy = $true
@@ -171,6 +172,7 @@ try {
     $unauthorized = Invoke-WebRequest `
         -Uri "$baseUrl/" `
         -TimeoutSec 2 `
+        -NoProxy `
         -SkipHttpErrorCheck
     if ($unauthorized.StatusCode -ne 403) {
         throw "Desktop root was available without bootstrap session"
@@ -180,6 +182,7 @@ try {
     $bootstrap = Invoke-WebRequest `
         -Uri "$baseUrl/desktop/bootstrap?token=$sessionSecret" `
         -WebSession $webSession `
+        -NoProxy `
         -TimeoutSec 5
     if ($bootstrap.StatusCode -ne 200) {
         throw "Desktop bootstrap did not reach the SPA"
@@ -187,6 +190,7 @@ try {
     $root = Invoke-WebRequest `
         -Uri "$baseUrl/" `
         -WebSession $webSession `
+        -NoProxy `
         -TimeoutSec 2
     if ($root.StatusCode -ne 200 -or $root.Content -notmatch "SearchCar Desktop") {
         throw "Desktop SPA response is invalid"
@@ -195,6 +199,7 @@ try {
     $shutdown = Invoke-WebRequest `
         -Method Post `
         -Uri "$baseUrl/desktop/shutdown?token=$sessionSecret" `
+        -NoProxy `
         -TimeoutSec 5 `
         -SkipHttpErrorCheck
     if ($shutdown.StatusCode -ne 202) {

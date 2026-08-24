@@ -160,7 +160,8 @@ test("local desktop launchers keep macOS and Windows builds reproducible", async
   assert.match(windowsBuild, /TAURI_SIGNING_PRIVATE_KEY/);
   assert.match(windowsSmoke, /RandomNumberGenerator\]::Create\(\)/);
   assert.doesNotMatch(windowsSmoke, /RandomNumberGenerator\]::GetBytes/);
-  assert.match(windowsSmoke, /HealthTimeoutSeconds = 300/);
+  assert.match(windowsSmoke, /HealthTimeoutSeconds = 600/);
+  assert.match(windowsSmoke, /-NoProxy/);
   assert.match(windowsSmoke, /Stop-CompiledSidecarTree/);
   assert.match(windowsSmoke, /-WindowStyle Hidden/);
   assert.match(buildGuide, /Local Windows x64 build without GitHub Actions/);
