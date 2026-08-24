@@ -149,6 +149,11 @@ the smoke or installer stage, continue without rebuilding Nuitka:
 & ".\Build SearchCar for Windows.ps1" -ResumeAfterSidecar -NoPause
 ```
 
+The first local onefile launch is hidden and may take up to five minutes while
+Windows Defender scans and extracts the payload. On failure the smoke script
+prints the tails of stdout, stderr and the structured backend log, and stops
+the complete Nuitka process tree.
+
 This produces a pilot installer without a commercial Windows code-signing
 certificate, so SmartScreen can warn on a clean computer. When the Tauri
 updater signing environment variables are present, Tauri also creates the

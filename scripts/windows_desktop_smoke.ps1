@@ -16,7 +16,10 @@ param(
     [string]$RuntimeRoot,
 
     [Parameter(Mandatory = $true)]
-    [string]$OutputDir
+    [string]$OutputDir,
+
+    [ValidateRange(30, 900)]
+    [int]$HealthTimeoutSeconds = 300
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,6 +46,43 @@ function Get-FreeLoopbackPort {
     }
     finally {
         $listener.Stop()
+    }
+}
+
+function Get-LogTail([string]$Path, [int]$Lines = 80) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return "(log file was not created)"
+    }
+    $content = @(Get-Content -LiteralPath $Path -Tail $Lines -ErrorAction SilentlyContinue)
+    if ($content.Count -eq 0) {
+        return "(log file is empty; the onefile payload may still be extracting)"
+    }
+    return $content -join [Environment]::NewLine
+}
+
+function Stop-CompiledSidecarTree([System.Diagnostics.Process]$Process) {
+    if (-not $Process -or $Process.HasExited) {
+        return
+    }
+    try {
+        $taskKill = Start-Process `
+            -FilePath "$env:SystemRoot\System32\taskkill.exe" `
+            -ArgumentList @("/PID", $Process.Id, "/T", "/F") `
+            -WindowStyle Hidden `
+            -Wait `
+            -PassThru
+        if ($taskKill.ExitCode -ne 0 -and -not $Process.HasExited) {
+            Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+    catch {
+        Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+    }
+    try {
+        $Process.WaitForExit(15000) | Out-Null
+    }
+    catch {
+        # The process may already have disappeared between checks.
     }
 }
 
@@ -91,15 +131,20 @@ try {
         ) `
         -RedirectStandardOutput $stdoutPath `
         -RedirectStandardError $stderrPath `
+        -WindowStyle Hidden `
         -PassThru
 
     $baseUrl = "http://127.0.0.1:$port"
     $healthy = $false
     # A Nuitka onefile binary may need extra time for its first extraction on
-    # a fresh Windows runner, especially while antivirus scanning is active.
-    for ($attempt = 0; $attempt -lt 360; $attempt++) {
+    # a fresh Windows machine, especially while antivirus scanning is active.
+    $healthDeadline = [DateTime]::UtcNow.AddSeconds($HealthTimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $healthDeadline) {
         if ($sidecarProcess.HasExited) {
-            throw "Compiled sidecar exited before health check"
+            $exitCode = $sidecarProcess.ExitCode
+            $stdoutTail = Get-LogTail $stdoutPath
+            $stderrTail = Get-LogTail $stderrPath
+            throw "Compiled sidecar exited before health check (exit $exitCode).`nSTDOUT:`n$stdoutTail`nSTDERR:`n$stderrTail"
         }
         try {
             $health = Invoke-WebRequest `
@@ -112,11 +157,15 @@ try {
             }
         }
         catch {
-            Start-Sleep -Milliseconds 250
+            Start-Sleep -Milliseconds 500
         }
     }
     if (-not $healthy) {
-        throw "Compiled sidecar health check timed out"
+        $structuredLogPath = Join-Path $serveDataPath "logs\searchcar-core.jsonl"
+        $stdoutTail = Get-LogTail $stdoutPath
+        $stderrTail = Get-LogTail $stderrPath
+        $structuredTail = Get-LogTail $structuredLogPath
+        throw "Compiled sidecar health check timed out after $HealthTimeoutSeconds seconds.`nSTDOUT:`n$stdoutTail`nSTDERR:`n$stderrTail`nSTRUCTURED LOG:`n$structuredTail"
     }
 
     $unauthorized = Invoke-WebRequest `
@@ -174,8 +223,7 @@ try {
 }
 finally {
     if ($sidecarProcess -and -not $sidecarProcess.HasExited) {
-        Stop-Process -Id $sidecarProcess.Id -Force
-        $sidecarProcess.WaitForExit()
+        Stop-CompiledSidecarTree $sidecarProcess
     }
     $env:SEARCHCAR_DESKTOP_SESSION_SECRET = $previousSecret
 }

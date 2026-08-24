@@ -160,6 +160,9 @@ test("local desktop launchers keep macOS and Windows builds reproducible", async
   assert.match(windowsBuild, /TAURI_SIGNING_PRIVATE_KEY/);
   assert.match(windowsSmoke, /RandomNumberGenerator\]::Create\(\)/);
   assert.doesNotMatch(windowsSmoke, /RandomNumberGenerator\]::GetBytes/);
+  assert.match(windowsSmoke, /HealthTimeoutSeconds = 300/);
+  assert.match(windowsSmoke, /Stop-CompiledSidecarTree/);
+  assert.match(windowsSmoke, /-WindowStyle Hidden/);
   assert.match(buildGuide, /Local Windows x64 build without GitHub Actions/);
 });
 test("desktop exit requires confirmation and preserves graceful scan cancellation",async()=>{
