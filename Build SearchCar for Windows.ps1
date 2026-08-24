@@ -58,8 +58,13 @@ function Import-MsvcEnvironment {
 
 try {
     Set-Location $ProjectRoot
-    Start-Transcript -Path $BuildLog -Force | Out-Null
-    $TranscriptStarted = $true
+    try {
+        Start-Transcript -Path $BuildLog -Force | Out-Null
+        $TranscriptStarted = $true
+    }
+    catch {
+        Write-Warning "Transcript log is unavailable; continuing without it: $BuildLog"
+    }
 
     if (-not [Environment]::Is64BitProcess) {
         throw "Use x64 PowerShell 7. The 32-bit shell cannot build SearchCar."
@@ -214,7 +219,12 @@ finally {
         }
     }
     if ($TranscriptStarted) {
-        Stop-Transcript | Out-Null
+        try {
+            Stop-Transcript | Out-Null
+        }
+        catch {
+            Write-Warning "Transcript could not be stopped cleanly."
+        }
     }
     if (-not $NoPause) {
         Read-Host "Press Enter to close this window"

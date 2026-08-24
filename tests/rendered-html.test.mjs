@@ -155,6 +155,7 @@ test("local desktop launchers keep macOS and Windows builds reproducible", async
   assert.match(windowsBuild, /scripts\\windows_desktop_smoke\.ps1/);
   assert.match(windowsBuild, /desktop:tauri:build --bundles nsis --no-sign --ci/);
   assert.match(windowsBuild, /\[switch\]\$ResumeAfterSidecar/);
+  assert.match(windowsBuild, /Transcript log is unavailable; continuing without it/);
   assert.match(windowsBuild, /SearchCar-Desktop-Windows-x64-setup\.exe/);
   assert.match(windowsBuild, /TAURI_SIGNING_PRIVATE_KEY/);
   assert.match(windowsSmoke, /RandomNumberGenerator\]::Create\(\)/);
