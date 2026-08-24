@@ -142,6 +142,13 @@ only for troubleshooting:
 & ".\Build SearchCar for Windows.ps1" -IncludeDiagnosticStandalone
 ```
 
+If a previous build already produced the onefile sidecar and stopped later in
+the smoke or installer stage, continue without rebuilding Nuitka:
+
+```powershell
+& ".\Build SearchCar for Windows.ps1" -ResumeAfterSidecar -NoPause
+```
+
 This produces a pilot installer without a commercial Windows code-signing
 certificate, so SmartScreen can warn on a clean computer. When the Tauri
 updater signing environment variables are present, Tauri also creates the

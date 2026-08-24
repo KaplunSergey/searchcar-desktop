@@ -142,10 +142,11 @@ test("desktop updater uses the checked public key and signed CI artifacts", asyn
   assert.match(windowsWorkflow, /\$artifactSignature = "\$artifactInstaller\.sig"/);
 });
 test("local desktop launchers keep macOS and Windows builds reproducible", async () => {
-  const [macLauncher, windowsLauncher, windowsBuild, buildGuide] = await Promise.all([
+  const [macLauncher, windowsLauncher, windowsBuild, windowsSmoke, buildGuide] = await Promise.all([
     "Build SearchCar for macOS.command",
     "Build SearchCar for Windows.cmd",
     "Build SearchCar for Windows.ps1",
+    "scripts/windows_desktop_smoke.ps1",
     "docs/DESKTOP_BUILD.md",
   ].map((path) => readFile(new URL(path, root), "utf8")));
   assert.match(macLauncher, /scripts\/build_mac_fixed\.command/);
@@ -153,8 +154,11 @@ test("local desktop launchers keep macOS and Windows builds reproducible", async
   assert.match(windowsBuild, /stable-x86_64-pc-windows-msvc/);
   assert.match(windowsBuild, /scripts\\windows_desktop_smoke\.ps1/);
   assert.match(windowsBuild, /desktop:tauri:build --bundles nsis --no-sign --ci/);
+  assert.match(windowsBuild, /\[switch\]\$ResumeAfterSidecar/);
   assert.match(windowsBuild, /SearchCar-Desktop-Windows-x64-setup\.exe/);
   assert.match(windowsBuild, /TAURI_SIGNING_PRIVATE_KEY/);
+  assert.match(windowsSmoke, /RandomNumberGenerator\]::Create\(\)/);
+  assert.doesNotMatch(windowsSmoke, /RandomNumberGenerator\]::GetBytes/);
   assert.match(buildGuide, /Local Windows x64 build without GitHub Actions/);
 });
 test("desktop exit requires confirmation and preserves graceful scan cancellation",async()=>{

@@ -63,9 +63,15 @@ if (-not (Test-Path $screenshotPath) -or (Get-Item $screenshotPath).Length -lt 1
 }
 
 $port = Get-FreeLoopbackPort
-$sessionSecret = [Convert]::ToHexString(
-    [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
-).ToLowerInvariant()
+$sessionSecretBytes = New-Object byte[] 32
+$randomNumberGenerator = [Security.Cryptography.RandomNumberGenerator]::Create()
+try {
+    $randomNumberGenerator.GetBytes($sessionSecretBytes)
+}
+finally {
+    $randomNumberGenerator.Dispose()
+}
+$sessionSecret = [BitConverter]::ToString($sessionSecretBytes).Replace("-", "").ToLowerInvariant()
 $previousSecret = $env:SEARCHCAR_DESKTOP_SESSION_SECRET
 $env:SEARCHCAR_DESKTOP_SESSION_SECRET = $sessionSecret
 $sidecarProcess = $null

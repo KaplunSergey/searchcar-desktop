@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$IncludeDiagnosticStandalone,
+    [switch]$ResumeAfterSidecar,
     [switch]$NoPause
 )
 
@@ -88,39 +89,55 @@ try {
     $env:PLAYWRIGHT_SKIP_BROWSER_GC = "1"
     $env:PYTHONUTF8 = "1"
 
-    if (-not (Test-Path -LiteralPath $BuildPython -PathType Leaf)) {
-        python.exe -m venv (Join-Path $ProjectRoot ".desktop-build-venv-windows")
+    if (-not $ResumeAfterSidecar) {
+        if (-not (Test-Path -LiteralPath $BuildPython -PathType Leaf)) {
+            python.exe -m venv (Join-Path $ProjectRoot ".desktop-build-venv-windows")
+        }
+
+        Write-Host "Installing pinned dependencies..." -ForegroundColor Cyan
+        & $BuildPython -m pip install -r backend/requirements-desktop-build.txt
+        pnpm.cmd install --frozen-lockfile
+        pnpm.cmd version:check
+
+        Write-Host "Running backend and frontend tests..." -ForegroundColor Cyan
+        $env:PYTHONPATH = Join-Path $ProjectRoot "backend"
+        $TemporaryTestRoot = Join-Path $env:TEMP `
+            ("searchcar-local-build-tests-" + [Guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Force $TemporaryTestRoot | Out-Null
+        $env:STORAGE_ROOT = Join-Path $TemporaryTestRoot "storage"
+        $testDatabase = (Join-Path $TemporaryTestRoot "searchcar-tests.sqlite3").Replace("\", "/")
+        $env:DATABASE_URL = "sqlite+pysqlite:///$testDatabase"
+        & $BuildPython -m pytest backend/tests -q
+        pnpm.cmd build
+        pnpm.cmd test
+        pnpm.cmd desktop:frontend:build
+
+        Write-Host "Preparing Chromium and the Playwright driver..." -ForegroundColor Cyan
+        & $BuildPython scripts/prepare_desktop_browser.py
+        & $BuildPython scripts/prepare_desktop_playwright_driver.py
+
+        if ($IncludeDiagnosticStandalone) {
+            Write-Host "Building optional diagnostic standalone backend..." -ForegroundColor Cyan
+            & $BuildPython scripts/build_desktop_sidecar.py --mode standalone
+        }
+
+        Write-Host "Building onefile production backend..." -ForegroundColor Cyan
+        & $BuildPython scripts/build_desktop_sidecar.py --mode onefile
     }
-
-    Write-Host "Installing pinned dependencies..." -ForegroundColor Cyan
-    & $BuildPython -m pip install -r backend/requirements-desktop-build.txt
-    pnpm.cmd install --frozen-lockfile
-    pnpm.cmd version:check
-
-    Write-Host "Running backend and frontend tests..." -ForegroundColor Cyan
-    $env:PYTHONPATH = Join-Path $ProjectRoot "backend"
-    $TemporaryTestRoot = Join-Path $env:TEMP `
-        ("searchcar-local-build-tests-" + [Guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory -Force $TemporaryTestRoot | Out-Null
-    $env:STORAGE_ROOT = Join-Path $TemporaryTestRoot "storage"
-    $testDatabase = (Join-Path $TemporaryTestRoot "searchcar-tests.sqlite3").Replace("\", "/")
-    $env:DATABASE_URL = "sqlite+pysqlite:///$testDatabase"
-    & $BuildPython -m pytest backend/tests -q
-    pnpm.cmd build
-    pnpm.cmd test
-    pnpm.cmd desktop:frontend:build
-
-    Write-Host "Preparing Chromium and the Playwright driver..." -ForegroundColor Cyan
-    & $BuildPython scripts/prepare_desktop_browser.py
-    & $BuildPython scripts/prepare_desktop_playwright_driver.py
-
-    if ($IncludeDiagnosticStandalone) {
-        Write-Host "Building optional diagnostic standalone backend..." -ForegroundColor Cyan
-        & $BuildPython scripts/build_desktop_sidecar.py --mode standalone
+    else {
+        Write-Host "Resuming from the existing compiled sidecar..." -ForegroundColor Cyan
+        $resumeInputs = @(
+            "desktop/src-tauri/binaries/searchcar-core-x86_64-pc-windows-msvc.exe",
+            "desktop/runtime/browsers",
+            "desktop/runtime/playwright-driver",
+            "desktop/dist/index.html"
+        )
+        foreach ($resumeInput in $resumeInputs) {
+            if (-not (Test-Path -LiteralPath $resumeInput)) {
+                throw "Cannot resume: required build input is missing: $resumeInput"
+            }
+        }
     }
-
-    Write-Host "Building onefile production backend..." -ForegroundColor Cyan
-    & $BuildPython scripts/build_desktop_sidecar.py --mode onefile
 
     Write-Host "Smoke-testing the compiled backend and browser..." -ForegroundColor Cyan
     if (Test-Path -LiteralPath $SmokeDirectory) {
@@ -187,8 +204,14 @@ catch {
     Write-Host "Build log: $BuildLog"
 }
 finally {
-    if ($TemporaryTestRoot -and (Test-Path -LiteralPath $TemporaryTestRoot)) {
-        Remove-Item -LiteralPath $TemporaryTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+    $temporaryTestRootPath = [string]$TemporaryTestRoot
+    if ($temporaryTestRootPath -and [System.IO.Directory]::Exists($temporaryTestRootPath)) {
+        try {
+            [System.IO.Directory]::Delete($temporaryTestRootPath, $true)
+        }
+        catch {
+            Write-Warning "Could not remove temporary test directory: $temporaryTestRootPath"
+        }
     }
     if ($TranscriptStarted) {
         Stop-Transcript | Out-Null
