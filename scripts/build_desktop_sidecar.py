@@ -18,6 +18,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 ENTRYPOINT = REPOSITORY_ROOT / "backend" / "searchcar_core.py"
 WORK_ROOT = REPOSITORY_ROOT / "work" / "nuitka"
 BINARY_ROOT = REPOSITORY_ROOT / "desktop" / "src-tauri" / "binaries"
+TAURI_CONFIG = REPOSITORY_ROOT / "desktop" / "src-tauri" / "tauri.conf.json"
 
 
 def sha256_file(path: Path) -> str:
@@ -41,6 +42,14 @@ def rust_target_triple() -> str:
 def output_name(target: str) -> str:
     suffix = ".exe" if platform.system() == "Windows" else ""
     return f"searchcar-core-{target}{suffix}"
+
+
+def product_version() -> str:
+    config = json.loads(TAURI_CONFIG.read_text(encoding="utf-8"))
+    version = config.get("version")
+    if not isinstance(version, str) or not version.strip():
+        raise RuntimeError("desktop/src-tauri/tauri.conf.json has no product version")
+    return version.strip()
 
 
 def build(mode: str) -> dict[str, object]:
@@ -71,6 +80,32 @@ def build(mode: str) -> dict[str, object]:
         "--nofollow-import-to=pytest",
         str(ENTRYPOINT),
     ]
+    onefile_policy: dict[str, str | bool] = {}
+    if mode == "onefile" and platform.system() == "Windows":
+        # The default Nuitka onefile policy extracts into a new temporary
+        # directory and deletes it after every invocation. SearchCar's smoke
+        # test invokes the sidecar more than once, and Defender can make each
+        # fresh extraction take several minutes. A versioned cache lets Nuitka
+        # validate and reuse the extracted files. Disabling the inner payload
+        # compression makes the unavoidable first extraction I/O-bound; NSIS
+        # still compresses the final installer.
+        cache_spec = (
+            "{CACHE_DIR}/SearchCar/searchcar-core/" + product_version()
+        )
+        # Retain Nuitka's Windows build/dist directories so a packaging-only
+        # follow-up can reuse the compiled C objects. CI starts clean anyway;
+        # this primarily avoids repeated full local recompilations.
+        command.remove("--remove-output")
+        command[3:3] = [
+            "--onefile-cache-mode=cached",
+            f"--onefile-tempdir-spec={cache_spec}",
+            "--onefile-no-compression",
+        ]
+        onefile_policy = {
+            "onefile_cache_mode": "cached",
+            "onefile_cache_spec": cache_spec,
+            "onefile_compression": False,
+        }
     environment = os.environ.copy()
     environment["NUITKA_CACHE_DIR"] = str(WORK_ROOT / "cache")
     subprocess.run(
@@ -93,6 +128,7 @@ def build(mode: str) -> dict[str, object]:
         "compiled": str(compiled),
         "compiled_bytes": compiled.stat().st_size,
         "compiled_sha256": sha256_file(compiled),
+        **onefile_policy,
     }
     if mode == "onefile":
         BINARY_ROOT.mkdir(parents=True, exist_ok=True)

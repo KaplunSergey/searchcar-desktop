@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$IncludeDiagnosticStandalone,
+    [switch]$RebuildSidecar,
     [switch]$ResumeAfterSidecar,
     [switch]$NoPause
 )
@@ -94,7 +95,11 @@ try {
     $env:PLAYWRIGHT_SKIP_BROWSER_GC = "1"
     $env:PYTHONUTF8 = "1"
 
-    if (-not $ResumeAfterSidecar) {
+    if ($RebuildSidecar -and $ResumeAfterSidecar) {
+        throw "Use either -RebuildSidecar or -ResumeAfterSidecar, not both."
+    }
+
+    if (-not $ResumeAfterSidecar -and -not $RebuildSidecar) {
         if (-not (Test-Path -LiteralPath $BuildPython -PathType Leaf)) {
             python.exe -m venv (Join-Path $ProjectRoot ".desktop-build-venv-windows")
         }
@@ -127,6 +132,21 @@ try {
         }
 
         Write-Host "Building onefile production backend..." -ForegroundColor Cyan
+        & $BuildPython scripts/build_desktop_sidecar.py --mode onefile
+    }
+    elseif ($RebuildSidecar) {
+        $rebuildInputs = @(
+            $BuildPython,
+            "desktop/runtime/browsers",
+            "desktop/runtime/playwright-driver",
+            "desktop/dist/index.html"
+        )
+        foreach ($rebuildInput in $rebuildInputs) {
+            if (-not (Test-Path -LiteralPath $rebuildInput)) {
+                throw "Cannot rebuild only the sidecar: required build input is missing: $rebuildInput"
+            }
+        }
+        Write-Host "Rebuilding only the cached Windows onefile sidecar..." -ForegroundColor Cyan
         & $BuildPython scripts/build_desktop_sidecar.py --mode onefile
     }
     else {

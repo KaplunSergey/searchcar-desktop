@@ -19,7 +19,7 @@ param(
     [string]$OutputDir,
 
     [ValidateRange(30, 900)]
-    [int]$HealthTimeoutSeconds = 600
+    [int]$HealthTimeoutSeconds = 300
 )
 
 $ErrorActionPreference = "Stop"
@@ -136,8 +136,8 @@ try {
 
     $baseUrl = "http://127.0.0.1:$port"
     $healthy = $false
-    # A Nuitka onefile binary may need extra time for its first extraction on
-    # a fresh Windows machine, especially while antivirus scanning is active.
+    # The earlier check command primes the versioned Nuitka cache. Starting
+    # the server must therefore not repeat a full onefile extraction.
     $healthDeadline = [DateTime]::UtcNow.AddSeconds($HealthTimeoutSeconds)
     while ([DateTime]::UtcNow -lt $healthDeadline) {
         if ($sidecarProcess.HasExited) {
