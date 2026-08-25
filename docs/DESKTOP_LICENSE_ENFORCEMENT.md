@@ -79,6 +79,18 @@ An existing binding is checked shortly after application startup and every six
 hours. Each response lease is verified locally before `binding.json` or
 `lease.json` is replaced.
 
+An active license may legitimately contain no enabled parser sources. In that
+case the signed lease remains valid and the settings screen continues showing
+the license, device and expiry, but `can_search` is false and every manual,
+scheduled and worker-level scan gate remains closed. Re-enabling a source on
+the server needs only a fresh check, not a new activation code.
+
+Explicit server deletion is a separate operation. A check returns
+`LICENSE_DELETED`; desktop removes `binding.json`, `lease.json` and
+`trusted-time.json`, displays that the license was deleted and asks for a new
+activation code. It intentionally keeps the device signing secret in
+Keychain/DPAPI so deleting a license cannot reset trial identity.
+
 The current pilot requires an active signed license for every search. A
 brand-new desktop may still open the activation screen, but it cannot queue or
 start a scan before receiving a valid lease. The unsigned macOS preview keeps

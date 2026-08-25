@@ -798,11 +798,36 @@ class LicenseServiceClient:
     def refresh(self) -> dict[str, Any]:
         with _LICENSE_OPERATION_LOCK:
             binding = self._binding()
-            data = self._post(
-                "/v1/licenses/check",
-                {"license_id": binding[0], "device_id": binding[1]},
-            )
+            try:
+                data = self._post(
+                    "/v1/licenses/check",
+                    {"license_id": binding[0], "device_id": binding[1]},
+                )
+            except LicenseClientError as exc:
+                if exc.code == "LICENSE_DELETED":
+                    self._clear_local_license_state()
+                raise
             return self._install(data, fallback_binding=binding)
+
+    def _clear_local_license_state(self) -> None:
+        """Forget a server-deleted license without changing device identity.
+
+        The device signing key remains in Keychain/DPAPI so a server deletion
+        cannot be abused to obtain another device trial.  A newly issued
+        activation code can safely bind a replacement license to the same
+        physical device.
+        """
+
+        binding_path, lease_path, trusted_path = _license_paths(self.data_dir)
+        try:
+            # Remove the capability first.  Even if a later unlink fails, an
+            # already-issued offline lease can no longer authorize searches.
+            for path in (lease_path, trusted_path, binding_path):
+                path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise LicenseClientError(
+                "LICENSE_STATE_CLEAR_FAILED", http_status=500
+            ) from exc
 
     def redeem(self, activation_code: str) -> dict[str, Any]:
         normalized = "".join(activation_code.upper().split())

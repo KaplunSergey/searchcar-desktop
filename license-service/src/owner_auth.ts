@@ -11,6 +11,7 @@ import {
   createAdminActivationCode,
   createAdminCustomer,
   createAdminLicense,
+  deleteAdminLicense,
   diagnoseAdminActivationCode,
   setAdminLicenseSources,
 } from "./service";
@@ -335,6 +336,7 @@ async function ownerDashboard(request: Request, env: Env): Promise<Response> {
     env.LICENSE_DB.prepare(
       `SELECT l.id, l.customer_id, c.display_name AS customer_name, l.kind, l.status,
               l.expires_at, l.perpetual, l.activation_count, l.updated_at,
+              l.deleted_at,
               d.id AS active_device_id, d.label AS active_device_label, d.last_seen_at
          FROM licenses l LEFT JOIN customers c ON c.id = l.customer_id
          LEFT JOIN devices d ON d.license_id = l.id AND d.is_active = 1
@@ -420,6 +422,11 @@ export async function handleOwnerRoute(request: Request, env: Env): Promise<Resp
     if (request.method === "POST" && path === "/v1/owner/licenses") {
       return runOwnerMutation(request, env, "licenses", (body, now, owner) =>
         createAdminLicense(env, body, now, owner.admin_user_id),
+      );
+    }
+    if (request.method === "POST" && path === "/v1/owner/licenses/delete") {
+      return runOwnerMutation(request, env, "licenses/delete", (body, now, owner) =>
+        deleteAdminLicense(env, body, now, owner.admin_user_id),
       );
     }
     if (request.method === "POST" && path === "/v1/owner/activation-codes") {

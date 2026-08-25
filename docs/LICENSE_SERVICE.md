@@ -108,6 +108,9 @@ The Worker now provides the Phase 8 owner-session foundation:
 - `POST /v1/owner/license-sources` replaces the allowed sources for one
   license. Its JSON body is `{ "license_id": "…", "source_keys": ["encar"] }`;
   an empty array deliberately disables all parser sources for that license;
+- `POST /v1/owner/licenses/delete` irreversibly revokes one license. It
+  requires `{ "license_id": "…", "confirmation": "DELETE" }`, deactivates
+  its device and unused codes, and records `LICENSE_DELETED` in the audit log;
 - `POST /v1/owner/activation-codes/diagnose` checks a supplied code against
   the current D1 binding and hash formats without exposing stored hashes;
 - `POST /v1/owner/logout` requires a same-origin request and clears the
@@ -132,6 +135,21 @@ trials/new owner-created licenses also receive it by default. The current
 signed lease contains `entitlements.sources`; the desktop backend permits an
 Encar scan only when that signed list contains `encar`.
 
+Source access and license lifecycle are deliberately independent. Saving an
+empty source list does not suspend, unbind or delete the license. The next
+license check returns a valid signed lease with `search: false` and
+`sources: []`; the desktop keeps the license and device identifiers while
+blocking new searches. Re-enabling `encar` restores access on the next check
+without a new activation code.
+
+Migration `0004_license_deletion.sql` adds deletion audit fields. A deleted
+license is retained as a tombstone rather than physically removed, so its
+history and foreign-key integrity remain available. `/v1/licenses/check`
+returns HTTP 410 with `LICENSE_DELETED`; desktop then removes only its local
+binding, lease and trusted-time files. The Keychain/DPAPI device identity is
+retained, and a replacement owner-issued activation code may bind a new
+license to that device.
+
 Before deploying this version, apply the migration once to the production D1
 database, then deploy the Worker:
 
@@ -144,6 +162,15 @@ pnpm exec wrangler deploy --config license-service/wrangler.jsonc
 After changing a source grant, the customer uses **«Проверить сейчас»** in the
 desktop license settings to receive a fresh signed lease. Existing cached
 leases remain valid only until their normal short lease expiry.
+
+After adding migration `0004`, apply migrations before deploying the Worker:
+
+```bash
+unset CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN
+pnpm dlx --yes wrangler@4.123.0 d1 migrations apply searchcar-license-production \
+  --remote --config license-service/wrangler.jsonc
+pnpm dlx --yes wrangler@4.123.0 deploy --config license-service/wrangler.jsonc
+```
 
 ## Local setup
 

@@ -331,6 +331,7 @@ function licenseErrorMessage(error: unknown, t: Translate): string {
       "license_device_key_persistence_failed",
     ]), "licenseErrorDeviceStorage"],
     [new Set(["license_source_not_allowed", "license_search_disabled"]), "licenseErrorSourceAccess"],
+    [new Set(["license_deleted"]), "licenseErrorDeleted"],
     [new Set([
       "trial_unavailable",
       "license_trial_subject_invalid",
@@ -3331,6 +3332,9 @@ function Settings({
     onError: (error) => {
       const message = licenseErrorMessage(error, t);
       setLicenseError(message);
+      if (error instanceof ApiError && error.code === "license_deleted") {
+        void client.invalidateQueries({ queryKey: ["desktop-license"] });
+      }
       notify(message);
     },
   });
@@ -3523,7 +3527,11 @@ function Settings({
             </dl>
           ) : null}
           {desktopLicenseQuery.data.reason ? (
-            <p className="license-reason">{t("licenseReason")}: {desktopLicenseQuery.data.reason}</p>
+            <p className="license-reason">
+              {desktopLicenseQuery.data.reason === "LICENSE_SEARCH_DISABLED"
+                ? t("licenseSourcesDisabled")
+                : `${t("licenseReason")}: ${desktopLicenseQuery.data.reason}`}
+            </p>
           ) : null}
           {!desktopLicenseQuery.data.service_configured ? (
             <p className="license-not-configured">{t("licenseServiceHelp")}</p>

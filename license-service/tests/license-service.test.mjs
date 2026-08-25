@@ -7,7 +7,7 @@ import { Miniflare } from "miniflare";
 
 const encoder = new TextEncoder();
 const migrations = await Promise.all(
-  ["0001_initial.sql", "0002_owner_admin.sql", "0003_source_entitlements.sql"].map((name) =>
+  ["0001_initial.sql", "0002_owner_admin.sql", "0003_source_entitlements.sql", "0004_license_deletion.sql"].map((name) =>
     readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"),
   ),
 );
@@ -328,6 +328,43 @@ test("owner bootstrap creates a protected cookie session exactly once", async (c
     diagnostic.json.data.activation_code_id,
     activation.json.data.activation_code_id,
   );
+  const licensedDevice = await createDevice("owner-managed-device");
+  const redeemed = await api(
+    "/v1/licenses/redeem",
+    await signedBody(licensedDevice, { activation_code: activation.json.data.activation_code }),
+  );
+  assert.equal(redeemed.response.status, 200);
+  await verifyLease(redeemed.json.data.lease);
+  assert.equal(redeemed.json.data.license_id, license.json.data.license_id);
+
+  const disabledBoundSources = await ownerApi(
+    "/v1/owner/license-sources",
+    { license_id: license.json.data.license_id, source_keys: [] },
+    ownerCookie,
+  );
+  assert.equal(disabledBoundSources.response.status, 200);
+  const restrictedCheck = await api(
+    "/v1/licenses/check",
+    await signedBody(licensedDevice, {
+      license_id: license.json.data.license_id,
+      device_id: redeemed.json.data.device_id,
+    }),
+  );
+  assert.equal(restrictedCheck.response.status, 200);
+  assert.equal(restrictedCheck.json.data.lease.payload.license_id, license.json.data.license_id);
+  assert.equal(restrictedCheck.json.data.lease.payload.device_id, redeemed.json.data.device_id);
+  assert.equal(restrictedCheck.json.data.lease.payload.entitlements.search, false);
+  assert.deepEqual(restrictedCheck.json.data.lease.payload.entitlements.sources, []);
+  const licenseAfterSourceDisable = await database.prepare(
+    "SELECT status, deleted_at FROM licenses WHERE id = ?",
+  ).bind(license.json.data.license_id).first();
+  assert.equal(licenseAfterSourceDisable.status, "ACTIVE");
+  assert.equal(licenseAfterSourceDisable.deleted_at, null);
+  await ownerApi(
+    "/v1/owner/license-sources",
+    { license_id: license.json.data.license_id, source_keys: ["encar"] },
+    ownerCookie,
+  );
   const dashboard = await mf.dispatchFetch("https://license.test/v1/owner/dashboard", {
     headers: { Cookie: ownerCookie },
   });
@@ -343,6 +380,39 @@ test("owner bootstrap creates a protected cookie session exactly once", async (c
   );
   assert.equal(dashboardData.audit_events.some((row) => row.action === "ACTIVATION_CODE_CREATED"), true);
   assert.equal(dashboardData.audit_events.some((row) => row.action === "LICENSE_SOURCES_UPDATED"), true);
+
+  const deleted = await ownerApi(
+    "/v1/owner/licenses/delete",
+    { license_id: license.json.data.license_id, confirmation: "DELETE" },
+    ownerCookie,
+  );
+  assert.equal(deleted.response.status, 200);
+  assert.equal(deleted.json.data.already_deleted, false);
+  const deletedAgain = await ownerApi(
+    "/v1/owner/licenses/delete",
+    { license_id: license.json.data.license_id, confirmation: "DELETE" },
+    ownerCookie,
+  );
+  assert.equal(deletedAgain.response.status, 200);
+  assert.equal(deletedAgain.json.data.already_deleted, true);
+  const deletedLicense = await database.prepare(
+    "SELECT status, deleted_at FROM licenses WHERE id = ?",
+  ).bind(license.json.data.license_id).first();
+  assert.equal(deletedLicense.status, "SUSPENDED");
+  assert.equal(typeof deletedLicense.deleted_at, "string");
+  const deletedDevice = await database.prepare(
+    "SELECT is_active FROM devices WHERE id = ?",
+  ).bind(redeemed.json.data.device_id).first();
+  assert.equal(deletedDevice.is_active, 0);
+  const deletedCheck = await api(
+    "/v1/licenses/check",
+    await signedBody(licensedDevice, {
+      license_id: license.json.data.license_id,
+      device_id: redeemed.json.data.device_id,
+    }),
+  );
+  assert.equal(deletedCheck.response.status, 410);
+  assert.equal(deletedCheck.json.error.code, "LICENSE_DELETED");
 
   const logout = await mf.dispatchFetch("https://license.test/v1/owner/logout", {
     method: "POST",

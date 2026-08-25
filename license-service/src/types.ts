@@ -36,6 +36,8 @@ export interface LicenseRow {
   expires_at: string | null;
   perpetual: number;
   activation_count: number;
+  deleted_at?: string | null;
+  deleted_by?: string | null;
 }
 
 export interface DeviceRow {

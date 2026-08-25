@@ -594,6 +594,47 @@ def test_untrusted_worker_error_code_is_not_forwarded(tmp_path) -> None:
     assert caught.value.code == "LICENSE_SERVICE_REJECTED"
 
 
+def test_refresh_of_deleted_license_clears_license_but_keeps_device_identity(
+    tmp_path,
+) -> None:
+    license_dir = tmp_path / "license"
+    license_dir.mkdir()
+    for name, payload in (
+        ("binding.json", {"license_id": "018f6ac2-8c44-7df0-8f6d-2d34af37b337", "device_id": "028f6ac2-8c44-7df0-8f6d-2d34af37b337"}),
+        ("lease.json", {"cached": "lease"}),
+        ("trusted-time.json", {"cached": "time"}),
+    ):
+        (license_dir / name).write_text(json.dumps(payload), encoding="utf-8")
+    store = MemoryStore()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            410,
+            json={
+                "ok": False,
+                "error": {"code": "LICENSE_DELETED", "message": "deleted"},
+            },
+        )
+
+    client = LicenseServiceClient(
+        tmp_path,
+        service_url="https://license.example.test",
+        store=store,
+        transport=httpx.MockTransport(handler),
+    )
+    device_seed = store.value
+
+    with pytest.raises(LicenseClientError) as caught:
+        client.refresh()
+
+    assert caught.value.code == "LICENSE_DELETED"
+    assert store.value == device_seed
+    assert store.value is not None
+    assert not (license_dir / "binding.json").exists()
+    assert not (license_dir / "lease.json").exists()
+    assert not (license_dir / "trusted-time.json").exists()
+
+
 def test_desktop_license_operation_logs_only_sanitized_diagnostics(
     tmp_path, monkeypatch, caplog
 ) -> None:

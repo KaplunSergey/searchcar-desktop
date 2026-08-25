@@ -74,6 +74,7 @@ def license_state(tmp_path, *, lease_hours=48, subscription_days=30):
     return {
         "now": server_time,
         "payload": payload,
+        "private_key": private_key,
         "public_keys": {"test-key-v1": b64url(public_key)},
         "directory": directory,
     }
@@ -98,6 +99,28 @@ def test_valid_signed_lease_allows_offline_search(tmp_path) -> None:
     assert result.license_type == "SUBSCRIPTION"
     assert result.sources == ("encar",)
     assert (state["directory"] / "trusted-time.json").is_file()
+
+
+def test_empty_source_list_keeps_verified_license_but_blocks_search(tmp_path) -> None:
+    state = license_state(tmp_path)
+    state["payload"]["entitlements"]["search"] = False
+    state["payload"]["entitlements"]["sources"] = []
+    signature = state["private_key"].sign(
+        (LEASE_MESSAGE_PREFIX + canonical_json(state["payload"])).encode("utf-8")
+    )
+    (state["directory"] / "lease.json").write_text(
+        json.dumps({"payload": state["payload"], "signature": b64url(signature)}),
+        encoding="utf-8",
+    )
+
+    result = decision(state, state["now"] + timedelta(hours=1))
+
+    assert result.status == "active"
+    assert result.can_search is False
+    assert result.reason == "LICENSE_SEARCH_DISABLED"
+    assert result.license_id == state["payload"]["license_id"]
+    assert result.device_id == state["payload"]["device_id"]
+    assert result.sources == ()
 
 
 def test_expired_cached_lease_enters_read_only_safe_mode(tmp_path) -> None:

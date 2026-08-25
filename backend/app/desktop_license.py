@@ -331,8 +331,10 @@ def evaluate_search_entitlement(
         )
 
         entitlements = payload.get("entitlements")
-        if not isinstance(entitlements, dict) or entitlements.get("search") is not True:
-            raise LicenseStateError("LICENSE_SEARCH_DISABLED")
+        if not isinstance(entitlements, dict) or not isinstance(
+            entitlements.get("search"), bool
+        ):
+            raise LicenseStateError("LICENSE_ENTITLEMENTS_INVALID")
         # Leases issued before the source catalog existed are valid only for
         # the originally supported Encar source.  New leases always contain a
         # signed explicit list, so adding another source never silently grants
@@ -340,7 +342,6 @@ def evaluate_search_entitlement(
         raw_sources = entitlements.get("sources", ["encar"])
         if (
             not isinstance(raw_sources, list)
-            or not raw_sources
             or len(raw_sources) > 32
             or any(
                 not isinstance(source, str) or not _SOURCE_KEY.fullmatch(source)
@@ -361,10 +362,12 @@ def evaluate_search_entitlement(
             if effective_time >= subscription_expires_at:
                 raise LicenseStateError("LICENSE_SUBSCRIPTION_EXPIRED")
 
+        can_search = entitlements["search"] is True and bool(sources)
         return EntitlementDecision(
             mode="required",
             status="active",
-            can_search=True,
+            can_search=can_search,
+            reason=None if can_search else "LICENSE_SEARCH_DISABLED",
             license_id=license_id,
             device_id=device_id,
             license_type=str(payload.get("license_type") or "UNKNOWN"),

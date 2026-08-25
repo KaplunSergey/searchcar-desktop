@@ -248,6 +248,8 @@ test("desktop licensing keeps device secrets outside portable data",async()=>{
   assert.match(page,/desktop\/license\/transfer\/request/);
   assert.match(page,/desktop\/license\/transfer\/claim/);
   assert.match(page,/licenseSources/);
+  assert.match(page,/license_deleted/);
+  assert.match(page,/licenseSourcesDisabled/);
   assert.match(client,/def request_transfer/);
   assert.match(client,/def claim_transfer/);
   assert.match(license,/license state lives outside the SQLite backup/i);
@@ -259,6 +261,8 @@ test("desktop licensing keeps device secrets outside portable data",async()=>{
   assert.match(onboarding,/DESKTOP_WORKSPACE_CREATED/);
   assert.doesNotMatch(onboarding,/ensure_initial_admin/);
   assert.match(license,/LICENSE_SOURCE_NOT_ALLOWED/);
+  assert.match(client,/LICENSE_DELETED/);
+  assert.match(client,/_clear_local_license_state/);
   assert.match(page,/DesktopOnboardingScreen/);
   assert.match(page,/const localAdminEnabled = currentUser\.role === "ADMIN"\s*&& \(desktopRuntimeQuery\.isError \|\| desktopRuntimeQuery\.data\?\.desktop === false\)/);
   assert.match(page,/\{localAdminEnabled \? \(/);

@@ -49,7 +49,7 @@ async function findActivationCode(
        ac.makes_perpetual, ac.expires_at AS code_expires_at, ac.used_at,
        ac.used_by_device_id,
        l.id, l.kind, l.status, l.started_at, l.expires_at, l.perpetual,
-       l.activation_count
+       l.activation_count, l.deleted_at, l.deleted_by
      FROM activation_codes ac
      JOIN licenses l ON l.id = ac.license_id
      WHERE ac.code_hash = ?`,
@@ -297,6 +297,8 @@ async function recoveredRedemptionResponse(
   request: SignedDeviceRequest,
   now: Date,
 ) {
+  if (row.deleted_at !== null && row.deleted_at !== undefined) return null;
+  if (row.status !== "ACTIVE") return null;
   if (row.used_at === null || row.used_by_device_id === null) return null;
   const usedDevice = await env.LICENSE_DB.prepare(
     `SELECT id, license_id, public_key, fingerprint_hash, label, is_active
@@ -434,18 +436,25 @@ export async function checkLicense(
   const licenseId = requireString(body, "license_id", { min: 36, max: 36 });
   const deviceId = requireString(body, "device_id", { min: 36, max: 36 });
   const license = await env.LICENSE_DB.prepare(
-    `SELECT id, kind, status, started_at, expires_at, perpetual, activation_count
+    `SELECT id, kind, status, started_at, expires_at, perpetual, activation_count,
+            deleted_at, deleted_by
        FROM licenses WHERE id = ?`,
   )
     .bind(licenseId)
     .first<LicenseRow>();
+  if (!license) {
+    throw new ApiError(403, "LICENSE_NOT_AVAILABLE", "The license is not available for this device.");
+  }
+  if (license.deleted_at) {
+    throw new ApiError(410, "LICENSE_DELETED", "The license was deleted by its owner.");
+  }
   const device = await env.LICENSE_DB.prepare(
     `SELECT id, license_id, public_key, fingerprint_hash, label, is_active
        FROM devices WHERE id = ? AND license_id = ?`,
   )
     .bind(deviceId, licenseId)
     .first<DeviceRow>();
-  if (!license || !device) {
+  if (!device) {
     throw new ApiError(403, "LICENSE_NOT_AVAILABLE", "The license is not available for this device.");
   }
   assertDeviceMatches(device, body);
@@ -873,10 +882,13 @@ export async function setAdminLicenseSources(
   if (sourceKeys.some((sourceKey) => typeof sourceKey !== "string" || !SOURCE_KEY.test(sourceKey))) {
     throw new ApiError(400, "INVALID_SOURCE_KEYS", "source_keys contains an invalid source key.");
   }
-  const license = await env.LICENSE_DB.prepare("SELECT id FROM licenses WHERE id = ?")
+  const license = await env.LICENSE_DB.prepare(
+    "SELECT id, deleted_at FROM licenses WHERE id = ?",
+  )
     .bind(licenseId)
-    .first<{ id: string }>();
+    .first<{ id: string; deleted_at: string | null }>();
   if (!license) throw new ApiError(404, "LICENSE_NOT_FOUND", "License was not found.");
+  if (license.deleted_at) throw new ApiError(409, "LICENSE_DELETED", "The license was deleted.");
 
   const catalog = await env.LICENSE_DB.prepare(
     "SELECT source_key FROM source_catalog WHERE is_active = 1",
@@ -908,6 +920,73 @@ export async function setAdminLicenseSources(
   return { license_id: licenseId, source_keys: sourceKeys };
 }
 
+export async function deleteAdminLicense(
+  env: Env,
+  value: unknown,
+  now: Date,
+  actorId = "bootstrap-token",
+) {
+  const body = asObject(value);
+  const licenseId = requireString(body, "license_id", { min: 36, max: 36 });
+  const confirmation = requireString(body, "confirmation", { min: 6, max: 6 });
+  if (confirmation !== "DELETE") {
+    throw new ApiError(400, "LICENSE_DELETE_CONFIRMATION_REQUIRED", "License deletion must be confirmed.");
+  }
+  const license = await env.LICENSE_DB.prepare(
+    "SELECT id, deleted_at FROM licenses WHERE id = ?",
+  ).bind(licenseId).first<{ id: string; deleted_at: string | null }>();
+  if (!license) throw new ApiError(404, "LICENSE_NOT_FOUND", "License was not found.");
+  if (license.deleted_at) {
+    return { license_id: licenseId, deleted_at: license.deleted_at, already_deleted: true };
+  }
+
+  const nowIso = now.toISOString();
+  try {
+    await env.LICENSE_DB.batch([
+      env.LICENSE_DB.prepare(
+        `UPDATE licenses
+            SET status = 'SUSPENDED', deleted_at = ?, deleted_by = ?, updated_at = ?
+          WHERE id = ? AND deleted_at IS NULL`,
+      ).bind(nowIso, actorId, nowIso, licenseId),
+      env.LICENSE_DB.prepare(
+        `UPDATE devices
+            SET is_active = 0, deactivated_at = COALESCE(deactivated_at, ?)
+          WHERE license_id = ? AND is_active = 1`,
+      ).bind(nowIso, licenseId),
+      env.LICENSE_DB.prepare(
+        `UPDATE activation_codes SET expires_at = ?
+          WHERE license_id = ? AND used_at IS NULL
+            AND (expires_at IS NULL OR expires_at > ?)`,
+      ).bind(nowIso, licenseId, nowIso),
+      env.LICENSE_DB.prepare(
+        `UPDATE device_transfers SET status = 'REJECTED'
+          WHERE license_id = ? AND status IN ('PENDING', 'APPROVED')`,
+      ).bind(licenseId),
+      auditStatement(env, {
+        id: crypto.randomUUID(),
+        dedupeKey: `license-delete:${licenseId}`,
+        actorType: "ADMIN",
+        actorId,
+        action: "LICENSE_DELETED",
+        targetType: "LICENSE",
+        targetId: licenseId,
+        createdAt: nowIso,
+      }),
+    ]);
+  } catch (error) {
+    if (isConstraintError(error)) {
+      const raced = await env.LICENSE_DB.prepare(
+        "SELECT deleted_at FROM licenses WHERE id = ?",
+      ).bind(licenseId).first<{ deleted_at: string | null }>();
+      if (raced?.deleted_at) {
+        return { license_id: licenseId, deleted_at: raced.deleted_at, already_deleted: true };
+      }
+    }
+    throw error;
+  }
+  return { license_id: licenseId, deleted_at: nowIso, already_deleted: false };
+}
+
 export async function createAdminActivationCode(
   env: Env,
   value: unknown,
@@ -927,10 +1006,15 @@ export async function createAdminActivationCode(
   if (!(duration in durationMap)) {
     throw new ApiError(400, "INVALID_DURATION", "duration must be P1M, P3M, P6M, P12M or PERPETUAL.");
   }
-  const license = await env.LICENSE_DB.prepare("SELECT id FROM licenses WHERE id = ?")
+  const license = await env.LICENSE_DB.prepare(
+    "SELECT id, status, deleted_at FROM licenses WHERE id = ?",
+  )
     .bind(licenseId)
-    .first();
+    .first<{ id: string; status: string; deleted_at: string | null }>();
   if (!license) throw new ApiError(404, "LICENSE_NOT_FOUND", "License was not found.");
+  if (license.deleted_at || license.status !== "ACTIVE") {
+    throw new ApiError(409, "LICENSE_NOT_ACTIVE", "The license is not active.");
+  }
   const code = randomFriendlyCode("SC");
   const id = crypto.randomUUID();
   const nowIso = now.toISOString();

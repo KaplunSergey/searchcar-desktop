@@ -266,6 +266,11 @@ Implemented and deployed:
   centralised in Cloudflare `/owner`.
 - production D1 migration `0003_source_entitlements.sql` and the matching
   Worker version were deployed successfully.
+- local implementation now separates source access from license lifecycle:
+  empty source grants keep the signed license visible while blocking search;
+- migration `0004_license_deletion.sql`, the owner delete control and desktop
+  `LICENSE_DELETED` cleanup are implemented locally and await production D1
+  migration plus Worker/desktop deployment.
 
 Follow-up validation before sales beyond the pilot:
 
