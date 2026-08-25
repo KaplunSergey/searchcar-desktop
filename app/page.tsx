@@ -540,6 +540,10 @@ function App({
     retry: false,
     staleTime: Number.POSITIVE_INFINITY,
   });
+  // A desktop customer has one local workspace. Customer and license
+  // management belongs to the Cloudflare owner panel, never to this device.
+  const localAdminEnabled = currentUser.role === "ADMIN"
+    && (desktopRuntimeQuery.isError || desktopRuntimeQuery.data?.desktop === false);
   const [, tickCountdown] = useState(0);
   useEffect(() => {
     const timer = window.setInterval(() => tickCountdown((value) => value + 1), 1000);
@@ -704,7 +708,7 @@ function App({
             <span className="nav-icon" aria-hidden="true">⚙</span>
             <span className="nav-label">{t("settings")}</span>
           </button>
-          {currentUser.role === "ADMIN" ? (
+          {localAdminEnabled ? (
             <button
               className={view === "admin" ? "active" : ""}
               onClick={() => navigate("admin")}
@@ -893,7 +897,7 @@ function App({
               isAdmin={currentUser.role === "ADMIN"}
             />
           )}
-          {view === "admin" && currentUser.role === "ADMIN" && (
+          {view === "admin" && localAdminEnabled && (
             <Admin
               locale={locale}
               notify={notify}

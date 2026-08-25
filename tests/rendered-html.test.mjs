@@ -241,6 +241,8 @@ test("desktop licensing keeps device secrets outside portable data",async()=>{
   assert.doesNotMatch(onboarding,/ensure_initial_admin/);
   assert.match(license,/LICENSE_SOURCE_NOT_ALLOWED/);
   assert.match(page,/DesktopOnboardingScreen/);
+  assert.match(page,/const localAdminEnabled = currentUser\.role === "ADMIN"\s*&& \(desktopRuntimeQuery\.isError \|\| desktopRuntimeQuery\.data\?\.desktop === false\)/);
+  assert.match(page,/\{localAdminEnabled \? \(/);
   const licenseConfig=JSON.parse(config);
   assert.equal(licenseConfig.protocol_version,1);
   assert.equal(licenseConfig.enforcement,"required");

@@ -261,6 +261,9 @@ Implemented locally (deployment still required):
   reject Encar scans when it is absent;
 - `/owner` displays sources per license and lets the owner grant or revoke
   active catalog sources, with an audit event for each change.
+- desktop hides the legacy local user-administration screen, including for an
+  existing local administrator; customer, license and source management are
+  centralised in Cloudflare `/owner`.
 
 Still required to complete M8.5:
 
