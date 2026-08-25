@@ -70,6 +70,15 @@ test("web and desktop dropdown controls use the same cross-platform styling",asy
   assert.match(sharedStyles,/padding-right:44px!important/);
   assert.match(sharedStyles,/select:not\(\[multiple\]\):focus-visible/);
 });
+test("desktop onboarding and notifications are clear inside a small app window",async()=>{
+  const [page,styles]=await Promise.all([
+    readFile(new URL("app/page.tsx",root),"utf8"),
+    readFile(new URL("app/globals.css",root),"utf8"),
+  ]);
+  assert.doesNotMatch(page,/Логин и пароль не нужны|Логін і пароль не потрібні/);
+  assert.match(styles,/\.toast\{[^}]*top:20px[^}]*bottom:auto[^}]*transform:translateX\(-50%\)/);
+  assert.match(styles,/\.toast\{[^}]*max-height:calc\(100vh - 40px\)[^}]*overflow:auto[^}]*overflow-wrap:anywhere/);
+});
 test("product version metadata has one checked source of truth", async () => {
   const [pkg, cargo, tauri, backend, frontend, script, page] = await Promise.all([
     "package.json",
