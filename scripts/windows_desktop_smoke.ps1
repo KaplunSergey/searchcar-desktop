@@ -35,6 +35,10 @@ $serveDataPath = Join-Path $runtimePath.FullName "serve-data"
 $screenshotPath = Join-Path $outputPath.FullName "compiled-browser-check.png"
 $stdoutPath = Join-Path $outputPath.FullName "compiled-sidecar.stdout.log"
 $stderrPath = Join-Path $outputPath.FullName "compiled-sidecar.stderr.log"
+$databaseStdoutPath = Join-Path $outputPath.FullName "compiled-database-check.stdout.log"
+$databaseStderrPath = Join-Path $outputPath.FullName "compiled-database-check.stderr.log"
+$browserStdoutPath = Join-Path $outputPath.FullName "compiled-browser-check.stdout.log"
+$browserStderrPath = Join-Path $outputPath.FullName "compiled-browser-check.stderr.log"
 
 function Get-FreeLoopbackPort {
     $listener = [System.Net.Sockets.TcpListener]::new(
@@ -126,18 +130,74 @@ function Stop-CompiledSidecarTree([System.Diagnostics.Process]$Process) {
     }
 }
 
-& $sidecarPath check --data-dir $databaseCheckPath --port 18772
-if ($LASTEXITCODE -ne 0) {
-    throw "Compiled sidecar database check failed"
+function Invoke-LoggedSidecarCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Description,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StandardOutputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StandardErrorPath
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $sidecarPath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in $Arguments) {
+        $startInfo.ArgumentList.Add($argument)
+    }
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw "$Description could not start"
+        }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        [System.IO.File]::WriteAllText($StandardOutputPath, $stdout)
+        [System.IO.File]::WriteAllText($StandardErrorPath, $stderr)
+        if ($process.ExitCode -ne 0) {
+            throw "$Description failed (exit $($process.ExitCode)).`nSTDOUT:`n$(Get-LogTail $StandardOutputPath)`nSTDERR:`n$(Get-LogTail $StandardErrorPath)"
+        }
+        if ($stdout) {
+            Write-Host $stdout.TrimEnd()
+        }
+        if ($stderr) {
+            Write-Host $stderr.TrimEnd()
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
 }
 
-& $sidecarPath browser-check `
-    --browser-dir $browserPath `
-    --playwright-driver-dir $playwrightDriverPath `
-    --output $screenshotPath
-if ($LASTEXITCODE -ne 0) {
-    throw "Compiled Playwright browser check failed"
-}
+Invoke-LoggedSidecarCommand `
+    -Description "Compiled sidecar database check" `
+    -Arguments @("check", "--data-dir", $databaseCheckPath, "--port", "18772") `
+    -StandardOutputPath $databaseStdoutPath `
+    -StandardErrorPath $databaseStderrPath
+
+Invoke-LoggedSidecarCommand `
+    -Description "Compiled Playwright browser check" `
+    -Arguments @(
+        "browser-check",
+        "--browser-dir", $browserPath,
+        "--playwright-driver-dir", $playwrightDriverPath,
+        "--output", $screenshotPath
+    ) `
+    -StandardOutputPath $browserStdoutPath `
+    -StandardErrorPath $browserStderrPath
 if (-not (Test-Path $screenshotPath) -or (Get-Item $screenshotPath).Length -lt 1024) {
     throw "Compiled browser screenshot is missing or empty"
 }

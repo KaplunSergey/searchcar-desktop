@@ -190,6 +190,7 @@ test("local desktop launchers keep macOS and Windows builds reproducible", async
   assert.match(windowsBuild, /\[switch\]\$ResumeAfterSidecar/);
   assert.match(windowsBuild, /\[switch\]\$RebuildSidecar/);
   assert.match(windowsBuild, /Transcript log is unavailable; continuing without it/);
+  assert.match(windowsBuild, /PowerShell 7 x64 is required/);
   assert.match(windowsBuild, /SearchCar-Desktop-Windows-x64-setup\.exe/);
   assert.match(windowsBuild, /TAURI_SIGNING_PRIVATE_KEY/);
   assert.match(windowsSmoke, /RandomNumberGenerator\]::Create\(\)/);
@@ -199,6 +200,8 @@ test("local desktop launchers keep macOS and Windows builds reproducible", async
   assert.match(windowsSmoke, /UseProxy = \$false/);
   assert.match(windowsSmoke, /Invoke-LoopbackHttpRequest/);
   assert.match(windowsSmoke, /LAST HEALTH ERROR/);
+  assert.match(windowsSmoke, /Invoke-LoggedSidecarCommand/);
+  assert.match(windowsSmoke, /compiled-database-check\.stderr\.log/);
   assert.doesNotMatch(windowsSmoke, /Invoke-WebRequest/);
   assert.doesNotMatch(windowsSmoke, /-NoProxy/);
   assert.match(windowsSmoke, /Stop-CompiledSidecarTree/);
@@ -208,6 +211,8 @@ test("local desktop launchers keep macOS and Windows builds reproducible", async
   assert.match(sidecarBuild, /--windows-console-mode=hide/);
   assert.match(sidecarBuild, /command\.remove\("--remove-output"\)/);
   assert.match(sidecarBuild, /\{CACHE_DIR\}\/SearchCar\/searchcar-core/);
+  assert.match(sidecarBuild, /sidecar_source_fingerprint/);
+  assert.match(sidecarBuild, /onefile_cache_fingerprint/);
   assert.match(rustMain, /windows_subsystem = "windows"/);
   assert.match(rustShell, /WebviewUrl::App\("searchcar-startup\.html"\.into\(\)\)/);
   assert.match(rustShell, /STARTUP_TIMEOUT: Duration = Duration::from_secs\(5 \* 60\)/);

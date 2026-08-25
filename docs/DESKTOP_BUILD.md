@@ -157,16 +157,21 @@ the test suites or the Chromium download:
 & ".\Build SearchCar for Windows.ps1" -RebuildSidecar -NoPause
 ```
 
-The Windows onefile payload uses a versioned directory below the current
-user's cache and validates the cached files before reuse. The first `check`
-invocation primes that cache; the Chromium check and server startup no longer
-extract the same runtime into disposable directories again. Inner onefile
+The Windows onefile payload uses a product-version and payload-fingerprint
+directory below the current user's cache and validates the cached files before
+reuse. The fingerprint prevents two pilot commits with the same visible
+product version from trying to overwrite DLLs that an older installed or
+orphaned sidecar still has open. The first `check` invocation primes that
+cache; the Chromium check and server startup no longer extract the same runtime
+into disposable directories again. Inner onefile
 compression is disabled to keep the initial extraction predictable while the
 outer NSIS installer still provides distribution compression. Loopback smoke
 requests use .NET `HttpClient` with its proxy explicitly disabled instead of
 PowerShell-version-specific `Invoke-WebRequest` switches. On failure the script
-prints the tails of stdout, stderr and the structured backend log, then stops
-the complete Nuitka process tree. Windows Nuitka build intermediates are
+prints the tails of stdout, stderr and the structured backend log; the database
+and browser CLI checks also keep their own stdout/stderr files under
+`work\windows-smoke\results`. It then stops the complete Nuitka process tree.
+Windows Nuitka build intermediates are
 retained under `work/` so later sidecar-only rebuilds can reuse them; delete
 that target's `work/nuitka/` directory only when a deliberately clean rebuild
 is required.

@@ -82,6 +82,10 @@ try {
         Write-Warning "Transcript log is unavailable; continuing without it: $BuildLog"
     }
 
+    if ($PSVersionTable.PSEdition -ne "Core" -or $PSVersionTable.PSVersion.Major -lt 7) {
+        throw "PowerShell 7 x64 is required. Open pwsh.exe or run Build SearchCar for Windows.cmd."
+    }
+
     if (-not [Environment]::Is64BitProcess) {
         throw "Use x64 PowerShell 7. The 32-bit shell cannot build SearchCar."
     }

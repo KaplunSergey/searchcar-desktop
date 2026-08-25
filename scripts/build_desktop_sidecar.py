@@ -52,6 +52,29 @@ def product_version() -> str:
     return version.strip()
 
 
+def sidecar_source_fingerprint() -> str:
+    """Identify payloads that must never share a persistent onefile cache."""
+
+    backend_root = REPOSITORY_ROOT / "backend"
+    inputs = [
+        *backend_root.joinpath("app").rglob("*.py"),
+        *backend_root.joinpath("alembic").rglob("*.py"),
+        backend_root / "alembic.ini",
+        backend_root / "requirements-desktop-build.txt",
+        ENTRYPOINT,
+        TAURI_CONFIG,
+    ]
+    digest = hashlib.sha256()
+    for path in sorted({item.resolve() for item in inputs}):
+        if not path.is_file():
+            continue
+        digest.update(path.relative_to(REPOSITORY_ROOT).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()[:16]
+
+
 def build(mode: str) -> dict[str, object]:
     target = rust_target_triple()
     work_dir = WORK_ROOT / target / mode
@@ -88,9 +111,16 @@ def build(mode: str) -> dict[str, object]:
         # fresh extraction take several minutes. A versioned cache lets Nuitka
         # validate and reuse the extracted files. Disabling the inner payload
         # compression makes the unavoidable first extraction I/O-bound; NSIS
-        # still compresses the final installer.
+        # still compresses the final installer. The payload fingerprint is
+        # essential: pilot builds can keep the same product version while the
+        # backend changes, and Windows cannot overwrite a previous cache while
+        # an installed or orphaned sidecar still has DLLs open there.
+        cache_fingerprint = sidecar_source_fingerprint()
         cache_spec = (
-            "{CACHE_DIR}/SearchCar/searchcar-core/" + product_version()
+            "{CACHE_DIR}/SearchCar/searchcar-core/"
+            + product_version()
+            + "-"
+            + cache_fingerprint
         )
         # Retain Nuitka's Windows build/dist directories so a packaging-only
         # follow-up can reuse the compiled C objects. CI starts clean anyway;
@@ -110,6 +140,7 @@ def build(mode: str) -> dict[str, object]:
         onefile_policy = {
             "onefile_cache_mode": "cached",
             "onefile_cache_spec": cache_spec,
+            "onefile_cache_fingerprint": cache_fingerprint,
             "onefile_compression": False,
             "windows_console_mode": "hide",
         }
