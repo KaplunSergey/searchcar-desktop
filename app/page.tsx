@@ -895,6 +895,9 @@ function App({
               projects={projectsQuery.data || []}
               notify={notify}
               isAdmin={currentUser.role === "ADMIN"}
+              canManageDesktopData={
+                currentUser.role === "ADMIN" || currentUser.passwordless_workspace === true
+              }
             />
           )}
           {view === "admin" && localAdminEnabled && (
@@ -3172,12 +3175,14 @@ function Settings({
   projects,
   notify,
   isAdmin,
+  canManageDesktopData,
 }: {
   t: Translate;
   locale: Locale;
   projects: ProjectRecord[];
   notify: (message: string) => void;
   isAdmin: boolean;
+  canManageDesktopData: boolean;
 }) {
   const client = useQueryClient();
   const schedulerQuery = useQuery<SchedulerRecord>({
@@ -3192,7 +3197,7 @@ function Settings({
   const desktopDataQuery = useQuery<DesktopDataStatus>({
     queryKey: ["desktop-data"],
     queryFn: () => request("/desktop/data"),
-    enabled: isAdmin,
+    enabled: canManageDesktopData,
     retry: false,
   });
   const desktopLicenseQuery = useQuery<DesktopLicenseStatus>({
@@ -3207,6 +3212,7 @@ function Settings({
     "postgresql+psycopg://encar:encar@127.0.0.1:5432/encar",
   );
   const [migrationStorage, setMigrationStorage] = useState("");
+  const backupFileInput = useRef<HTMLInputElement>(null);
   const [schedulerDraft, setSchedulerDraft] = useState<SchedulerRecord | null>(null);
   const scheduler = schedulerDraft ??
     schedulerQuery.data ?? {
@@ -3249,6 +3255,22 @@ function Settings({
       void client.invalidateQueries({ queryKey: ["desktop-data"] });
     },
     onError: () => notify(t("backupFailed")),
+  });
+  const importBackupMutation = useMutation({
+    mutationFn: (file: File) =>
+      request<DesktopBackup>(
+        `/desktop/backups/import?name=${encodeURIComponent(file.name)}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/octet-stream" },
+          body: file,
+        },
+      ),
+    onSuccess: () => {
+      notify(t("backupImported"));
+      void client.invalidateQueries({ queryKey: ["desktop-data"] });
+    },
+    onError: () => notify(t("backupImportFailed")),
   });
   const restoreMutation = useMutation({
     mutationFn: (name: string) =>
@@ -3623,20 +3645,41 @@ function Settings({
           </Button>
         </div>
       </section> : null}
-      {isAdmin && desktopDataQuery.data ? (
+      {canManageDesktopData && desktopDataQuery.data ? (
         <section className="panel settings import-panel desktop-data-panel">
           <div className="setting-row">
             <div>
               <h3>{t("desktopData")}</h3>
               <p>{t("desktopDataHelp")}</p>
             </div>
-            <Button
-              kind="primary"
-              disabled={backupMutation.isPending}
-              onClick={() => backupMutation.mutate()}
-            >
-              {backupMutation.isPending ? t("backupCreating") : t("createBackup")}
-            </Button>
+            <div className="backup-toolbar">
+              <input
+                ref={backupFileInput}
+                className="backup-file-input"
+                type="file"
+                accept=".searchcar-backup,application/octet-stream,application/zip"
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0];
+                  event.currentTarget.value = "";
+                  if (file) importBackupMutation.mutate(file);
+                }}
+              />
+              <Button
+                disabled={importBackupMutation.isPending}
+                onClick={() => backupFileInput.current?.click()}
+              >
+                {importBackupMutation.isPending
+                  ? t("backupImporting")
+                  : t("selectBackupFile")}
+              </Button>
+              <Button
+                kind="primary"
+                disabled={backupMutation.isPending}
+                onClick={() => backupMutation.mutate()}
+              >
+                {backupMutation.isPending ? t("backupCreating") : t("createBackup")}
+              </Button>
+            </div>
           </div>
           <p className="data-directory">
             {t("dataFolder")}: <code>{desktopDataQuery.data.data_directory}</code>
@@ -3656,23 +3699,32 @@ function Settings({
                       {(backup.bytes / 1024 / 1024).toFixed(1)} MB · {formatDate(backup.updated_at, locale)}
                     </small>
                   </span>
-                  <Button
-                    disabled={restoreMutation.isPending}
-                    onClick={() => {
-                      if (window.confirm(t("restoreConfirm"))) {
-                        restoreMutation.mutate(backup.name);
-                      }
-                    }}
-                  >
-                    {t("restoreBackup")}
-                  </Button>
+                  <div className="backup-actions">
+                    <a
+                      className="button"
+                      href={`${api}/desktop/backups/${encodeURIComponent(backup.name)}/download`}
+                      download={backup.name}
+                    >
+                      {t("downloadBackup")}
+                    </a>
+                    <Button
+                      disabled={restoreMutation.isPending}
+                      onClick={() => {
+                        if (window.confirm(t("restoreConfirm"))) {
+                          restoreMutation.mutate(backup.name);
+                        }
+                      }}
+                    >
+                      {t("restoreBackup")}
+                    </Button>
+                  </div>
                 </div>
               ))
             ) : (
               <p>{t("noBackups")}</p>
             )}
           </div>
-          <details className="migration-wizard">
+          {isAdmin ? <details className="migration-wizard">
             <summary>{t("migrationWizard")}</summary>
             <p>{t("migrationWizardHelp")}</p>
             <label>
@@ -3705,7 +3757,7 @@ function Settings({
                 {migrationMutation.isPending ? t("migrationRunning") : t("startMigration")}
               </Button>
             </div>
-          </details>
+          </details> : null}
         </section>
       ) : null}
     </>

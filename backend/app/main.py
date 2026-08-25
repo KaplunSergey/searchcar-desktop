@@ -104,6 +104,7 @@ app.add_middleware(
 )
 storage_path = Path(settings.storage_root)
 storage_path.mkdir(parents=True, exist_ok=True)
+MAX_DESKTOP_BACKUP_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024
 
 
 def user_out(user: User, db: Session, *, include_usage: bool = True) -> dict:
@@ -2330,8 +2331,25 @@ def desktop_backup_path(name: str) -> Path:
     return path
 
 
+def _require_desktop_data_access(current: User, db: Session) -> None:
+    """Allow data tools to an admin or the one passwordless desktop workspace."""
+
+    desktop_data_root()
+    if current.role == "ADMIN":
+        return
+    from .desktop_onboarding import desktop_workspace_user
+
+    workspace = desktop_workspace_user(db)
+    if workspace is None or workspace.id != current.id:
+        raise HTTPException(403, "desktop_data_access_required")
+
+
 @app.get("/api/desktop/data")
-def desktop_data_status(_: User = Depends(require_admin)) -> dict:
+def desktop_data_status(
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    _require_desktop_data_access(current, db)
     root = desktop_data_root()
     backups = root / "backups"
     backups.mkdir(parents=True, exist_ok=True)
@@ -2371,11 +2389,10 @@ def desktop_data_status(_: User = Depends(require_admin)) -> dict:
 
 @app.post("/api/desktop/backups")
 def create_desktop_backup(
-    admin: User = Depends(require_csrf),
+    current: User = Depends(require_csrf),
     db: Session = Depends(get_db),
 ) -> dict:
-    if admin.role != "ADMIN":
-        raise HTTPException(403, "admin_required")
+    _require_desktop_data_access(current, db)
     from .desktop_backup import BackupBusyError, export_backup
 
     root = desktop_data_root()
@@ -2396,7 +2413,7 @@ def create_desktop_backup(
     audit(
         db,
         action="DESKTOP_BACKUP_CREATED",
-        actor_user_id=admin.id,
+        actor_user_id=current.id,
         entity_type="BACKUP",
         entity_id=backup_path.name,
     )
@@ -2404,11 +2421,120 @@ def create_desktop_backup(
     return result.as_dict()
 
 
+@app.get("/api/desktop/backups/{name}/download")
+def download_desktop_backup(
+    name: str,
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    """Stream only a complete, verified backup to the user's chosen location."""
+
+    _require_desktop_data_access(current, db)
+    from .desktop_backup import BackupValidationError, validate_backup
+
+    path = desktop_backup_path(name)
+    try:
+        validate_backup(path)
+    except BackupValidationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type="application/octet-stream",
+        filename=name,
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.post("/api/desktop/backups/import")
+async def import_desktop_backup(
+    request: Request,
+    name: str = Query(..., min_length=1, max_length=200),
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Receive a portable backup, validate it, then atomically keep it locally."""
+
+    _require_desktop_data_access(current, db)
+    from .desktop_backup import BackupValidationError, validate_backup
+
+    if Path(name).name != name or not name.endswith(".searchcar-backup"):
+        raise HTTPException(400, "invalid_backup_name")
+    raw_length = request.headers.get("content-length")
+    if raw_length:
+        try:
+            content_length = int(raw_length)
+        except ValueError as exc:
+            raise HTTPException(400, "invalid_backup_size") from exc
+        if content_length <= 0:
+            raise HTTPException(400, "empty_backup_upload")
+        if content_length > MAX_DESKTOP_BACKUP_UPLOAD_BYTES:
+            raise HTTPException(413, "backup_upload_too_large")
+
+    backups = desktop_data_root() / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    temporary = backups / f".backup-import-{uuid4().hex}.tmp"
+    destination = backups / (
+        "imported-"
+        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-"
+        f"{uuid4().hex[:8]}.searchcar-backup"
+    )
+    received = 0
+    try:
+        with temporary.open("xb") as output:
+            try:
+                os.chmod(temporary, 0o600)
+            except OSError:
+                pass
+            async for chunk in request.stream():
+                received += len(chunk)
+                if received > MAX_DESKTOP_BACKUP_UPLOAD_BYTES:
+                    raise HTTPException(413, "backup_upload_too_large")
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        if received == 0:
+            raise HTTPException(400, "empty_backup_upload")
+        validation = validate_backup(temporary)
+        os.replace(temporary, destination)
+    except BackupValidationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+    audit(
+        db,
+        action="DESKTOP_BACKUP_IMPORTED",
+        actor_user_id=current.id,
+        entity_type="BACKUP",
+        entity_id=destination.name,
+        payload={"source_name": name, "bytes": received},
+    )
+    db.commit()
+    return {
+        "name": destination.name,
+        "bytes": destination.stat().st_size,
+        "updated_at": datetime.fromtimestamp(
+            destination.stat().st_mtime,
+            tz=timezone.utc,
+        ),
+        "validation": {
+            **validation.as_dict(),
+            "path": str(destination),
+        },
+    }
+
+
 @app.post("/api/desktop/backups/{name}/validate")
 def validate_desktop_backup(
     name: str,
-    _: User = Depends(require_admin),
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
 ) -> dict:
+    _require_desktop_data_access(current, db)
     from .desktop_backup import BackupValidationError, validate_backup
 
     path = desktop_backup_path(name)
@@ -2421,11 +2547,10 @@ def validate_desktop_backup(
 @app.post("/api/desktop/backups/{name}/restore")
 def stage_desktop_restore(
     name: str,
-    admin: User = Depends(require_csrf),
+    current: User = Depends(require_csrf),
     db: Session = Depends(get_db),
 ) -> dict:
-    if admin.role != "ADMIN":
-        raise HTTPException(403, "admin_required")
+    _require_desktop_data_access(current, db)
     from .desktop_backup import BackupValidationError, validate_backup
 
     source = desktop_backup_path(name)
@@ -2450,7 +2575,7 @@ def stage_desktop_restore(
     audit(
         db,
         action="DESKTOP_RESTORE_STAGED",
-        actor_user_id=admin.id,
+        actor_user_id=current.id,
         entity_type="BACKUP",
         entity_id=name,
     )

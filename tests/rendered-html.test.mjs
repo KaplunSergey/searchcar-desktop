@@ -79,6 +79,23 @@ test("desktop onboarding and notifications are clear inside a small app window",
   assert.match(styles,/\.toast\{[^}]*top:20px[^}]*bottom:auto[^}]*transform:translateX\(-50%\)/);
   assert.match(styles,/\.toast\{[^}]*max-height:calc\(100vh - 40px\)[^}]*overflow:auto[^}]*overflow-wrap:anywhere/);
 });
+test("passwordless desktop backup tools support portable import and export",async()=>{
+  const [page,backend,styles]=await Promise.all([
+    readFile(new URL("app/page.tsx",root),"utf8"),
+    readFile(new URL("backend/app/main.py",root),"utf8"),
+    readFile(new URL("app/globals.css",root),"utf8"),
+  ]);
+  assert.match(page,/type="file"/);
+  assert.match(page,/accept="\.searchcar-backup,application\/octet-stream,application\/zip"/);
+  assert.match(page,/\/desktop\/backups\/import\?name=/);
+  assert.match(page,/\/download`/);
+  assert.match(backend,/async def import_desktop_backup\(/);
+  assert.match(backend,/MAX_DESKTOP_BACKUP_UPLOAD_BYTES/);
+  assert.match(backend,/validate_backup\(temporary\)/);
+  assert.match(backend,/os\.replace\(temporary, destination\)/);
+  assert.match(backend,/def download_desktop_backup\(/);
+  assert.match(styles,/\.backup-file-input\{display:none\}/);
+});
 test("product version metadata has one checked source of truth", async () => {
   const [pkg, cargo, tauri, backend, frontend, script, page] = await Promise.all([
     "package.json",
@@ -224,6 +241,8 @@ test("desktop licensing keeps device secrets outside portable data",async()=>{
   assert.match(license,/SEARCHCAR-LICENSE-LEASE-V1/);
   assert.match(page,/desktop\/onboarding\/activate/);
   assert.match(page,/function DesktopOnboardingScreen/);
+  assert.match(page,/canManageDesktopData=\{/);
+  assert.match(page,/currentUser\.passwordless_workspace === true/);
   assert.match(page,/desktop\/license\/redeem/);
   assert.match(page,/desktop\/license\/refresh/);
   assert.match(page,/desktop\/license\/transfer\/request/);

@@ -233,7 +233,7 @@ Still required before sales beyond the pilot:
 - searchable device history,
   audit export, suspension/revocation и owner-account recovery.
 
-## Next milestone M8.5 — unified owner administration and source entitlements
+## Milestone M8.5 — unified owner administration and source entitlements
 
 Approved product direction:
 
@@ -248,7 +248,7 @@ Approved product direction:
   an allow-list of keys, included in the signed lease and enforced before a
   scan starts.
 
-Implemented locally (deployment still required):
+Implemented and deployed:
 
 - a first-run device accepts an owner-issued activation code, creates a single
   passwordless local workspace and immediately signs it in;
@@ -264,14 +264,42 @@ Implemented locally (deployment still required):
 - desktop hides the legacy local user-administration screen, including for an
   existing local administrator; customer, license and source management are
   centralised in Cloudflare `/owner`.
+- production D1 migration `0003_source_entitlements.sql` and the matching
+  Worker version were deployed successfully.
 
-Still required to complete M8.5:
+Follow-up validation before sales beyond the pilot:
 
-- apply migration `0003_source_entitlements.sql` and deploy the Worker;
 - rebuild and test a fresh macOS and Windows installer against that Worker;
 - perform the documented pilot-local-user migration and transfer checks;
 - add the next parser only together with a catalog migration and its explicit
   desktop scan guard.
+
+## Milestone M9 — backup and device transfer (in progress)
+
+Implemented:
+
+- versioned cross-platform `.searchcar-backup` with checksums, SQLite integrity
+  validation, portable storage paths and automatic rollback backup;
+- staged restore before backend/worker startup; authentication sessions and
+  all license/device state stay outside the portable archive;
+- transfer request/claim controls in desktop settings and approval in the
+  Cloudflare owner panel;
+- passwordless desktop workspace can now create, list, validate and stage its
+  own backups without receiving legacy local-administrator privileges;
+- Settings can download a validated archive and import an externally selected
+  archive through the operating-system file chooser; uploads are streamed to
+  a temporary file, size-limited, validated and atomically accepted;
+- ordinary web users remain unable to access desktop data operations.
+
+Still required to complete M9:
+
+- confirm the installed Windows and macOS WebViews' save-location behaviour;
+  add a Rust-native save dialog only if either platform bypasses the expected
+  system download prompt;
+- complete broken-old-device wording and owner recovery flow;
+- end-to-end macOS → Windows and Windows → macOS restore/transfer checks;
+- verify that the old device cannot renew its lease and that restored data
+  never carries license state.
 
 ## Milestone M10 — release foundation (in progress)
 

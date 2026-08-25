@@ -1,7 +1,9 @@
 # Desktop backup and data migration
 
-This guide covers the Phase 3 data tools. They are available to an
-administrator in **Settings → Desktop application data**.
+This guide covers the desktop data tools. They are available to the single
+passwordless desktop workspace in **Settings → Desktop application data**.
+Legacy administrators keep access for compatibility; ordinary web users do
+not receive desktop data permissions.
 
 ## What a backup contains
 
@@ -24,27 +26,29 @@ user to finish or cancel it first.
 
 ## Create a backup
 
-1. Sign in as an administrator.
-2. Open **Settings**.
-3. In **Desktop application data**, select **Create backup**.
-4. Wait for the success notification. The application validates the new file
+1. Open **Settings**.
+2. In **Desktop application data**, select **Create backup**.
+3. Wait for the success notification. The application validates the new file
    before displaying it in the list.
+4. Select **Download** next to the new item and save the complete
+   `*.searchcar-backup` file on external storage. Depending on the operating
+   system settings, it may be saved directly in **Downloads**.
 
-The exact data directory is shown in the same panel. Backups are stored below
-its `backups` folder. Copy the complete `*.searchcar-backup` file to external
-storage when preparing a device transfer.
+The exact data directory is still shown for support diagnostics, but a normal
+user does not need to open or modify it manually.
 
 ## Restore or move to another computer
 
 1. Install SearchCar Desktop on the destination Windows or macOS computer.
-2. Open **Settings → Desktop application data** once; note the displayed data
-   directory and close the application.
-3. Copy the `*.searchcar-backup` file into its `backups` subfolder.
-4. Start the application and return to the data panel.
-5. Select **Restore** next to the copied backup and confirm.
+2. Open **Settings → Desktop application data**.
+3. Select **Import backup** and choose the complete `*.searchcar-backup` file.
+4. Wait until the application verifies its format, checksums and SQLite data
+   and displays it in the list. A rejected file does not enter local backups.
+5. Select **Restore** next to the imported backup and confirm.
 6. Close and reopen the application. Restore runs before the backend and scan
    worker start.
-7. Sign in again. Authentication sessions are intentionally not transferred.
+7. The passwordless desktop workspace signs in automatically. Authentication
+   sessions are intentionally not transferred.
 
 Before replacing anything, restore creates a verified
 `pre-restore-*.searchcar-backup` of the current installation. The database and
