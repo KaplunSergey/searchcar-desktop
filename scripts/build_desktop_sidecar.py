@@ -100,11 +100,18 @@ def build(mode: str) -> dict[str, object]:
             "--onefile-cache-mode=cached",
             f"--onefile-tempdir-spec={cache_spec}",
             "--onefile-no-compression",
+            # When Tauri starts the production sidecar from a GUI process,
+            # Nuitka's default `force` mode creates a second empty console.
+            # `hide` preserves stdout/stderr when a developer or smoke test
+            # launches it from an existing terminal, but creates no visible
+            # console for an installed desktop application.
+            "--windows-console-mode=hide",
         ]
         onefile_policy = {
             "onefile_cache_mode": "cached",
             "onefile_cache_spec": cache_spec,
             "onefile_compression": False,
+            "windows_console_mode": "hide",
         }
     environment = os.environ.copy()
     environment["NUITKA_CACHE_DIR"] = str(WORK_ROOT / "cache")

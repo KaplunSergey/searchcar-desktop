@@ -168,13 +168,16 @@ test("desktop updater uses the checked public key and signed CI artifacts", asyn
   assert.match(windowsWorkflow, /\$artifactSignature = "\$artifactInstaller\.sig"/);
 });
 test("local desktop launchers keep macOS and Windows builds reproducible", async () => {
-  const [macLauncher, windowsLauncher, windowsBuild, windowsSmoke, sidecarBuild, buildGuide] = await Promise.all([
+  const [macLauncher, windowsLauncher, windowsBuild, windowsSmoke, sidecarBuild, buildGuide, rustMain, rustShell, startupPage] = await Promise.all([
     "Build SearchCar for macOS.command",
     "Build SearchCar for Windows.cmd",
     "Build SearchCar for Windows.ps1",
     "scripts/windows_desktop_smoke.ps1",
     "scripts/build_desktop_sidecar.py",
     "docs/DESKTOP_BUILD.md",
+    "desktop/src-tauri/src/main.rs",
+    "desktop/src-tauri/src/lib.rs",
+    "public/searchcar-startup.html",
   ].map((path) => readFile(new URL(path, root), "utf8")));
   assert.match(macLauncher, /scripts\/build_mac_fixed\.command/);
   assert.match(windowsLauncher, /pwsh\.exe -NoLogo -NoProfile -ExecutionPolicy Bypass/);
@@ -202,8 +205,15 @@ test("local desktop launchers keep macOS and Windows builds reproducible", async
   assert.match(windowsSmoke, /-WindowStyle Hidden/);
   assert.match(sidecarBuild, /--onefile-cache-mode=cached/);
   assert.match(sidecarBuild, /--onefile-no-compression/);
+  assert.match(sidecarBuild, /--windows-console-mode=hide/);
   assert.match(sidecarBuild, /command\.remove\("--remove-output"\)/);
   assert.match(sidecarBuild, /\{CACHE_DIR\}\/SearchCar\/searchcar-core/);
+  assert.match(rustMain, /windows_subsystem = "windows"/);
+  assert.match(rustShell, /WebviewUrl::App\("searchcar-startup\.html"\.into\(\)\)/);
+  assert.match(rustShell, /STARTUP_TIMEOUT: Duration = Duration::from_secs\(5 \* 60\)/);
+  assert.match(rustShell, /Локальный сервис завершился во время запуска/);
+  assert.match(startupPage, /Запускаем SearchCar/);
+  assert.match(startupPage, /Проверяем локальные данные/);
   assert.match(buildGuide, /Local Windows x64 build without GitHub Actions/);
   assert.match(buildGuide, /-RebuildSidecar/);
 });

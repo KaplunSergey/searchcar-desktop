@@ -279,6 +279,23 @@ Follow-up validation before sales beyond the pilot:
 - add the next parser only together with a catalog migration and its explicit
   desktop scan guard.
 
+## Windows startup experience (implemented locally)
+
+- the release Tauri executable now uses the Windows GUI subsystem instead of
+  opening a console owned by the application process;
+- the production Nuitka sidecar uses hidden-console mode while preserving
+  terminal output for developer and smoke-test launches;
+- Windows immediately shows a compact startup window while the onefile
+  sidecar, local data and HTTP backend are prepared;
+- startup detects an early sidecar exit, waits up to five minutes for a cold
+  Defender-affected launch and offers `Retry` or a clean `Exit` on failure;
+- closing the startup window asks for confirmation and then terminates the
+  partially started sidecar rather than leaving an orphan process.
+
+Still required: rebuild the Windows NSIS installer and validate cold and warm
+launches on the pilot Windows machine, including retry, startup-window close
+and confirmation that no console appears.
+
 ## Milestone M9 — backup and device transfer (in progress)
 
 Implemented:

@@ -11,7 +11,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -22,7 +22,10 @@ use tauri::{
     Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-use tauri_plugin_shell::{process::CommandChild, ShellExt};
+use tauri_plugin_shell::{
+    process::{CommandChild, CommandEvent},
+    ShellExt,
+};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 struct SidecarProcess {
@@ -51,6 +54,13 @@ struct TrayStatus {
 
 const LEASE_MESSAGE_PREFIX: &str = "SEARCHCAR-LICENSE-LEASE-V1\n";
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+enum StartupWait {
+    Ready,
+    Terminated,
+    TimedOut,
+}
 
 /// Defense in depth for production builds.  The Python sidecar enforces the
 /// same signed lease after startup; the native shell verifies it before it
@@ -217,15 +227,18 @@ fn health_is_ready(port: u16) -> bool {
     stream.read_to_string(&mut response).is_ok() && response.contains(" 200 ")
 }
 
-fn wait_for_health(port: u16, timeout: Duration) -> bool {
+fn wait_for_health(port: u16, timeout: Duration, terminated: &AtomicBool) -> StartupWait {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if health_is_ready(port) {
-            return true;
+            return StartupWait::Ready;
+        }
+        if terminated.load(Ordering::SeqCst) {
+            return StartupWait::Terminated;
         }
         thread::sleep(Duration::from_millis(150));
     }
-    false
+    StartupWait::TimedOut
 }
 
 fn request_sidecar_shutdown(port: u16, secret: &str) -> bool {
@@ -301,7 +314,90 @@ fn show_main_window(app: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+    } else if let Some(window) = app.get_webview_window("startup") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
     }
+}
+
+fn create_startup_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+    if !cfg!(windows) {
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(
+        app,
+        "startup",
+        WebviewUrl::App("searchcar-startup.html".into()),
+    )
+    .title("Запуск SearchCar")
+    .inner_size(480.0, 330.0)
+    .min_inner_size(480.0, 330.0)
+    .max_inner_size(480.0, 330.0)
+    .resizable(false)
+    .center()
+    .build()?;
+    Ok(())
+}
+
+fn set_startup_state(app: &tauri::AppHandle, state: &str, message: &str) {
+    if !cfg!(windows) {
+        return;
+    }
+    let Some(window) = app.get_webview_window("startup") else {
+        return;
+    };
+    let Ok(state) = serde_json::to_string(state) else {
+        return;
+    };
+    let Ok(message) = serde_json::to_string(message) else {
+        return;
+    };
+    let _ = window.eval(format!(
+        "window.searchcarStartup?.setState({state}, {message});"
+    ));
+}
+
+fn hide_startup_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("startup") {
+        let _ = window.hide();
+    }
+}
+
+fn show_startup_failure(app: &tauri::AppHandle, message: &str) {
+    set_startup_state(app, "error", message);
+    show_main_window(app);
+    let lifecycle = app.state::<LifecycleState>();
+    if lifecycle
+        .confirmation_open
+        .swap(true, Ordering::SeqCst)
+    {
+        return;
+    }
+    let app_handle = app.clone();
+    app.dialog()
+        .message(format!(
+            "SearchCar не удалось подготовить к запуску.\n\n{message}\n\nПовторить запуск?"
+        ))
+        .title("Не удалось запустить SearchCar")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Повторить".to_string(),
+            "Выйти".to_string(),
+        ))
+        .show(move |retry| {
+            app_handle
+                .state::<LifecycleState>()
+                .confirmation_open
+                .store(false, Ordering::SeqCst);
+            if retry {
+                allow_programmatic_exit(&app_handle);
+                stop_sidecar(&app_handle);
+                app_handle.restart();
+            } else {
+                finish_confirmed_exit(&app_handle);
+            }
+        });
 }
 
 fn next_run_label(status: &TrayStatus) -> String {
@@ -376,6 +472,35 @@ fn request_exit_confirmation(app: &tauri::AppHandle) {
         .buttons(MessageDialogButtons::OkCancelCustom(
             "Выйти и остановить поиск".to_string(),
             "Остаться".to_string(),
+        ))
+        .show(move |confirmed| {
+            app_handle
+                .state::<LifecycleState>()
+                .confirmation_open
+                .store(false, Ordering::SeqCst);
+            if confirmed {
+                finish_confirmed_exit(&app_handle);
+            }
+        });
+}
+
+fn request_startup_exit_confirmation(app: &tauri::AppHandle) {
+    let lifecycle = app.state::<LifecycleState>();
+    if lifecycle.explicit_exit.load(Ordering::SeqCst)
+        || lifecycle
+            .confirmation_open
+            .swap(true, Ordering::SeqCst)
+    {
+        return;
+    }
+    let app_handle = app.clone();
+    app.dialog()
+        .message("SearchCar ещё запускается. Вы точно хотите выйти?")
+        .title("Выйти из SearchCar?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Выйти".to_string(),
+            "Продолжить запуск".to_string(),
         ))
         .show(move |confirmed| {
             app_handle
@@ -541,10 +666,7 @@ fn start_update_check(app: &tauri::AppHandle, interactive: bool) {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            show_main_window(app);
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -559,6 +681,12 @@ pub fn run() {
         .setup(|app| {
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
+            create_startup_window(app.handle())?;
+            set_startup_state(
+                app.handle(),
+                "loading",
+                "Проверяем локальные данные…",
+            );
             let port = available_port().map_err(std::io::Error::other)?;
             let secret: String = rand::rng()
                 .sample_iter(&Alphanumeric)
@@ -574,8 +702,13 @@ pub fn run() {
                 .join("playwright-driver");
             let license_config = app.path().resource_dir()?.join("license-service.json");
             std::fs::create_dir_all(&data_dir)?;
-            verify_required_lease(&license_config, &data_dir)
-                .map_err(|error| std::io::Error::other(format!("license preflight failed: {error}")))?;
+            if let Err(error) = verify_required_lease(&license_config, &data_dir) {
+                show_startup_failure(
+                    app.handle(),
+                    &format!("Не удалось проверить локальную лицензию: {error}"),
+                );
+                return Ok(());
+            }
 
             let mut sidecar_arguments = vec![
                 "serve".to_string(),
@@ -597,9 +730,24 @@ pub fn run() {
                 // even when a bundled macOS process drops a custom env var.
                 sidecar_arguments.push("--allow-device-key-file-fallback".to_string());
             }
-            let command = app
+            set_startup_state(
+                app.handle(),
+                "loading",
+                "Запускаем локальный сервис…",
+            );
+            let command = match app
                 .shell()
-                .sidecar("searchcar-core")?
+                .sidecar("searchcar-core")
+            {
+                Ok(command) => command,
+                Err(error) => {
+                    show_startup_failure(
+                        app.handle(),
+                        &format!("Не найден компонент локального сервиса: {error}"),
+                    );
+                    return Ok(());
+                }
+            }
                 .args(sidecar_arguments)
                 .env("SEARCHCAR_DESKTOP_SESSION_SECRET", &secret)
                 .env(
@@ -611,13 +759,32 @@ pub fn run() {
                     option_env!("SEARCHCAR_MACOS_LOCAL_KEY_FALLBACK").unwrap_or("0"),
                 )
                 .env("SEARCHCAR_LICENSE_CONFIG_FILE", license_config);
-            let (mut events, child) = command.spawn()?;
+            let (mut events, child) = match command.spawn() {
+                Ok(process) => process,
+                Err(error) => {
+                    show_startup_failure(
+                        app.handle(),
+                        &format!("Не удалось запустить локальный сервис: {error}"),
+                    );
+                    return Ok(());
+                }
+            };
             *app.state::<SidecarState>().0.lock().expect("sidecar state") =
                 Some(SidecarProcess {
                     child,
                     port,
                     secret: secret.clone(),
                 });
+
+            let sidecar_terminated = Arc::new(AtomicBool::new(false));
+            let termination_for_events = Arc::clone(&sidecar_terminated);
+            tauri::async_runtime::spawn(async move {
+                while let Some(event) = events.recv().await {
+                    if matches!(event, CommandEvent::Terminated(_)) {
+                        termination_for_events.store(true, Ordering::SeqCst);
+                    }
+                }
+            });
 
             let open_item = MenuItem::with_id(app, "open", "Open SearchCar", true, None::<&str>)?;
             let next_item = MenuItem::with_id(
@@ -683,24 +850,44 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            tauri::async_runtime::spawn(async move {
-                while events.recv().await.is_some() {}
-            });
-
             let app_handle = app.handle().clone();
             let next_for_poll = next_item.clone();
             let pause_for_poll = pause_item.clone();
             thread::spawn(move || {
-                if !wait_for_health(port, Duration::from_secs(20)) {
-                    stop_sidecar(&app_handle);
-                    app_handle.exit(1);
-                    return;
+                // setup returns before the local startup page can finish
+                // loading. Update its first meaningful stage once the event
+                // loop has had a chance to render the window.
+                thread::sleep(Duration::from_millis(250));
+                set_startup_state(
+                    &app_handle,
+                    "loading",
+                    "Запускаем локальный сервис…",
+                );
+                match wait_for_health(port, STARTUP_TIMEOUT, &sidecar_terminated) {
+                    StartupWait::Ready => {}
+                    StartupWait::Terminated => {
+                        stop_sidecar(&app_handle);
+                        show_startup_failure(
+                            &app_handle,
+                            "Локальный сервис завершился во время запуска.",
+                        );
+                        return;
+                    }
+                    StartupWait::TimedOut => {
+                        stop_sidecar(&app_handle);
+                        show_startup_failure(
+                            &app_handle,
+                            "Подготовка заняла больше пяти минут.",
+                        );
+                        return;
+                    }
                 }
+                set_startup_state(&app_handle, "loading", "Открываем приложение…");
                 let target =
                     format!("http://127.0.0.1:{port}/desktop/bootstrap?token={secret}");
                 let window_handle = app_handle.clone();
                 let _ = app_handle.run_on_main_thread(move || {
-                    let _ = WebviewWindowBuilder::new(
+                    match WebviewWindowBuilder::new(
                         &window_handle,
                         "main",
                         WebviewUrl::External(target.parse().expect("valid desktop URL")),
@@ -708,7 +895,14 @@ pub fn run() {
                     .title("SearchCar Desktop")
                     .inner_size(1280.0, 820.0)
                     .min_inner_size(980.0, 680.0)
-                    .build();
+                    .build()
+                    {
+                        Ok(_) => hide_startup_window(&window_handle),
+                        Err(error) => show_startup_failure(
+                            &window_handle,
+                            &format!("Не удалось открыть главное окно: {error}"),
+                        ),
+                    }
                 });
 
                 start_update_check(&app_handle, false);
@@ -762,7 +956,11 @@ pub fn run() {
                 {
                     return;
                 }
-                request_exit_confirmation(window.app_handle());
+                if window.label() == "startup" {
+                    request_startup_exit_confirmation(window.app_handle());
+                } else {
+                    request_exit_confirmation(window.app_handle());
+                }
             }
         })
         .build(tauri::generate_context!())

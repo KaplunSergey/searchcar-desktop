@@ -171,6 +171,14 @@ retained under `work/` so later sidecar-only rebuilds can reuse them; delete
 that target's `work/nuitka/` directory only when a deliberately clean rebuild
 is required.
 
+The installed release uses the Windows GUI subsystem and the production
+Nuitka sidecar uses hidden-console mode, so neither executable opens an empty
+terminal window. While the cached sidecar is being prepared, SearchCar shows a
+small startup window with real stages. The first launch may take longer while
+Windows Defender validates the bundled executable. The shell waits up to five
+minutes, detects an early sidecar exit, and offers either a clean retry or exit
+instead of leaving an empty window running indefinitely.
+
 This produces a pilot installer without a commercial Windows code-signing
 certificate, so SmartScreen can warn on a clean computer. When the Tauri
 updater signing environment variables are present, Tauri also creates the
