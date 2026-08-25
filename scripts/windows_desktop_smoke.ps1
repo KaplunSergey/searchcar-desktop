@@ -23,6 +23,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.Net.Http
 $sidecarPath = (Resolve-Path $Sidecar).Path
 $browserPath = (Resolve-Path $BrowserDir).Path
 $playwrightDriverPath = (Resolve-Path $PlaywrightDriverDir).Path
@@ -58,6 +59,45 @@ function Get-LogTail([string]$Path, [int]$Lines = 80) {
         return "(log file is empty; the onefile payload may still be extracting)"
     }
     return $content -join [Environment]::NewLine
+}
+
+function Invoke-LoopbackHttpRequest {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Net.Http.HttpClient]$Client,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("GET", "POST")]
+        [string]$Method,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Uri
+    )
+
+    $response = $null
+    $requestBody = $null
+    try {
+        if ($Method -eq "POST") {
+            $requestBody = [System.Net.Http.StringContent]::new("")
+            $response = $Client.PostAsync($Uri, $requestBody).GetAwaiter().GetResult()
+        }
+        else {
+            $response = $Client.GetAsync($Uri).GetAwaiter().GetResult()
+        }
+        $content = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        return [PSCustomObject]@{
+            StatusCode = [int]$response.StatusCode
+            Content = [string]$content
+        }
+    }
+    finally {
+        if ($response) {
+            $response.Dispose()
+        }
+        if ($requestBody) {
+            $requestBody.Dispose()
+        }
+    }
 }
 
 function Stop-CompiledSidecarTree([System.Diagnostics.Process]$Process) {
@@ -116,8 +156,17 @@ $previousSecret = $env:SEARCHCAR_DESKTOP_SESSION_SECRET
 $env:SEARCHCAR_DESKTOP_SESSION_SECRET = $sessionSecret
 $sidecarProcess = $null
 $startedAt = Get-Date
+$loopbackClient = $null
+$loopbackHandler = $null
 
 try {
+    $loopbackHandler = [System.Net.Http.HttpClientHandler]::new()
+    $loopbackHandler.UseProxy = $false
+    $loopbackHandler.UseCookies = $true
+    $loopbackHandler.CookieContainer = [System.Net.CookieContainer]::new()
+    $loopbackClient = [System.Net.Http.HttpClient]::new($loopbackHandler)
+    $loopbackClient.Timeout = [TimeSpan]::FromSeconds(5)
+
     $sidecarProcess = Start-Process `
         -FilePath $sidecarPath `
         -ArgumentList @(
@@ -136,6 +185,7 @@ try {
 
     $baseUrl = "http://127.0.0.1:$port"
     $healthy = $false
+    $lastHealthError = "(no HTTP exception was recorded)"
     # The earlier check command primes the versioned Nuitka cache. Starting
     # the server must therefore not repeat a full onefile extraction.
     $healthDeadline = [DateTime]::UtcNow.AddSeconds($HealthTimeoutSeconds)
@@ -147,17 +197,19 @@ try {
             throw "Compiled sidecar exited before health check (exit $exitCode).`nSTDOUT:`n$stdoutTail`nSTDERR:`n$stderrTail"
         }
         try {
-            $health = Invoke-WebRequest `
-                -Uri "$baseUrl/api/health" `
-                -TimeoutSec 1 `
-                -NoProxy `
-                -SkipHttpErrorCheck
+            $health = Invoke-LoopbackHttpRequest `
+                -Client $loopbackClient `
+                -Method GET `
+                -Uri "$baseUrl/api/health"
             if ($health.StatusCode -eq 200) {
                 $healthy = $true
                 break
             }
         }
         catch {
+            $lastHealthError = $_.Exception.Message
+        }
+        if (-not $healthy) {
             Start-Sleep -Milliseconds 500
         }
     }
@@ -166,42 +218,36 @@ try {
         $stdoutTail = Get-LogTail $stdoutPath
         $stderrTail = Get-LogTail $stderrPath
         $structuredTail = Get-LogTail $structuredLogPath
-        throw "Compiled sidecar health check timed out after $HealthTimeoutSeconds seconds.`nSTDOUT:`n$stdoutTail`nSTDERR:`n$stderrTail`nSTRUCTURED LOG:`n$structuredTail"
+        throw "Compiled sidecar health check timed out after $HealthTimeoutSeconds seconds.`nLAST HEALTH ERROR:`n$lastHealthError`nSTDOUT:`n$stdoutTail`nSTDERR:`n$stderrTail`nSTRUCTURED LOG:`n$structuredTail"
     }
 
-    $unauthorized = Invoke-WebRequest `
-        -Uri "$baseUrl/" `
-        -TimeoutSec 2 `
-        -NoProxy `
-        -SkipHttpErrorCheck
+    $unauthorized = Invoke-LoopbackHttpRequest `
+        -Client $loopbackClient `
+        -Method GET `
+        -Uri "$baseUrl/"
     if ($unauthorized.StatusCode -ne 403) {
         throw "Desktop root was available without bootstrap session"
     }
 
-    $webSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
-    $bootstrap = Invoke-WebRequest `
-        -Uri "$baseUrl/desktop/bootstrap?token=$sessionSecret" `
-        -WebSession $webSession `
-        -NoProxy `
-        -TimeoutSec 5
+    $bootstrap = Invoke-LoopbackHttpRequest `
+        -Client $loopbackClient `
+        -Method GET `
+        -Uri "$baseUrl/desktop/bootstrap?token=$sessionSecret"
     if ($bootstrap.StatusCode -ne 200) {
         throw "Desktop bootstrap did not reach the SPA"
     }
-    $root = Invoke-WebRequest `
-        -Uri "$baseUrl/" `
-        -WebSession $webSession `
-        -NoProxy `
-        -TimeoutSec 2
+    $root = Invoke-LoopbackHttpRequest `
+        -Client $loopbackClient `
+        -Method GET `
+        -Uri "$baseUrl/"
     if ($root.StatusCode -ne 200 -or $root.Content -notmatch "SearchCar Desktop") {
         throw "Desktop SPA response is invalid"
     }
 
-    $shutdown = Invoke-WebRequest `
-        -Method Post `
-        -Uri "$baseUrl/desktop/shutdown?token=$sessionSecret" `
-        -NoProxy `
-        -TimeoutSec 5 `
-        -SkipHttpErrorCheck
+    $shutdown = Invoke-LoopbackHttpRequest `
+        -Client $loopbackClient `
+        -Method POST `
+        -Uri "$baseUrl/desktop/shutdown?token=$sessionSecret"
     if ($shutdown.StatusCode -ne 202) {
         throw "Desktop sidecar rejected graceful shutdown"
     }
@@ -229,6 +275,12 @@ try {
 finally {
     if ($sidecarProcess -and -not $sidecarProcess.HasExited) {
         Stop-CompiledSidecarTree $sidecarProcess
+    }
+    if ($loopbackClient) {
+        $loopbackClient.Dispose()
+    }
+    elseif ($loopbackHandler) {
+        $loopbackHandler.Dispose()
     }
     $env:SEARCHCAR_DESKTOP_SESSION_SECRET = $previousSecret
 }

@@ -163,11 +163,13 @@ invocation primes that cache; the Chromium check and server startup no longer
 extract the same runtime into disposable directories again. Inner onefile
 compression is disabled to keep the initial extraction predictable while the
 outer NSIS installer still provides distribution compression. Loopback smoke
-requests bypass the system proxy. On failure the script prints the tails of
-stdout, stderr and the structured backend log, then stops the complete Nuitka
-process tree. Windows Nuitka build intermediates are retained under `work/` so
-later sidecar-only rebuilds can reuse them; delete that target's `work/nuitka/`
-directory only when a deliberately clean rebuild is required.
+requests use .NET `HttpClient` with its proxy explicitly disabled instead of
+PowerShell-version-specific `Invoke-WebRequest` switches. On failure the script
+prints the tails of stdout, stderr and the structured backend log, then stops
+the complete Nuitka process tree. Windows Nuitka build intermediates are
+retained under `work/` so later sidecar-only rebuilds can reuse them; delete
+that target's `work/nuitka/` directory only when a deliberately clean rebuild
+is required.
 
 This produces a pilot installer without a commercial Windows code-signing
 certificate, so SmartScreen can warn on a clean computer. When the Tauri

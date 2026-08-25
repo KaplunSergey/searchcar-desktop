@@ -163,7 +163,12 @@ test("local desktop launchers keep macOS and Windows builds reproducible", async
   assert.match(windowsSmoke, /RandomNumberGenerator\]::Create\(\)/);
   assert.doesNotMatch(windowsSmoke, /RandomNumberGenerator\]::GetBytes/);
   assert.match(windowsSmoke, /HealthTimeoutSeconds = 300/);
-  assert.match(windowsSmoke, /-NoProxy/);
+  assert.match(windowsSmoke, /System\.Net\.Http\.HttpClientHandler/);
+  assert.match(windowsSmoke, /UseProxy = \$false/);
+  assert.match(windowsSmoke, /Invoke-LoopbackHttpRequest/);
+  assert.match(windowsSmoke, /LAST HEALTH ERROR/);
+  assert.doesNotMatch(windowsSmoke, /Invoke-WebRequest/);
+  assert.doesNotMatch(windowsSmoke, /-NoProxy/);
   assert.match(windowsSmoke, /Stop-CompiledSidecarTree/);
   assert.match(windowsSmoke, /-WindowStyle Hidden/);
   assert.match(sidecarBuild, /--onefile-cache-mode=cached/);
