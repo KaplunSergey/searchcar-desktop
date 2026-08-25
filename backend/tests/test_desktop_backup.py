@@ -17,6 +17,7 @@ from app.desktop_backup import (
     restore_backup,
     sha256_file,
     validate_backup,
+    _safe_archive_path,
 )
 from app.models import AuthSession, Car, CarImage, Project, ScanRun, User
 from app.postgres_converter import convert_to_backup
@@ -172,7 +173,7 @@ def test_backup_rejects_tampered_payload(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "unsafe_name",
-    ["../outside", "/absolute", "folder\\file", "C:/windows/file"],
+    ["../outside", "/absolute", "C:/windows/file"],
 )
 def test_backup_rejects_cross_platform_unsafe_paths(
     tmp_path: Path,
@@ -186,6 +187,14 @@ def test_backup_rejects_cross_platform_unsafe_paths(
         archive.writestr("checksums.json", b"{}")
     with pytest.raises(BackupValidationError, match="unsafe_archive_path"):
         validate_backup(archive_path)
+
+
+def test_backup_rejects_backslash_path_before_zip_normalization() -> None:
+    # zipfile normalizes backslashes while constructing ZipInfo on Windows.
+    # Test the validation boundary directly so the same assertion runs on all
+    # supported operating systems.
+    with pytest.raises(BackupValidationError, match="unsafe_archive_path"):
+        _safe_archive_path("folder\\file")
 
 
 def test_sqlite_source_conversion_is_read_only_and_portable(tmp_path: Path) -> None:

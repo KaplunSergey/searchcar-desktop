@@ -8,6 +8,7 @@ import sqlite3
 import stat
 import tempfile
 import zipfile
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -197,7 +198,7 @@ def sqlite_table_counts(connection: sqlite3.Connection) -> dict[str, int]:
 
 def verify_sqlite(path: Path) -> dict:
     try:
-        with _sqlite_connection(path, read_only=True) as connection:
+        with closing(_sqlite_connection(path, read_only=True)) as connection, connection:
             integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
             if integrity != "ok":
                 raise BackupValidationError(f"sqlite_integrity_failed:{integrity}")
@@ -217,7 +218,7 @@ def verify_sqlite(path: Path) -> dict:
 def _active_scan_count(database_path: Path) -> int:
     if not database_path.is_file():
         return 0
-    with _sqlite_connection(database_path, read_only=True) as connection:
+    with closing(_sqlite_connection(database_path, read_only=True)) as connection, connection:
         table = connection.execute(
             """
             SELECT 1 FROM sqlite_master
@@ -237,8 +238,8 @@ def _active_scan_count(database_path: Path) -> int:
 
 def _online_sqlite_backup(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with _sqlite_connection(source, read_only=True) as source_connection:
-        with _sqlite_connection(destination) as destination_connection:
+    with closing(_sqlite_connection(source, read_only=True)) as source_connection, source_connection:
+        with closing(_sqlite_connection(destination)) as destination_connection, destination_connection:
             source_connection.backup(destination_connection)
 
 
@@ -262,7 +263,7 @@ def _portable_json_value(value, storage_root: Path, *, key: str | None = None):
 def prepare_backup_database_copy(database_path: Path, storage_root: Path) -> None:
     """Make path fields portable and remove transferable login sessions."""
 
-    with _sqlite_connection(database_path) as connection:
+    with closing(_sqlite_connection(database_path)) as connection, connection:
         # SQLite's online backup preserves the source journal mode. Convert the
         # isolated copy to a single-file journal before mutating it so that the
         # archive cannot omit changes that are still present only in a WAL file.

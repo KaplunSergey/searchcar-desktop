@@ -23,6 +23,21 @@ function Require-Command([string]$Name, [string]$InstallHint) {
     }
 }
 
+function Invoke-CheckedNative(
+    [string]$Description,
+    [string]$Executable,
+    [string[]]$Arguments
+) {
+    & $Executable @Arguments
+    $exitCode = $LASTEXITCODE
+    if ($null -eq $exitCode) {
+        $exitCode = 0
+    }
+    if ($exitCode -ne 0) {
+        throw "$Description failed with exit code $exitCode."
+    }
+}
+
 function Import-MsvcEnvironment {
     if (Get-Command cl.exe -ErrorAction SilentlyContinue) {
         return
@@ -87,9 +102,15 @@ try {
         throw "SearchCar requires x64 Node.js 22; found Node $nodeMajor ($nodeArchitecture)."
     }
 
-    rustup.exe toolchain install stable-x86_64-pc-windows-msvc --profile minimal
-    rustup.exe default stable-x86_64-pc-windows-msvc
-    rustup.exe target add x86_64-pc-windows-msvc
+    Invoke-CheckedNative "Rust toolchain installation" "rustup.exe" @(
+        "toolchain", "install", "stable-x86_64-pc-windows-msvc", "--profile", "minimal"
+    )
+    Invoke-CheckedNative "Rust toolchain selection" "rustup.exe" @(
+        "default", "stable-x86_64-pc-windows-msvc"
+    )
+    Invoke-CheckedNative "Rust target installation" "rustup.exe" @(
+        "target", "add", "x86_64-pc-windows-msvc"
+    )
 
     $env:CARGO_TERM_COLOR = "always"
     $env:PLAYWRIGHT_SKIP_BROWSER_GC = "1"
@@ -101,13 +122,19 @@ try {
 
     if (-not $ResumeAfterSidecar -and -not $RebuildSidecar) {
         if (-not (Test-Path -LiteralPath $BuildPython -PathType Leaf)) {
-            python.exe -m venv (Join-Path $ProjectRoot ".desktop-build-venv-windows")
+            Invoke-CheckedNative "Python build environment creation" "python.exe" @(
+                "-m", "venv", (Join-Path $ProjectRoot ".desktop-build-venv-windows")
+            )
         }
 
         Write-Host "Installing pinned dependencies..." -ForegroundColor Cyan
-        & $BuildPython -m pip install -r backend/requirements-desktop-build.txt
-        pnpm.cmd install --frozen-lockfile
-        pnpm.cmd version:check
+        Invoke-CheckedNative "Desktop Python dependency installation" $BuildPython @(
+            "-m", "pip", "install", "-r", "backend/requirements-desktop-build.txt"
+        )
+        Invoke-CheckedNative "Project dependency installation" "pnpm.cmd" @(
+            "install", "--frozen-lockfile"
+        )
+        Invoke-CheckedNative "Product version validation" "pnpm.cmd" @("version:check")
 
         Write-Host "Running backend and frontend tests..." -ForegroundColor Cyan
         $env:PYTHONPATH = Join-Path $ProjectRoot "backend"
@@ -117,22 +144,32 @@ try {
         $env:STORAGE_ROOT = Join-Path $TemporaryTestRoot "storage"
         $testDatabase = (Join-Path $TemporaryTestRoot "searchcar-tests.sqlite3").Replace("\", "/")
         $env:DATABASE_URL = "sqlite+pysqlite:///$testDatabase"
-        & $BuildPython -m pytest backend/tests -q
-        pnpm.cmd build
-        pnpm.cmd test
-        pnpm.cmd desktop:frontend:build
+        Invoke-CheckedNative "Backend tests" $BuildPython @(
+            "-m", "pytest", "backend/tests", "-q"
+        )
+        Invoke-CheckedNative "Web frontend build" "pnpm.cmd" @("build")
+        Invoke-CheckedNative "Frontend and packaging tests" "pnpm.cmd" @("test")
+        Invoke-CheckedNative "Desktop frontend build" "pnpm.cmd" @("desktop:frontend:build")
 
         Write-Host "Preparing Chromium and the Playwright driver..." -ForegroundColor Cyan
-        & $BuildPython scripts/prepare_desktop_browser.py
-        & $BuildPython scripts/prepare_desktop_playwright_driver.py
+        Invoke-CheckedNative "Chromium preparation" $BuildPython @(
+            "scripts/prepare_desktop_browser.py"
+        )
+        Invoke-CheckedNative "Playwright driver preparation" $BuildPython @(
+            "scripts/prepare_desktop_playwright_driver.py"
+        )
 
         if ($IncludeDiagnosticStandalone) {
             Write-Host "Building optional diagnostic standalone backend..." -ForegroundColor Cyan
-            & $BuildPython scripts/build_desktop_sidecar.py --mode standalone
+            Invoke-CheckedNative "Diagnostic standalone sidecar build" $BuildPython @(
+                "scripts/build_desktop_sidecar.py", "--mode", "standalone"
+            )
         }
 
         Write-Host "Building onefile production backend..." -ForegroundColor Cyan
-        & $BuildPython scripts/build_desktop_sidecar.py --mode onefile
+        Invoke-CheckedNative "Production onefile sidecar build" $BuildPython @(
+            "scripts/build_desktop_sidecar.py", "--mode", "onefile"
+        )
     }
     elseif ($RebuildSidecar) {
         $rebuildInputs = @(
@@ -147,7 +184,9 @@ try {
             }
         }
         Write-Host "Rebuilding only the cached Windows onefile sidecar..." -ForegroundColor Cyan
-        & $BuildPython scripts/build_desktop_sidecar.py --mode onefile
+        Invoke-CheckedNative "Production onefile sidecar rebuild" $BuildPython @(
+            "scripts/build_desktop_sidecar.py", "--mode", "onefile"
+        )
     }
     else {
         Write-Host "Resuming from the existing compiled sidecar..." -ForegroundColor Cyan
@@ -181,7 +220,9 @@ try {
     if (Test-Path -LiteralPath $nsisOutput) {
         Remove-Item -LiteralPath $nsisOutput -Recurse -Force
     }
-    pnpm.cmd desktop:tauri:build --bundles nsis --no-sign --ci
+    Invoke-CheckedNative "Windows NSIS installer build" "pnpm.cmd" @(
+        "desktop:tauri:build", "--bundles", "nsis", "--no-sign", "--ci"
+    )
 
     $installers = @(
         Get-ChildItem $nsisOutput -Filter "*-setup.exe" -File
@@ -206,7 +247,9 @@ try {
     }
     $sourceSignature = "$($installers[0].FullName).sig"
     if ($privateKeyPresent -and -not (Test-Path -LiteralPath $sourceSignature -PathType Leaf)) {
-        pnpm.cmd exec tauri signer sign $installers[0].FullName
+        Invoke-CheckedNative "Tauri updater signature" "pnpm.cmd" @(
+            "exec", "tauri", "signer", "sign", $installers[0].FullName
+        )
     }
     $updaterSigned = Test-Path -LiteralPath $sourceSignature -PathType Leaf
     if ($updaterSigned) {

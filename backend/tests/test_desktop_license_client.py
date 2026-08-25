@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 from types import SimpleNamespace
@@ -192,6 +193,7 @@ def test_macos_keychain_migrates_legacy_base64_seed_without_identity_change() ->
     assert store.load() == secret
 
 
+@pytest.mark.skipif(os.name == "nt", reason="macOS mode-0600 fallback semantics")
 def test_macos_keychain_authorization_failure_uses_private_file(tmp_path) -> None:
     secret = b"f" * 32
 
@@ -215,6 +217,7 @@ def test_macos_keychain_authorization_failure_uses_private_file(tmp_path) -> Non
     assert store.path.stat().st_mode & 0o077 == 0
 
 
+@pytest.mark.skipif(os.name == "nt", reason="macOS mode-0600 fallback semantics")
 def test_macos_preview_file_store_is_stable_without_keychain(tmp_path) -> None:
     store = MacOSPreviewFileSecretStore(tmp_path)
 
@@ -267,6 +270,7 @@ def test_macos_readable_keychain_does_not_write_raw_fallback(tmp_path) -> None:
     assert not store.path.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="macOS mode-0600 fallback semantics")
 def test_macos_keychain_success_with_missing_readback_keeps_stable_fallback(
     tmp_path,
 ) -> None:
@@ -292,6 +296,7 @@ def test_macos_keychain_success_with_missing_readback_keeps_stable_fallback(
     assert store.path.stat().st_mode & 0o077 == 0
 
 
+@pytest.mark.skipif(os.name == "nt", reason="macOS mode-0600 fallback semantics")
 def test_macos_fallback_remains_authoritative_after_keychain_recovers(tmp_path) -> None:
     old_keychain_seed = b"o" * 32
 
@@ -324,6 +329,7 @@ def test_macos_fallback_remains_authoritative_after_keychain_recovers(tmp_path) 
     assert store.path.read_bytes() == fallback_seed
 
 
+@pytest.mark.skipif(os.name == "nt", reason="macOS mode-0600 fallback semantics")
 def test_macos_production_store_migrates_matching_fallback_to_keychain(
     tmp_path,
 ) -> None:

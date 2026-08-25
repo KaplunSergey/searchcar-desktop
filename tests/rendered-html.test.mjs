@@ -180,7 +180,10 @@ test("local desktop launchers keep macOS and Windows builds reproducible", async
   assert.match(windowsLauncher, /pwsh\.exe -NoLogo -NoProfile -ExecutionPolicy Bypass/);
   assert.match(windowsBuild, /stable-x86_64-pc-windows-msvc/);
   assert.match(windowsBuild, /scripts\\windows_desktop_smoke\.ps1/);
-  assert.match(windowsBuild, /desktop:tauri:build --bundles nsis --no-sign --ci/);
+  assert.match(windowsBuild, /Invoke-CheckedNative "Windows NSIS installer build"/);
+  assert.match(windowsBuild, /"desktop:tauri:build", "--bundles", "nsis", "--no-sign", "--ci"/);
+  assert.match(windowsBuild, /Invoke-CheckedNative "Backend tests"/);
+  assert.match(windowsBuild, /failed with exit code \$exitCode/);
   assert.match(windowsBuild, /\[switch\]\$ResumeAfterSidecar/);
   assert.match(windowsBuild, /\[switch\]\$RebuildSidecar/);
   assert.match(windowsBuild, /Transcript log is unavailable; continuing without it/);

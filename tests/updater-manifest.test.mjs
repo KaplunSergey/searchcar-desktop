@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const execute = promisify(execFile);
 const script = new URL("../scripts/generate_tauri_updater_manifest.mjs", import.meta.url);
+const scriptPath = fileURLToPath(script);
 
 test("creates a complete static Tauri updater manifest for both desktop targets", async () => {
   const directory = await mkdtemp(join(tmpdir(), "searchcar-updater-manifest-"));
@@ -21,7 +23,7 @@ test("creates a complete static Tauri updater manifest for both desktop targets"
     writeFile(windowsSignature, "c2lnbmF0dXJlLXdpbmRvd3M=\n", "utf8"),
   ]);
   await execute(process.execPath, [
-    script.pathname,
+    scriptPath,
     "--version", "0.2.0",
     "--notes-file", notes,
     "--pub-date", "2026-08-20T12:00:00Z",
@@ -56,7 +58,7 @@ test("rejects an updater manifest with an insecure download URL", async () => {
   await Promise.all([writeFile(notes, "notes", "utf8"), writeFile(signature, "c2ln", "utf8")]);
   await assert.rejects(
     execute(process.execPath, [
-      script.pathname,
+      scriptPath,
       "--version", "0.2.0",
       "--notes-file", notes,
       "--darwin-aarch64-url", "http://example.test/mac.tar.gz",
