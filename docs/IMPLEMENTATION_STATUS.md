@@ -304,8 +304,19 @@ Implemented:
   validation, portable storage paths and automatic rollback backup;
 - staged restore before backend/worker startup; authentication sessions and
   all license/device state stay outside the portable archive;
-- transfer request/claim controls in desktop settings and approval in the
-  Cloudflare owner panel;
+- transfer request/claim controls in desktop settings and on the first-run
+  screen of a replacement computer, without issuing a second license or local
+  password;
+- Cloudflare owner approval shows the selected client, old device and new
+  device, requires an explicit confirmation and explains that local data needs
+  a separate backup;
+- inactive or deleted licenses are rejected before a transfer can change any
+  device binding; a lost old computer does not block an owner-approved license
+  transfer;
+- an explicit backup regression test proves that archives contain no license
+  files and cannot replace the target computer's binding or lease;
+- the installed cross-platform acceptance procedure is documented in
+  `docs/PHASE9_ACCEPTANCE.md`;
 - passwordless desktop workspace can now create, list, validate and stage its
   own backups without receiving legacy local-administrator privileges;
 - Settings can download a validated archive and import an externally selected
@@ -318,7 +329,6 @@ Still required to complete M9:
 - confirm the installed Windows and macOS WebViews' save-location behaviour;
   add a Rust-native save dialog only if either platform bypasses the expected
   system download prompt;
-- complete broken-old-device wording and owner recovery flow;
 - end-to-end macOS → Windows and Windows → macOS restore/transfer checks;
 - verify that the old device cannot renew its lease and that restored data
   never carries license state.

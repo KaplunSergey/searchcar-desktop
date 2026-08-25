@@ -1069,6 +1069,16 @@ export async function approveAdminTransfer(
     ? null
     : normalizeCode(requireString(body, "transfer_code", { max: 40 }), "TR");
   const licenseId = requireString(body, "license_id", { min: 36, max: 36 });
+  const license = await env.LICENSE_DB.prepare(
+    `SELECT id, status, deleted_at
+       FROM licenses
+      WHERE id = ?`,
+  )
+    .bind(licenseId)
+    .first<{ id: string; status: string; deleted_at: string | null }>();
+  if (!license || license.deleted_at || license.status !== "ACTIVE") {
+    throw new ApiError(409, "LICENSE_NOT_ACTIVE", "The license is not active.");
+  }
   const transfer = await env.LICENSE_DB.prepare(
     `SELECT id, status, claim_token_hash, requested_public_key,
             requested_fingerprint_hash, requested_label, requested_app_version,

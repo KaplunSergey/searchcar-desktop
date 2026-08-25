@@ -130,6 +130,54 @@ def test_backup_round_trip_restores_database_and_storage(tmp_path: Path) -> None
     assert validate_backup(rollback_path).table_counts["projects"] == 2
 
 
+def test_backup_never_exports_or_replaces_license_state(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    database_path = source_root / "data" / "searchcar.sqlite3"
+    storage_root = source_root / "storage"
+    database_path.parent.mkdir(parents=True)
+    _seed(database_path, storage_root)
+    source_license = source_root / "license"
+    source_license.mkdir()
+    (source_license / "binding.json").write_text(
+        '{"license_id":"source-license","device_id":"source-device"}',
+        encoding="utf-8",
+    )
+    (source_license / "lease.json").write_text("source-secret-state", encoding="utf-8")
+    backup_path = tmp_path / "portable.searchcar-backup"
+
+    export_backup(database_path, storage_root, backup_path)
+    with zipfile.ZipFile(backup_path) as archive:
+        names = set(archive.namelist())
+    assert all(not name.startswith("license/") for name in names)
+    assert "binding.json" not in names
+    assert "lease.json" not in names
+
+    target_root = tmp_path / "target"
+    target_database = target_root / "data" / "searchcar.sqlite3"
+    target_storage = target_root / "storage"
+    target_license = target_root / "license"
+    target_database.parent.mkdir(parents=True)
+    target_license.mkdir()
+    target_binding = target_license / "binding.json"
+    target_lease = target_license / "lease.json"
+    target_binding.write_text(
+        '{"license_id":"target-license","device_id":"target-device"}',
+        encoding="utf-8",
+    )
+    target_lease.write_text("target-secret-state", encoding="utf-8")
+
+    restore_backup(
+        backup_path,
+        target_database,
+        target_storage,
+        target_root / "backups",
+    )
+
+    assert "target-license" in target_binding.read_text(encoding="utf-8")
+    assert "target-device" in target_binding.read_text(encoding="utf-8")
+    assert target_lease.read_text(encoding="utf-8") == "target-secret-state"
+
+
 def test_export_is_blocked_while_scan_is_active(tmp_path: Path) -> None:
     database_path = tmp_path / "data" / "searchcar.sqlite3"
     storage_root = tmp_path / "storage"

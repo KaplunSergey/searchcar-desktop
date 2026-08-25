@@ -90,3 +90,7 @@ class DesktopOnboardingActivateIn(DesktopLicenseRedeemIn):
 class DesktopLicenseTransferClaimIn(BaseModel):
     transfer_code: str = Field(min_length=10, max_length=40)
     claim_token: str = Field(min_length=32, max_length=64)
+
+
+class DesktopOnboardingTransferClaimIn(DesktopLicenseTransferClaimIn):
+    preferred_locale: Literal["ru", "uk"] = "ru"

@@ -14,21 +14,26 @@ from app.desktop_onboarding import create_desktop_workspace
 from app.main import (
     _require_desktop_data_access,
     activate_desktop_workspace,
+    claim_desktop_onboarding_transfer,
     desktop_onboarding_status,
     download_desktop_backup,
     import_desktop_backup,
+    request_desktop_onboarding_transfer,
 )
 from app.desktop_backup import export_backup, validate_backup
 from app.models import User
-from app.schemas import DesktopOnboardingActivateIn
+from app.schemas import (
+    DesktopOnboardingActivateIn,
+    DesktopOnboardingTransferClaimIn,
+)
 
 
-def _request() -> Request:
+def _request(path: str = "/api/desktop/onboarding/activate") -> Request:
     return Request(
         {
             "type": "http",
             "method": "POST",
-            "path": "/api/desktop/onboarding/activate",
+            "path": path,
             "headers": [(b"origin", b"http://localhost:3000")],
             "client": ("127.0.0.1", 1234),
             "scheme": "http",
@@ -73,6 +78,77 @@ def test_desktop_activation_creates_passwordless_workspace_and_session(
         assert "encar_session=" in cookies
         assert "encar_csrf=" in cookies
         assert desktop_onboarding_status(db) == {"required": False}
+
+
+def test_desktop_transfer_can_complete_before_local_workspace_exists(
+    tmp_path, monkeypatch
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setenv("SEARCHCAR_DESKTOP_DATA_DIR", str(tmp_path))
+    calls: list[str] = []
+    transfer = {
+        "transfer_code": "TR-ABCDE-FGHIJ-KLMNO-PQRST",
+        "claim_token": "x" * 32,
+        "expires_at": "2026-08-26T12:00:00Z",
+    }
+
+    def license_operation(action, operation):
+        calls.append(action)
+        if action == "desktop_onboarding_transfer_request":
+            return transfer
+        assert action == "desktop_onboarding_transfer_claim"
+        return {"status": "active"}
+
+    monkeypatch.setattr("app.main._desktop_license_operation", license_operation)
+    with Session(engine, expire_on_commit=False) as db:
+        requested = request_desktop_onboarding_transfer(
+            _request("/api/desktop/onboarding/transfer/request"),
+            db,
+        )
+        assert requested == transfer
+        assert desktop_onboarding_status(db) == {"required": True}
+
+        response = Response()
+        result = claim_desktop_onboarding_transfer(
+            DesktopOnboardingTransferClaimIn(
+                transfer_code=transfer["transfer_code"],
+                claim_token=transfer["claim_token"],
+                preferred_locale="ru",
+            ),
+            _request("/api/desktop/onboarding/transfer/claim"),
+            response,
+            db,
+        )
+
+        assert calls == [
+            "desktop_onboarding_transfer_request",
+            "desktop_onboarding_transfer_claim",
+        ]
+        assert result["user"]["passwordless_workspace"] is True
+        assert result["user"]["preferred_locale"] == "ru"
+        assert result["csrf_token"]
+        assert desktop_onboarding_status(db) == {"required": False}
+        cookies = "\n".join(response.headers.getlist("set-cookie"))
+        assert "encar_session=" in cookies
+        assert "encar_csrf=" in cookies
+
+
+def test_desktop_transfer_onboarding_rejects_existing_workspace(
+    tmp_path, monkeypatch
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setenv("SEARCHCAR_DESKTOP_DATA_DIR", str(tmp_path))
+    with Session(engine, expire_on_commit=False) as db:
+        create_desktop_workspace(db)
+        with pytest.raises(HTTPException) as denied:
+            request_desktop_onboarding_transfer(
+                _request("/api/desktop/onboarding/transfer/request"),
+                db,
+            )
+        assert denied.value.status_code == 409
+        assert denied.value.detail == "desktop_workspace_already_initialized"
 
 
 def test_only_admin_or_passwordless_workspace_can_manage_desktop_data(

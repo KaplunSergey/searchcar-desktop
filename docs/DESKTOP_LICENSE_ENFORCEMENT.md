@@ -98,21 +98,23 @@ its file-preview identity only for this pilot; a signed production release
 will use Keychain storage.
 
 `GET /api/desktop/license` exposes the non-secret entitlement decision to an
-authenticated desktop user. Administrator-only CSRF-protected endpoints start
-a trial, redeem an activation code, refresh an existing lease and create or
-claim a transfer from the destination device. A transfer request displays only
-the short owner code; its claim token stays in memory and is never written to
-the local license files or a backup. The owner approves the short code through
-the Phase 8 owner admin surface (the bootstrap admin API remains the pilot
-fallback).
+authenticated desktop user. CSRF-protected license controls redeem activation
+codes, refresh an existing lease and create or claim a transfer from the
+destination device. A fresh replacement computer has dedicated local-only
+onboarding endpoints for the same transfer request and claim before its
+passwordless workspace exists. A transfer request displays only the short
+owner code; its claim token stays in React memory and is never rendered,
+written to the local license files or included in a backup. The owner approves
+the short code through the Phase 8 owner admin surface after reviewing the old
+and new device labels.
 
 ## Remaining Phase 7 work
 
 1. Rebuild and manually validate the required pilot configuration with an
    active license, a fresh unlicensed data directory and a deliberately
    tampered lease.
-2. Complete the owner approval/recovery surface in Phase 8. Destination-device
-   request and claim controls are implemented locally.
+2. Validate the completed owner approval and lost-old-device recovery surface
+   against the deployed Worker and a clean replacement computer.
 3. Repeat lease verification in Rust before starting the sidecar. This native
    gate is implemented and covered by a Rust unit test.
 4. Validate Keychain, DPAPI, offline grace, copied state and fingerprint

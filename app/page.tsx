@@ -1013,7 +1013,9 @@ function AuthRoot() {
 
 function DesktopOnboardingScreen({ retry }: { retry: () => void }) {
   const [locale, setLocale] = useState<Locale>("ru");
+  const [mode, setMode] = useState<"activate" | "transfer">("activate");
   const [activationCode, setActivationCode] = useState("");
+  const [transferRequest, setTransferRequest] = useState<DesktopLicenseTransferRequest | null>(null);
   const activation = useMutation({
     mutationFn: () => request<AuthResponse>("/desktop/onboarding/activate", {
       method: "POST",
@@ -1027,16 +1029,45 @@ function DesktopOnboardingScreen({ retry }: { retry: () => void }) {
       retry();
     },
   });
+  const requestTransfer = useMutation({
+    mutationFn: () => request<DesktopLicenseTransferRequest>(
+      "/desktop/onboarding/transfer/request",
+      { method: "POST" },
+    ),
+    onSuccess: setTransferRequest,
+  });
+  const claimTransfer = useMutation({
+    mutationFn: () => {
+      if (!transferRequest) throw new Error("transfer_request_missing");
+      return request<AuthResponse>("/desktop/onboarding/transfer/claim", {
+        method: "POST",
+        body: JSON.stringify({
+          transfer_code: transferRequest.transfer_code,
+          claim_token: transferRequest.claim_token,
+          preferred_locale: locale,
+        }),
+      });
+    },
+    onSuccess: (result) => {
+      csrfToken = result.csrf_token;
+      retry();
+    },
+  });
   const submit = (event: FormEvent) => {
     event.preventDefault();
     activation.mutate();
   };
-  const error = activation.error instanceof ApiError && activation.error.code
-    ? activation.error.code
-    : "activation_failed";
+  const errorCode = (error: unknown, fallback: string) =>
+    error instanceof ApiError && error.code ? error.code : fallback;
+  const switchMode = (nextMode: "activate" | "transfer") => {
+    setMode(nextMode);
+    activation.reset();
+    requestTransfer.reset();
+    claimTransfer.reset();
+  };
   return (
     <div className="auth-page">
-      <form className="auth-card" onSubmit={submit}>
+      <div className="auth-card onboarding-card">
         <div className="auth-heading">
           <span className="auth-logo">S</span>
           <div>
@@ -1048,35 +1079,126 @@ function DesktopOnboardingScreen({ retry }: { retry: () => void }) {
             <button type="button" className={locale === "uk" ? "on" : ""} onClick={() => setLocale("uk")}>UA</button>
           </div>
         </div>
-        <p className="onboarding-help">
-          {locale === "uk"
-            ? "Введіть одноразовий код, який надав власник SearchCar."
-            : "Введите одноразовый код, который выдал владелец SearchCar."}
-        </p>
-        <label>
-          {locale === "uk" ? "Код підключення" : "Код подключения"}
-          <input
-            autoComplete="one-time-code"
-            autoFocus
-            required
-            value={activationCode}
-            placeholder="SC-XXXXX-XXXXX-XXXXX-XXXXX"
-            onChange={(event) => setActivationCode(event.target.value)}
-          />
-        </label>
-        {activation.isError ? (
-          <p className="auth-error">
-            {locale === "uk"
-              ? `Не вдалося підключити робочий простір (${error}). Перевірте код або зверніться до власника.`
-              : `Не удалось подключить рабочее пространство (${error}). Проверьте код или обратитесь к владельцу.`}
-          </p>
-        ) : null}
-        <Button kind="primary" type="submit" disabled={activation.isPending || activationCode.trim().length < 10}>
-          {activation.isPending
-            ? locale === "uk" ? "Підключення…" : "Подключение…"
-            : locale === "uk" ? "Підключити" : "Подключить"}
-        </Button>
-      </form>
+        <div className="onboarding-modes" role="tablist" aria-label={locale === "uk" ? "Спосіб підключення" : "Способ подключения"}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === "activate"}
+            className={mode === "activate" ? "on" : ""}
+            onClick={() => switchMode("activate")}
+          >
+            {locale === "uk" ? "Новий код" : "Новый код"}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === "transfer"}
+            className={mode === "transfer" ? "on" : ""}
+            onClick={() => switchMode("transfer")}
+          >
+            {locale === "uk" ? "Перенесення ліцензії" : "Перенос лицензии"}
+          </button>
+        </div>
+        {mode === "activate" ? (
+          <form className="onboarding-form" onSubmit={submit}>
+            <p className="onboarding-help">
+              {locale === "uk"
+                ? "Введіть одноразовий код, який надав власник SearchCar."
+                : "Введите одноразовый код, который выдал владелец SearchCar."}
+            </p>
+            <label>
+              {locale === "uk" ? "Код підключення" : "Код подключения"}
+              <input
+                autoComplete="one-time-code"
+                autoFocus
+                required
+                value={activationCode}
+                placeholder="SC-XXXXX-XXXXX-XXXXX-XXXXX"
+                onChange={(event) => setActivationCode(event.target.value)}
+              />
+            </label>
+            {activation.isError ? (
+              <p className="auth-error">
+                {locale === "uk"
+                  ? `Не вдалося підключити робочий простір (${errorCode(activation.error, "activation_failed")}). Перевірте код або зверніться до власника.`
+                  : `Не удалось подключить рабочее пространство (${errorCode(activation.error, "activation_failed")}). Проверьте код или обратитесь к владельцу.`}
+              </p>
+            ) : null}
+            <Button kind="primary" type="submit" disabled={activation.isPending || activationCode.trim().length < 10}>
+              {activation.isPending
+                ? locale === "uk" ? "Підключення…" : "Подключение…"
+                : locale === "uk" ? "Підключити" : "Подключить"}
+            </Button>
+          </form>
+        ) : (
+          <div className="onboarding-transfer">
+            <p className="onboarding-help">
+              {locale === "uk"
+                ? "Використовуйте перенесення, якщо ліцензія вже працювала на іншому комп’ютері. Створіть запит і передайте показаний код власнику SearchCar."
+                : "Используйте перенос, если лицензия уже работала на другом компьютере. Создайте запрос и передайте показанный код владельцу SearchCar."}
+            </p>
+            <p className="onboarding-warning">
+              {locale === "uk"
+                ? "Переноситься лише ліцензія. Проєкти та історія відновлюються окремо з резервної копії старого комп’ютера."
+                : "Переносится только лицензия. Проекты и история восстанавливаются отдельно из резервной копии старого компьютера."}
+            </p>
+            {!transferRequest ? (
+              <Button
+                kind="primary"
+                disabled={requestTransfer.isPending}
+                onClick={() => requestTransfer.mutate()}
+              >
+                {requestTransfer.isPending
+                  ? locale === "uk" ? "Створення запиту…" : "Создание запроса…"
+                  : locale === "uk" ? "Створити запит перенесення" : "Создать запрос переноса"}
+              </Button>
+            ) : (
+              <div className="onboarding-transfer-request">
+                <span>{locale === "uk" ? "Код для власника" : "Код для владельца"}</span>
+                <code>{transferRequest.transfer_code}</code>
+                <small>
+                  {locale === "uk" ? "Діє до" : "Действует до"}: {formatDate(transferRequest.expires_at, locale)}
+                </small>
+                <p>
+                  {locale === "uk"
+                    ? "Після підтвердження в адмінці поверніться сюди та завершіть перенесення."
+                    : "После подтверждения в админке вернитесь сюда и завершите перенос."}
+                </p>
+                <div>
+                  <Button
+                    kind="primary"
+                    disabled={claimTransfer.isPending}
+                    onClick={() => claimTransfer.mutate()}
+                  >
+                    {claimTransfer.isPending
+                      ? locale === "uk" ? "Перевірка…" : "Проверка…"
+                      : locale === "uk" ? "Завершити перенесення" : "Завершить перенос"}
+                  </Button>
+                  <Button
+                    disabled={claimTransfer.isPending}
+                    onClick={() => {
+                      setTransferRequest(null);
+                      requestTransfer.reset();
+                      claimTransfer.reset();
+                    }}
+                  >
+                    {locale === "uk" ? "Створити новий запит" : "Создать новый запрос"}
+                  </Button>
+                </div>
+              </div>
+            )}
+            {requestTransfer.isError || claimTransfer.isError ? (
+              <p className="auth-error">
+                {locale === "uk" ? "Не вдалося виконати перенесення" : "Не удалось выполнить перенос"}
+                {` (${errorCode(claimTransfer.error || requestTransfer.error, "transfer_failed")}). `}
+                {locale === "uk"
+                  ? "Перевірте, чи підтвердив власник запит, або створіть новий."
+                  : "Проверьте, подтвердил ли владелец запрос, или создайте новый."}
+              </p>
+            ) : null}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

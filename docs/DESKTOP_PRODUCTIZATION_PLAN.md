@@ -933,6 +933,7 @@ deploy, installer-проверки на macOS/Windows и миграционны�
 - UI create/download/import/restore with validation before acceptance;
 - transfer request UI;
 - admin approval flow;
+- first-run transfer on a replacement computer before a local workspace exists;
 - restore на новой OS;
 - автоматическое отключение старой binding;
 - event/history/activation count;

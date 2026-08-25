@@ -80,6 +80,7 @@ from .schemas import (
     DesktopMigrationIn,
     DesktopLicenseRedeemIn,
     DesktopOnboardingActivateIn,
+    DesktopOnboardingTransferClaimIn,
     DesktopLicenseTransferClaimIn,
     DesktopLicenseTrialIn,
     ExternalUrlIn,
@@ -2161,33 +2162,21 @@ def desktop_onboarding_status(db: Session = Depends(get_db)) -> dict:
     return {"required": not has_local_users(db)}
 
 
-@app.post("/api/desktop/onboarding/activate")
-def activate_desktop_workspace(
-    body: DesktopOnboardingActivateIn,
+def _complete_desktop_onboarding(
+    *,
+    preferred_locale: str,
     request: Request,
     response: Response,
-    db: Session = Depends(get_db),
+    db: Session,
 ) -> dict:
-    """Redeem an owner-issued code and create one non-interactive workspace."""
+    """Create the local workspace only after remote licensing succeeds."""
 
-    verify_request_origin(request)
-    desktop_data_root()
-    from .desktop_onboarding import create_desktop_workspace, has_local_users
+    from .desktop_onboarding import create_desktop_workspace
 
-    if has_local_users(db):
-        raise HTTPException(409, "desktop_workspace_already_initialized")
-
-    # The Worker has semantic replay protection for the same device.  Thus a
-    # local SQLite failure after redeeming can safely be retried with the same
-    # code instead of consuming the customer license.
-    _desktop_license_operation(
-        "desktop_onboarding_redeem",
-        lambda client: client.redeem(body.activation_code),
-    )
     try:
         user = create_desktop_workspace(
             db,
-            preferred_locale=body.preferred_locale,
+            preferred_locale=preferred_locale,
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -2207,6 +2196,83 @@ def activate_desktop_workspace(
     )
     response.headers["Cache-Control"] = "no-store"
     return {"user": user_out(user, db), "csrf_token": csrf_token}
+
+
+@app.post("/api/desktop/onboarding/activate")
+def activate_desktop_workspace(
+    body: DesktopOnboardingActivateIn,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Redeem an owner-issued code and create one non-interactive workspace."""
+
+    verify_request_origin(request)
+    desktop_data_root()
+    from .desktop_onboarding import has_local_users
+
+    if has_local_users(db):
+        raise HTTPException(409, "desktop_workspace_already_initialized")
+
+    # The Worker has semantic replay protection for the same device.  Thus a
+    # local SQLite failure after redeeming can safely be retried with the same
+    # code instead of consuming the customer license.
+    _desktop_license_operation(
+        "desktop_onboarding_redeem",
+        lambda client: client.redeem(body.activation_code),
+    )
+    return _complete_desktop_onboarding(
+        preferred_locale=body.preferred_locale,
+        request=request,
+        response=response,
+        db=db,
+    )
+
+
+@app.post("/api/desktop/onboarding/transfer/request")
+def request_desktop_onboarding_transfer(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create a destination-device transfer before a local user exists."""
+
+    verify_request_origin(request)
+    desktop_data_root()
+    from .desktop_onboarding import has_local_users
+
+    if has_local_users(db):
+        raise HTTPException(409, "desktop_workspace_already_initialized")
+    return _desktop_license_operation(
+        "desktop_onboarding_transfer_request",
+        lambda client: client.request_transfer(),
+    )
+
+
+@app.post("/api/desktop/onboarding/transfer/claim")
+def claim_desktop_onboarding_transfer(
+    body: DesktopOnboardingTransferClaimIn,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Claim an approved transfer and create the destination workspace."""
+
+    verify_request_origin(request)
+    desktop_data_root()
+    from .desktop_onboarding import has_local_users
+
+    if has_local_users(db):
+        raise HTTPException(409, "desktop_workspace_already_initialized")
+    _desktop_license_operation(
+        "desktop_onboarding_transfer_claim",
+        lambda client: client.claim_transfer(body.transfer_code, body.claim_token),
+    )
+    return _complete_desktop_onboarding(
+        preferred_locale=body.preferred_locale,
+        request=request,
+        response=response,
+        db=db,
+    )
 
 
 @app.get("/api/desktop/license")

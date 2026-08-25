@@ -849,3 +849,45 @@ test("approved transfer atomically moves the binding and invalidates old checks"
   assert.equal(binding.active_count, 1);
   assert.equal(binding.activation_count, 2);
 });
+
+test("transfer approval rejects an inactive license without moving its device", async (context) => {
+  if (!localRuntimeAvailable) return context.skip("loopback sockets are blocked by this sandbox");
+  const oldDevice = await createDevice("inactive-transfer-old");
+  const trial = await api(
+    "/v1/trials/activate",
+    await signedBody(oldDevice, { subject_hash: "8".repeat(64) }),
+  );
+  assert.equal(trial.response.status, 200);
+  const newDevice = await createDevice("inactive-transfer-new");
+  const requested = await api(
+    "/v1/transfers/request",
+    await signedBody(newDevice),
+  );
+  assert.equal(requested.response.status, 200);
+  await database
+    .prepare("UPDATE licenses SET status = 'REVOKED' WHERE id = ?")
+    .bind(trial.json.data.license_id)
+    .run();
+
+  const rejected = await admin("/v1/admin/transfers/approve", {
+    transfer_code: requested.json.data.transfer_code,
+    license_id: trial.json.data.license_id,
+  });
+  assert.equal(rejected.response.status, 409);
+  assert.equal(rejected.json.error.code, "LICENSE_NOT_ACTIVE");
+
+  const binding = await database
+    .prepare(
+      `SELECT COUNT(*) AS active_count
+         FROM devices
+        WHERE license_id = ? AND is_active = 1`,
+    )
+    .bind(trial.json.data.license_id)
+    .first();
+  assert.equal(binding.active_count, 1);
+  const transfer = await database
+    .prepare("SELECT status FROM device_transfers WHERE public_code_hint = ?")
+    .bind(requested.json.data.transfer_code.slice(-5))
+    .first();
+  assert.equal(transfer.status, "PENDING");
+});

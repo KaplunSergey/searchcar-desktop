@@ -239,13 +239,15 @@ test("desktop exit requires confirmation and preserves graceful scan cancellatio
   assert.match(queue,/cancellation_reason.*APPLICATION_SHUTDOWN/s);
 });
 test("desktop licensing keeps device secrets outside portable data",async()=>{
-  const [client,license,page,onboarding,config,workerConfig]=await Promise.all([
+  const [client,license,page,onboarding,config,workerConfig,ownerUi,service]=await Promise.all([
     readFile(new URL("backend/app/desktop_license_client.py",root),"utf8"),
     readFile(new URL("backend/app/desktop_license.py",root),"utf8"),
     readFile(new URL("app/page.tsx",root),"utf8"),
     readFile(new URL("backend/app/desktop_onboarding.py",root),"utf8"),
     readFile(new URL("desktop/license-service.json",root),"utf8"),
     readFile(new URL("license-service/wrangler.jsonc",root),"utf8"),
+    readFile(new URL("license-service/src/owner_ui.ts",root),"utf8"),
+    readFile(new URL("license-service/src/service.ts",root),"utf8"),
   ]);
   assert.match(client,/class MacOSKeychainStore/);
   assert.match(client,/class WindowsDpapiStore/);
@@ -253,6 +255,9 @@ test("desktop licensing keeps device secrets outside portable data",async()=>{
   assert.match(client,/run_periodic_license_sync/);
   assert.match(license,/SEARCHCAR-LICENSE-LEASE-V1/);
   assert.match(page,/desktop\/onboarding\/activate/);
+  assert.match(page,/desktop\/onboarding\/transfer\/request/);
+  assert.match(page,/desktop\/onboarding\/transfer\/claim/);
+  assert.match(page,/Переносится только лицензия/);
   assert.match(page,/function DesktopOnboardingScreen/);
   assert.match(page,/canManageDesktopData=\{/);
   assert.match(page,/currentUser\.passwordless_workspace === true/);
@@ -277,6 +282,10 @@ test("desktop licensing keeps device secrets outside portable data",async()=>{
   assert.match(client,/LICENSE_DELETED/);
   assert.match(client,/_clear_local_license_state/);
   assert.match(page,/DesktopOnboardingScreen/);
+  assert.match(ownerUi,/renderTransferSummary/);
+  assert.match(ownerUi,/Локальные проекты и история не переносятся/);
+  assert.match(ownerUi,/window\.confirm\('Подтвердить перенос лицензии/);
+  assert.match(service,/LICENSE_NOT_ACTIVE/);
   assert.match(page,/const localAdminEnabled = currentUser\.role === "ADMIN"\s*&& \(desktopRuntimeQuery\.isError \|\| desktopRuntimeQuery\.data\?\.desktop === false\)/);
   assert.match(page,/\{localAdminEnabled \? \(/);
   const licenseConfig=JSON.parse(config);

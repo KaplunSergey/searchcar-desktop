@@ -19,6 +19,7 @@ const OWNER_APP = String.raw`<!doctype html>
     button.secondary { color:#29405f; background:#fff; border:1px solid #c9d5e7; } button.danger { background:#b42335; } button:disabled { opacity:.55; cursor:wait; }
     .row { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }.actions { display:flex; gap:10px; align-items:end; flex-wrap:wrap; }
     .message { margin:14px 0 0; padding:12px; border-radius:9px; background:#eef5ff; color:#29405f; }.message.error { background:#fff0f1; color:#a12d3d; }.muted { color:#7083a2; font-size:14px; line-height:1.55; }.source-options { display:grid; gap:8px; padding:10px; border:1px solid #c9d5e7; border-radius:9px; }.source-option { display:flex; align-items:center; gap:8px; color:#29405f; font-size:14px; font-weight:600; }.source-option input { width:auto; min-height:auto; }
+    .transfer-summary { min-height:58px; padding:11px 12px; border:1px solid #d7e0ee; border-radius:9px; background:#f7f9fc; }.warning { margin:0; padding:10px 12px; border-radius:9px; background:#fff7ed; color:#935d14; font-size:12px; line-height:1.5; }
     table { width:100%; border-collapse:collapse; font-size:13px; } th,td { text-align:left; padding:10px 8px; border-bottom:1px solid #e4ebf5; vertical-align:top; } th { color:#657896; font-size:12px; text-transform:uppercase; } .table-wrap { overflow-x:auto; }
     code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; } .pill { padding:4px 8px; border-radius:99px; background:#edf4ff; color:#3569d4; font-size:12px; font-weight:700; }
     @media (max-width:760px) { .grid { grid-template-columns:1fr; } main { padding:18px 14px 40px; } header { padding:18px 14px; } }
@@ -53,7 +54,7 @@ const OWNER_APP = String.raw`<!doctype html>
         <section class="card"><h3>Новый клиент</h3><form id="customer-form" class="stack"><label>Имя или компания<input name="display_name" maxlength="120" required></label><label>Email или контакт (необязательно)<input name="contact" maxlength="240"></label><button>Создать клиента</button></form></section>
         <section class="card"><h3>Новая лицензия</h3><form id="license-form" class="stack"><label>Клиент<select name="customer_id" id="customer-select" required></select></label><button>Создать подписку</button></form></section>
         <section class="card"><h3>Код продления</h3><form id="code-form" class="stack"><label>Лицензия<select name="license_id" id="license-select" required></select></label><label>Срок<select name="duration"><option value="P1M">1 месяц</option><option value="P3M">3 месяца</option><option value="P6M">6 месяцев</option><option value="P12M">12 месяцев</option><option value="PERPETUAL">Бессрочно</option></select></label><button>Сгенерировать код</button></form><hr style="border:0;border-top:1px solid #e4ebf5;margin:18px 0"><form id="code-diagnostic-form" class="stack"><label>Проверка выданного кода<input name="activation_code" placeholder="SC-XXXXX-XXXXX-XXXXX-XXXXX" autocomplete="off" required></label><button class="secondary">Проверить в D1</button></form></section>
-        <section class="card"><h3>Перенос устройства</h3><form id="transfer-form" class="stack"><label>Запрос переноса<select name="transfer_code" id="transfer-select" required></select></label><label>Лицензия<select name="license_id" id="transfer-license-select" required></select></label><button>Одобрить перенос</button></form><p class="muted">После одобрения пользователь завершит перенос в своём приложении.</p></section>
+        <section class="card"><h3>Перенос устройства</h3><form id="transfer-form" class="stack"><label>Запрос с нового компьютера<select name="transfer_code" id="transfer-select" required></select></label><label>Лицензия клиента<select name="license_id" id="transfer-license-select" required></select></label><div id="transfer-summary" class="transfer-summary muted">Выберите запрос и лицензию, чтобы проверить перенос.</div><p class="warning">Перенос отключит старое устройство от новых проверок лицензии. Проекты и история не переносятся через облако — для них нужна резервная копия. Если старый компьютер потерян, лицензию всё равно можно перенести.</p><button>Одобрить перенос</button></form><p class="muted">После одобрения пользователь должен нажать «Завершить перенос» на новом компьютере.</p></section>
         <section class="card"><h3>Доступ к источникам</h3><form id="source-form" class="stack"><label>Лицензия<select name="license_id" id="source-license-select" required></select></label><div id="source-options" class="source-options" aria-live="polite"></div><button>Сохранить доступ</button></form><p class="muted">Изменения применятся после нажатия пользователем «Проверить сейчас» в приложении, либо при следующей проверке лицензии.</p></section>
         <section class="card"><h3>Удаление лицензии</h3><form id="delete-license-form" class="stack"><label>Лицензия<select name="license_id" id="delete-license-select" required></select></label><button class="danger">Удалить лицензию</button></form><p class="muted">Не используйте это для отключения площадки. Удаление необратимо отзывает лицензию и все её коды. После проверки в приложении пользователю потребуется новая лицензия.</p></section>
       </div>
@@ -87,11 +88,12 @@ const OWNER_APP = String.raw`<!doctype html>
       const activeLicenses=data.licenses.filter(x=>!x.deleted_at && x.status==='ACTIVE');
       const existingLicenses=data.licenses.filter(x=>!x.deleted_at);
       fill('license-select', activeLicenses, x => x.customer_name + ' · ' + x.kind + ' · ' + x.id.slice(0,8));
-      fill('transfer-license-select', activeLicenses, x => x.customer_name + ' · ' + x.kind + ' · ' + x.id.slice(0,8));
+      fill('transfer-license-select', activeLicenses, x => x.customer_name + ' · ' + x.kind + ' · ' + (x.active_device_label || x.active_device_id || 'не привязана') + ' · ' + x.id.slice(0,8));
       fill('transfer-select', data.transfers.filter(x=>x.status==='PENDING'), x => x.public_code_hint + ' · ' + (x.customer_name || 'лицензия не назначена'));
       fill('source-license-select', existingLicenses, x => x.customer_name + ' · ' + x.kind + ' · ' + x.id.slice(0,8));
       fill('delete-license-select', existingLicenses, x => x.customer_name + ' · ' + x.kind + ' · ' + x.id.slice(0,8));
       renderSourceOptions();
+      renderTransferSummary();
       const sourceNames = new Map(data.sources.map(x => [x.source_key, x.display_name]));
       const licenseSources = new Map(data.licenses.map(x => [x.id, []]));
       data.license_sources.forEach(x => { if (licenseSources.has(x.license_id)) licenseSources.get(x.license_id).push(sourceNames.get(x.source_key) || x.source_key); });
@@ -113,6 +115,16 @@ const OWNER_APP = String.raw`<!doctype html>
       if (!available.length) { root.textContent='Нет доступных источников.'; return; }
       available.forEach(source => { const label=document.createElement('label'), input=document.createElement('input'), text=document.createElement('span'); label.className='source-option'; input.type='checkbox'; input.name='source_key'; input.value=source.source_key; input.checked=granted.has(source.source_key); text.textContent=source.display_name+' ('+source.source_key+')'; label.append(input,text); root.append(label); });
     };
+    const renderTransferSummary = () => {
+      const root=$('transfer-summary'), data=state.data;
+      if (!data) return;
+      const transfer=data.transfers.find(x=>x.id===$('transfer-select').value);
+      const license=data.licenses.find(x=>x.id===$('transfer-license-select').value);
+      if (!transfer || !license) { root.textContent='Выберите запрос и лицензию, чтобы проверить перенос.'; return; }
+      const oldDevice=license.active_device_label || license.active_device_id || 'неизвестное устройство';
+      const newDevice=transfer.requested_label || 'новый компьютер';
+      root.textContent='Клиент: '+license.customer_name+'. Лицензия '+license.id.slice(0,8)+' будет перенесена с «'+oldDevice+'» на «'+newDevice+'». Срок лицензии не изменится.';
+    };
     const load = async () => { const data=await request('/v1/owner/dashboard'); render(data); };
     const showDashboard = async login => { $('loading').classList.add('hidden'); $('setup').classList.add('hidden'); $('login').classList.add('hidden'); $('dashboard').classList.remove('hidden'); $('logout').classList.remove('hidden'); $('owner-login').textContent='Владелец: '+login; try { await load(); } catch(e) { message('dashboard-message','Не удалось загрузить данные: '+e.message,true); } };
     const init = async () => {
@@ -128,8 +140,20 @@ const OWNER_APP = String.raw`<!doctype html>
     form('code-diagnostic-form', async f => { const data=await mutation('/v1/owner/activation-codes/diagnose',{activation_code:f.get('activation_code')}); const labels={STABLE_V2:'Код найден: текущий стабильный формат.',LEGACY_CURRENT_PEPPER:'Код найден: старый формат с текущим CODE_PEPPER.',NOT_FOUND:'Точный код не найден.'}; const states={AVAILABLE:' Код доступен для активации.',USED:' Код уже использован.',EXPIRED:' Срок кода истёк.',LICENSE_NOT_ACTIVE:' Лицензия кода неактивна.',NOT_FOUND:''}; const hint=data.hint_matches.length ? ' Записей с такой подсказкой в D1: '+data.hint_matches.length+'.' : ' Записей с такой подсказкой в D1 нет.'; return {notice:labels[data.matched_by]+states[data.availability]+hint}; }, 'dashboard-message');
     form('source-form', f => mutation('/v1/owner/license-sources',{license_id:f.get('license_id'),source_keys:f.getAll('source_key')}), 'dashboard-message');
     form('delete-license-form', f => { const id=String(f.get('license_id') || ''); const license=state.data.licenses.find(x=>x.id===id); const label=license ? license.customer_name+' · '+id.slice(0,8) : id; if (!window.confirm('Удалить лицензию '+label+'? Это действие нельзя отменить.')) return {notice:'Удаление отменено.'}; return mutation('/v1/owner/licenses/delete',{license_id:id,confirmation:'DELETE'}).then(()=>({notice:'Лицензия удалена. После следующей проверки приложение очистит локальную лицензию.'})); }, 'dashboard-message');
-    form('transfer-form', f => mutation('/v1/owner/transfers/approve',{transfer_id:f.get('transfer_code'),license_id:f.get('license_id')}), 'dashboard-message');
+    form('transfer-form', async f => {
+      const transfer=state.data.transfers.find(x=>x.id===f.get('transfer_code'));
+      const license=state.data.licenses.find(x=>x.id===f.get('license_id'));
+      if (!transfer || !license) throw new Error('TRANSFER_SELECTION_REQUIRED');
+      const oldDevice=license.active_device_label || license.active_device_id || 'неизвестное устройство';
+      const newDevice=transfer.requested_label || 'новый компьютер';
+      const confirmed=window.confirm('Подтвердить перенос лицензии?\n\nКлиент: '+license.customer_name+'\nСтарое устройство: '+oldDevice+'\nНовое устройство: '+newDevice+'\n\nСрок лицензии не изменится. Локальные проекты и история не переносятся. Старое устройство потеряет новые проверки лицензии и сможет работать только до окончания уже сохранённого автономного допуска.');
+      if (!confirmed) return {notice:'Перенос отменён.'};
+      await mutation('/v1/owner/transfers/approve',{transfer_id:transfer.id,license_id:license.id});
+      return {notice:'Перенос одобрен. Попросите пользователя нажать «Завершить перенос» на новом компьютере.'};
+    }, 'dashboard-message');
     $('source-license-select').addEventListener('change', renderSourceOptions);
+    $('transfer-select').addEventListener('change', renderTransferSummary);
+    $('transfer-license-select').addEventListener('change', renderTransferSummary);
     $('refresh').addEventListener('click', () => load().catch(e=>message('dashboard-message','Ошибка: '+e.message,true)));
     $('logout').addEventListener('click', async () => { try { await request('/v1/owner/logout',{method:'POST'}); location.reload(); } catch(e) { message('dashboard-message','Ошибка выхода: '+e.message,true); } });
     init().catch(e => { $('loading').textContent='Сервис недоступен: '+e.message; });
