@@ -40,7 +40,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgyOTNGRDE0OTIyMDBCMgpSV1N5QUNKSjBUOHBDQ25YRlhld0VXY1ExVGk5K3gyMlZURURGaGhKRk4vbnpPVktMWnE1b0szdAo=",
       "endpoints": [
-        "https://github.com/KaplunSergey/searchcar-desktop/releases/latest/download/latest.json"
+        "https://github.com/KaplunSergey/searchcar-desktop-releases/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

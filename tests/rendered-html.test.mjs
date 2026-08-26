@@ -139,20 +139,21 @@ test("updater key generation keeps the private key outside Git with strict permi
   assert.match(runbook, /independent from the Cloudflare license signing key/i);
 });
 test("desktop updater uses the checked public key and signed CI artifacts", async () => {
-  const [tauriConfig, updaterPublicKey, shell, runtime, macWorkflow, windowsWorkflow] = await Promise.all([
+  const [tauriConfig, updaterPublicKey, shell, runtime, macWorkflow, windowsWorkflow, publishWorkflow] = await Promise.all([
     "desktop/src-tauri/tauri.conf.json",
     "desktop/updater-public-key.txt",
     "desktop/src-tauri/src/lib.rs",
     "backend/app/desktop_runtime.py",
     ".github/workflows/macos-desktop.yml",
     ".github/workflows/windows-desktop.yml",
+    ".github/workflows/publish-desktop-release.yml",
   ].map((path) => readFile(new URL(path, root), "utf8")));
   const tauri = JSON.parse(tauriConfig);
   const publicKey = updaterPublicKey.trim();
   assert.equal(tauri.bundle.createUpdaterArtifacts, true);
   assert.equal(tauri.plugins.updater.pubkey, publicKey);
   assert.deepEqual(tauri.plugins.updater.endpoints, [
-    "https://github.com/KaplunSergey/searchcar-desktop/releases/latest/download/latest.json",
+    "https://github.com/KaplunSergey/searchcar-desktop-releases/releases/latest/download/latest.json",
   ]);
   assert.equal(tauri.plugins.updater.windows.installMode, "passive");
   assert.match(publicKey, /^[A-Za-z0-9+/=]+$/u);
@@ -162,16 +163,34 @@ test("desktop updater uses the checked public key and signed CI artifacts", asyn
   assert.match(runtime, /class DesktopUpdateCheckRelay/);
   assert.match(runtime, /"\/desktop\/update-check\/consume"/);
   assert.match(shell, /UPDATE_CHECK_INTERVAL/);
-  assert.match(shell, /update\.download/);
+  assert.match(shell, /\.download\(/);
+  assert.match(shell, /prepare_update_install/);
+  assert.match(shell, /set_update_status/);
+  assert.match(shell, /"downloading"/);
+  assert.match(shell, /for attempt in 0\.\.2/);
+  assert.match(shell, /\/desktop\/update\/prepare/);
+  assert.match(shell, /UpdatePreparation::ActiveScan/);
+  assert.match(runtime, /def prepare_desktop_update\(/);
+  assert.match(runtime, /pre-update-/);
+  assert.match(runtime, /\/desktop\/update\/abort/);
+  assert.match(runtime, /class DesktopUpdateStateRelay/);
+  assert.match(runtime, /\/desktop\/update\/status/);
   assert.match(shell, /stop_sidecar\(&install_handle\)/);
   assert.match(shell, /allow_programmatic_exit\(&install_handle\)/);
   assert.match(macWorkflow, /TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/);
   assert.match(macWorkflow, /pnpm exec tauri signer sign "\$updater"/);
   assert.match(macWorkflow, /test -s "\$updater\.sig"/);
+  assert.match(macWorkflow, /cd work\/macos-artifact/);
   assert.match(windowsWorkflow, /TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/);
   assert.match(windowsWorkflow, /updater_signed = \$true/);
   assert.match(windowsWorkflow, /SearchCar-Desktop-Windows-x64-setup\.exe/);
   assert.match(windowsWorkflow, /\$artifactSignature = "\$artifactInstaller\.sig"/);
+  assert.match(publishWorkflow, /workflow_dispatch:/);
+  assert.match(publishWorkflow, /RELEASES_REPO_TOKEN/);
+  assert.match(publishWorkflow, /actions\/download-artifact@v4/);
+  assert.match(publishWorkflow, /generate_tauri_updater_manifest\.mjs/);
+  assert.match(publishWorkflow, /--draft=false/);
+  assert.match(publishWorkflow, /releases\/latest\/download\/latest\.json/);
 });
 test("local desktop launchers keep macOS and Windows builds reproducible", async () => {
   const [macLauncher, windowsLauncher, windowsBuild, windowsSmoke, sidecarBuild, buildGuide, rustMain, rustShell, startupPage] = await Promise.all([

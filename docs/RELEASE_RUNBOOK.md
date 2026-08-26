@@ -4,7 +4,8 @@ This is the operational checklist for an owner or future coding agent. Follow
 the steps in order. The current process produces **pilot artifacts**: macOS
 uses an ad-hoc OS signature and Windows uses an OS-unsigned NSIS installer.
 Both workflows additionally create updater artifacts protected by the separate
-Tauri updater signature. GitHub Releases are still created manually.
+Tauri updater signature. A third manual workflow publishes only verified
+artifacts to a public releases-only repository; product source remains private.
 
 ## Safety rules
 
@@ -124,6 +125,24 @@ The `.pub` file is not secret. Its checked copy is
 the same value. Do not replace it with a placeholder or with the Cloudflare
 license public key.
 
+## Public releases-only repository setup (one time)
+
+Create a public GitHub repository named
+`KaplunSergey/searchcar-desktop-releases`. It contains only installers,
+updater signatures, release notes and `latest.json`; do not copy the product
+source into it. Initialize it with a README so it has a default branch.
+
+Create a fine-grained personal access token restricted to that repository with
+**Contents: Read and write**. In the private source repository open
+**Settings → Secrets and variables → Actions** and save the token as
+`RELEASES_REPO_TOKEN`. Never paste this token into a workflow input or log.
+
+Installed applications use the anonymous endpoint:
+
+```text
+https://github.com/KaplunSergey/searchcar-desktop-releases/releases/latest/download/latest.json
+```
+
 ## 3. Build the installers in GitHub Actions
 
 Open **Actions** in the GitHub repository and start both workflows from the
@@ -182,9 +201,18 @@ Because pilot artifacts are not commercially signed/notarized, macOS Gatekeeper
 and Windows SmartScreen may show warnings. Do not advise customers to disable
 system security globally. Commercial signing is a later phase.
 
-After both clean-machine checks pass, create a GitHub Release manually from
-tag `vX.Y.Z`, attach the verified artifacts and checksums, and write concise
-release notes.
+After both clean-machine checks pass, copy each run ID from the number at the
+end of its URL (`.../actions/runs/123456789`). Open
+**Actions → Publish desktop release → Run workflow** and enter the version
+without `v`, both successful run IDs and concise customer-facing release
+notes.
+
+The workflow downloads those exact Actions artifacts, verifies checksums and
+requires both updater signature files, then binds their contents into the
+manifest and uploads everything to a draft release. The installed Tauri client
+performs the cryptographic signature verification. Only after all assets and
+`latest.json` exist does the workflow publish the release as `Latest`. A failed
+publication therefore leaves installed clients on the previous release.
 
 ### Publish the updater manifest
 
@@ -195,28 +223,25 @@ sidebar version. A native dialog appears when an update is found. Never publish
 a manifest until both platform artifacts and signatures are from successful
 workflows.
 
-Once that later setup is complete, generate `latest.json` only after both
-signed updater bundles and their `.sig` files have been uploaded to the GitHub
-Release:
+The normal owner path is the publication workflow above. For offline recovery,
+generate `latest.json` manually only after both signed updater bundles and
+their `.sig` files are available:
 
 ```bash
 pnpm release:updater-manifest -- \
   --version X.Y.Z \
   --notes-file release-notes.md \
-  --darwin-aarch64-url "https://github.com/KaplunSergey/searchcar-desktop/releases/download/vX.Y.Z/SearchCar-Desktop-macOS-arm64.app.tar.gz" \
+  --darwin-aarch64-url "https://github.com/KaplunSergey/searchcar-desktop-releases/releases/download/vX.Y.Z/SearchCar-Desktop-macOS-arm64.app.tar.gz" \
   --darwin-aarch64-signature-file SearchCar-Desktop-macOS-arm64.app.tar.gz.sig \
-  --windows-x86_64-url "https://github.com/KaplunSergey/searchcar-desktop/releases/download/vX.Y.Z/SearchCar-Desktop-Windows-x64-setup.exe" \
+  --windows-x86_64-url "https://github.com/KaplunSergey/searchcar-desktop-releases/releases/download/vX.Y.Z/SearchCar-Desktop-Windows-x64-setup.exe" \
   --windows-x86_64-signature-file SearchCar-Desktop-Windows-x64-setup.exe.sig \
   --output latest.json
 ```
 
 The generator refuses non-HTTPS URLs, malformed versions and missing
 signatures. Upload the resulting `latest.json` to that same public release as
-the final step. The configured GitHub endpoint is anonymous HTTPS: if the
-source repository remains private, customers cannot download it. Before the
-first external updater release, either make release assets public or change
-the checked endpoint to a separate public releases-only repository while
-keeping the source repository private.
+the final step. Never point installed applications back to the private source
+repository because customers cannot anonymously download its assets.
 
 ## 5. Rollback
 

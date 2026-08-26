@@ -285,6 +285,10 @@ type DesktopMigrationReport = {
 type DesktopRuntimeInfo = {
   desktop: boolean;
   updater: boolean;
+  update_status?: {
+    state: "idle" | "checking" | "available" | "preparing" | "downloading" | "retrying" | "installing" | "failed";
+    progress?: number | null;
+  };
 };
 type ProjectForm = {
   name: string;
@@ -572,7 +576,26 @@ function App({
     queryFn: () => request("/desktop/runtime"),
     retry: false,
     staleTime: Number.POSITIVE_INFINITY,
+    refetchInterval: (query) => query.state.data?.desktop ? 1000 : false,
   });
+  const updateState = desktopRuntimeQuery.data?.update_status?.state || "idle";
+  const updateBusy = ["checking", "available", "preparing", "downloading", "retrying", "installing"].includes(updateState);
+  const updateProgress = desktopRuntimeQuery.data?.update_status?.progress;
+  const updateLabel = updateState === "checking"
+    ? locale === "uk" ? "Перевіряємо…" : "Проверяем…"
+    : updateState === "available"
+      ? locale === "uk" ? "Оновлення знайдено" : "Обновление найдено"
+      : updateState === "preparing"
+        ? locale === "uk" ? "Резервна копія…" : "Резервная копия…"
+        : updateState === "downloading"
+          ? `${locale === "uk" ? "Завантаження" : "Загрузка"}${typeof updateProgress === "number" ? ` ${updateProgress}%` : "…"}`
+          : updateState === "retrying"
+            ? locale === "uk" ? "Повторюємо…" : "Повторяем…"
+            : updateState === "installing"
+              ? locale === "uk" ? "Встановлення…" : "Установка…"
+              : updateState === "failed"
+                ? locale === "uk" ? "Повторити" : "Повторить"
+                : locale === "uk" ? "Оновлення" : "Обновления";
   // A desktop customer has one local workspace. Customer and license
   // management belongs to the Cloudflare owner panel, never to this device.
   const localAdminEnabled = currentUser.role === "ADMIN"
@@ -769,13 +792,13 @@ function App({
           {desktopRuntimeQuery.data?.desktop && desktopRuntimeQuery.data.updater ? (
             <button
               type="button"
-              disabled={updateCheckMutation.isPending}
+              disabled={updateCheckMutation.isPending || updateBusy}
               onClick={() => updateCheckMutation.mutate()}
               title={locale === "uk" ? "Перевірити оновлення" : "Проверить обновления"}
               aria-label={locale === "uk" ? "Перевірити оновлення" : "Проверить обновления"}
             >
               <b aria-hidden="true">↻</b>
-              <em>{locale === "uk" ? "Оновлення" : "Обновления"}</em>
+              <em>{updateLabel}</em>
             </button>
           ) : null}
         </div>

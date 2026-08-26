@@ -10,7 +10,7 @@ use std::{
     net::{TcpListener, TcpStream},
     path::Path,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -260,6 +260,15 @@ fn request_sidecar_shutdown(port: u16, secret: &str) -> bool {
 }
 
 fn sidecar_request(app: &tauri::AppHandle, method: &str, path: &str) -> Option<String> {
+    sidecar_request_with_timeout(app, method, path, Duration::from_secs(2))
+}
+
+fn sidecar_request_with_timeout(
+    app: &tauri::AppHandle,
+    method: &str,
+    path: &str,
+    timeout: Duration,
+) -> Option<String> {
     let (port, secret) = {
         let state = app.state::<SidecarState>();
         let guard = state.0.lock().ok()?;
@@ -273,7 +282,7 @@ fn sidecar_request(app: &tauri::AppHandle, method: &str, path: &str) -> Option<S
         Duration::from_millis(600),
     )
     .ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
     let request = format!(
         "{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     );
@@ -286,6 +295,49 @@ fn sidecar_request(app: &tauri::AppHandle, method: &str, path: &str) -> Option<S
     response
         .split_once("\r\n\r\n")
         .map(|(_, body)| body.trim().to_string())
+}
+
+enum UpdatePreparation {
+    Ready,
+    ActiveScan(u32),
+    Failed(String),
+}
+
+fn prepare_update_install(app: &tauri::AppHandle) -> UpdatePreparation {
+    let Some(body) = sidecar_request_with_timeout(
+        app,
+        "POST",
+        "/desktop/update/prepare",
+        Duration::from_secs(5 * 60),
+    ) else {
+        return UpdatePreparation::Failed("Локальный сервис не ответил.".to_string());
+    };
+    let (status, detail) = body.split_once('|').unwrap_or((&body, ""));
+    match status {
+        "ready" => UpdatePreparation::Ready,
+        "active" => UpdatePreparation::ActiveScan(detail.parse().unwrap_or(1)),
+        "error" => UpdatePreparation::Failed(format!(
+            "Не удалось создать резервную копию ({detail})."
+        )),
+        _ => UpdatePreparation::Failed(
+            "Локальный сервис вернул неизвестный статус.".to_string(),
+        ),
+    }
+}
+
+fn abort_update_install(app: &tauri::AppHandle) {
+    let _ = sidecar_request(app, "POST", "/desktop/update/abort");
+}
+
+fn set_update_status(app: &tauri::AppHandle, state: &str, progress: Option<u64>) {
+    let progress = progress
+        .map(|value| format!("&progress={}", value.min(100)))
+        .unwrap_or_default();
+    let _ = sidecar_request(
+        app,
+        "POST",
+        &format!("/desktop/update/status?state={state}{progress}"),
+    );
 }
 
 fn scheduler_status(app: &tauri::AppHandle) -> Option<TrayStatus> {
@@ -550,6 +602,7 @@ fn restart_after_update_failure(app: tauri::AppHandle, message: String) {
 }
 
 fn prompt_update_install(app: tauri::AppHandle, update: Update) {
+    set_update_status(&app, "available", None);
     let version = update.version.clone();
     let notes = update
         .body
@@ -571,31 +624,112 @@ fn prompt_update_install(app: tauri::AppHandle, update: Update) {
         ))
         .show(move |confirmed| {
             if !confirmed {
+                set_update_status(&prompt_handle, "idle", None);
                 finish_update_operation(&prompt_handle);
                 return;
             }
             let install_handle = prompt_handle.clone();
             tauri::async_runtime::spawn(async move {
-                let bytes = match update.download(|_, _| {}, || {}).await {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
+                set_update_status(&install_handle, "preparing", None);
+                match prepare_update_install(&install_handle) {
+                    UpdatePreparation::Ready => {}
+                    UpdatePreparation::ActiveScan(count) => {
+                        set_update_status(&install_handle, "failed", None);
                         finish_update_operation(&install_handle);
                         show_update_result(
                             &install_handle,
-                            "Ошибка обновления",
-                            format!("Не удалось скачать или проверить подпись обновления.\n\n{error}"),
+                            "Обновление отложено",
+                            format!(
+                                "Сейчас выполняется поиск ({count}). Дождитесь его завершения или отмените поиск в SearchCar, затем повторите обновление."
+                            ),
+                            MessageDialogKind::Warning,
+                        );
+                        return;
+                    }
+                    UpdatePreparation::Failed(message) => {
+                        set_update_status(&install_handle, "failed", None);
+                        finish_update_operation(&install_handle);
+                        show_update_result(
+                            &install_handle,
+                            "Не удалось подготовить обновление",
+                            format!("{message}\n\nТекущая версия продолжит работать."),
                             MessageDialogKind::Error,
                         );
                         return;
                     }
+                }
+                let mut downloaded_bytes = None;
+                let mut last_error = String::new();
+                for attempt in 0..2 {
+                    set_update_status(
+                        &install_handle,
+                        if attempt == 0 { "downloading" } else { "retrying" },
+                        if attempt == 0 { Some(0) } else { None },
+                    );
+                    let received = Arc::new(AtomicU64::new(0));
+                    let reported_bucket = Arc::new(AtomicU64::new(u64::MAX));
+                    let progress_handle = install_handle.clone();
+                    let received_for_progress = Arc::clone(&received);
+                    let reported_for_progress = Arc::clone(&reported_bucket);
+                    match update
+                        .download(
+                            move |chunk_length, content_length| {
+                                let received = received_for_progress.fetch_add(
+                                    chunk_length as u64,
+                                    Ordering::SeqCst,
+                                ) + chunk_length as u64;
+                                let Some(total) = content_length.filter(|total| *total > 0) else {
+                                    return;
+                                };
+                                let percent = (received.saturating_mul(100) / total).min(99);
+                                let bucket = percent / 5;
+                                if reported_for_progress.swap(bucket, Ordering::SeqCst) != bucket {
+                                    set_update_status(
+                                        &progress_handle,
+                                        "downloading",
+                                        Some(bucket * 5),
+                                    );
+                                }
+                            },
+                            || {},
+                        )
+                        .await
+                    {
+                        Ok(bytes) => {
+                            downloaded_bytes = Some(bytes);
+                            break;
+                        }
+                        Err(error) => {
+                            last_error = error.to_string();
+                            if attempt == 0 {
+                                thread::sleep(Duration::from_secs(2));
+                            }
+                        }
+                    }
+                }
+                let Some(bytes) = downloaded_bytes else {
+                    abort_update_install(&install_handle);
+                    set_update_status(&install_handle, "failed", None);
+                    finish_update_operation(&install_handle);
+                    show_update_result(
+                        &install_handle,
+                        "Ошибка обновления",
+                        format!(
+                            "Не удалось скачать или проверить подпись обновления после повторной попытки. Текущая версия продолжит работать.\n\n{last_error}\n\nРучная загрузка: https://github.com/KaplunSergey/searchcar-desktop-releases/releases/latest"
+                        ),
+                        MessageDialogKind::Error,
+                    );
+                    return;
                 };
 
                 // The Windows installer cannot safely replace the bundled
                 // sidecar while it is still running. The signature has already
                 // been verified by `download`, so stop local work immediately
                 // before handing the verified bytes to the native installer.
+                set_update_status(&install_handle, "installing", None);
                 stop_sidecar(&install_handle);
                 if let Err(error) = update.install(bytes) {
+                    abort_update_install(&install_handle);
                     finish_update_operation(&install_handle);
                     restart_after_update_failure(install_handle, error.to_string());
                     return;
@@ -627,6 +761,7 @@ fn start_update_check(app: &tauri::AppHandle, interactive: bool) {
         }
         return;
     }
+    set_update_status(app, "checking", None);
 
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -637,6 +772,7 @@ fn start_update_check(app: &tauri::AppHandle, interactive: bool) {
         match result {
             Ok(Some(update)) => prompt_update_install(app_handle, update),
             Ok(None) => {
+                set_update_status(&app_handle, "idle", None);
                 finish_update_operation(&app_handle);
                 if interactive {
                     show_update_result(
@@ -648,6 +784,11 @@ fn start_update_check(app: &tauri::AppHandle, interactive: bool) {
                 }
             }
             Err(error) => {
+                set_update_status(
+                    &app_handle,
+                    if interactive { "failed" } else { "idle" },
+                    None,
+                );
                 finish_update_operation(&app_handle);
                 if interactive {
                     show_update_result(

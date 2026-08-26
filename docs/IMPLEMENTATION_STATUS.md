@@ -300,7 +300,7 @@ Still required: rebuild the Windows NSIS installer and validate cold and warm
 launches on the pilot Windows machine, including retry, startup-window close
 and confirmation that no console appears.
 
-## Milestone M9 — backup and device transfer (in progress)
+## Milestone M9 — backup and device transfer (pilot complete)
 
 Implemented:
 
@@ -326,16 +326,11 @@ Implemented:
 - Settings can download a validated archive and import an externally selected
   archive through the operating-system file chooser; uploads are streamed to
   a temporary file, size-limited, validated and atomically accepted;
-- ordinary web users remain unable to access desktop data operations.
-
-Still required to complete M9:
-
-- confirm the installed Windows and macOS WebViews' save-location behaviour;
-  add a Rust-native save dialog only if either platform bypasses the expected
-  system download prompt;
-- end-to-end macOS → Windows and Windows → macOS restore/transfer checks;
-- verify that the old device cannot renew its lease and that restored data
-  never carries license state.
+- ordinary web users remain unable to access desktop data operations;
+- the owner completed the installed macOS → Windows backup, restore, license
+  transfer and old-binding rejection scenario on 2026-08-26. The portable
+  format is platform-neutral; the reverse direction remains a release
+  regression check rather than a blocker for starting M10.
 
 ## Milestone M10 — release foundation (in progress)
 
@@ -356,9 +351,31 @@ Implemented:
   signature before stopping the sidecar, then installs and restarts;
 - the updater public key is embedded and checked against a repository copy;
 - manual macOS and Windows workflows require the updater secrets and reject a
-  build without a non-empty matching `.sig` artifact.
+  build without a non-empty matching `.sig` artifact;
+- immediately before download/install, the native shell asks the local backend
+  to create a verified `pre-update-*.searchcar-backup`; an update-install guard
+  blocks new manual and scheduled scans until the sidecar stops or preparation
+  is aborted;
+- an already queued/running/cancelling scan postpones installation with a
+  concrete instruction to finish or cancel it first; backup/download failures
+  leave the current version running and release the update guard;
+- stale update guards are removed safely on the next startup on both POSIX and
+  Windows without using a destructive `os.kill(pid, 0)` Windows probe;
+- the sidebar now reports `checking`, backup preparation, download progress,
+  retry and installation instead of leaving the user with a silent wait;
+- a failed download is retried once, then leaves the current version running
+  and shows the public manual-download fallback;
+- a manual `Publish desktop release` workflow downloads exact successful Mac
+  and Windows workflow artifacts, verifies checksums, creates the signed static
+  manifest and publishes it atomically through a draft in the public
+  `searchcar-desktop-releases` repository;
+- the embedded updater endpoint now points only at that releases-only
+  repository, so the product source repository can remain private.
 
-Still required: a public releases-only download endpoint (or public GitHub
-release assets), first end-to-end old-to-new update test, pre-update data
-backup/active-scan coordination, richer in-window progress states, and
+External publication setup completed by the owner on 2026-08-26: the public
+releases-only repository exists and the private source repository contains the
+scoped `RELEASES_REPO_TOKEN` Actions secret.
+
+Still required: publish the first two signed versions, complete an installed
+old-to-new update and tampered-artifact acceptance test, and later add
 commercial OS signing/notarization.

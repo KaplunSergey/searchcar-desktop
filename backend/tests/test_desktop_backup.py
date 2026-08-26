@@ -21,7 +21,13 @@ from app.desktop_backup import (
 )
 from app.models import AuthSession, Car, CarImage, Project, ScanRun, User
 from app.postgres_converter import convert_to_backup
-from app.maintenance import maintenance_active, maintenance_lock
+from app.maintenance import (
+    begin_update_install,
+    clear_stale_maintenance_lock,
+    finish_update_install,
+    maintenance_active,
+    maintenance_lock,
+)
 from app.sqlite_migrations import migrate_sqlite
 from app.storage_paths import portable_storage_path, resolve_storage_path
 
@@ -319,4 +325,19 @@ def test_maintenance_lock_is_visible_to_desktop_worker(
     assert not maintenance_active()
     with maintenance_lock(database_path, "TEST"):
         assert maintenance_active()
+    assert not maintenance_active()
+
+
+def test_update_install_guard_blocks_new_desktop_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEARCHCAR_DESKTOP_DATA_DIR", str(tmp_path))
+
+    first = begin_update_install()
+    assert first.name == "update-install.lock"
+    assert begin_update_install() == first
+    assert maintenance_active()
+    assert clear_stale_maintenance_lock() is False
+    assert finish_update_install() is True
     assert not maintenance_active()

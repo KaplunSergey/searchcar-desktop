@@ -38,6 +38,99 @@ class DesktopUpdateCheckRelay:
         return requested
 
 
+class DesktopUpdateStateRelay:
+    """Expose a small, non-sensitive updater state snapshot to the local UI."""
+
+    _ALLOWED_STATES = {
+        "idle",
+        "checking",
+        "available",
+        "preparing",
+        "downloading",
+        "retrying",
+        "installing",
+        "failed",
+    }
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._state = "idle"
+        self._progress: int | None = None
+
+    def set(self, state: str, progress: int | None = None) -> None:
+        if state not in self._ALLOWED_STATES:
+            raise ValueError("desktop_update_state_invalid")
+        if progress is not None and not 0 <= progress <= 100:
+            raise ValueError("desktop_update_progress_invalid")
+        if state != "downloading":
+            progress = None
+        with self._lock:
+            self._state = state
+            self._progress = progress
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {"state": self._state, "progress": self._progress}
+
+
+def prepare_desktop_update(data_dir: Path) -> dict:
+    """Block new scans and create a verified rollback point for an update."""
+
+    from sqlalchemy import func, select
+
+    from .database import SessionLocal
+    from .desktop_backup import export_backup
+    from .maintenance import begin_update_install, finish_update_install
+    from .models import ScanRun
+    from .version import APP_VERSION
+
+    def active_scan_count() -> int:
+        with SessionLocal() as database:
+            return int(
+                database.scalar(
+                    select(func.count())
+                    .select_from(ScanRun)
+                    .where(
+                        ScanRun.status.in_(
+                            ("QUEUED", "RUNNING", "CANCEL_REQUESTED")
+                        )
+                    )
+                )
+                or 0
+            )
+
+    active = active_scan_count()
+    if active:
+        return {"status": "active_scan", "count": active}
+
+    begin_update_install()
+    try:
+        # Close the enqueue/claim race: once the guard exists, both manual and
+        # scheduled scans are refused. Recheck work that may have committed
+        # immediately before the guard became visible.
+        active = active_scan_count()
+        if active:
+            finish_update_install()
+            return {"status": "active_scan", "count": active}
+        backup_path = data_dir / "backups" / (
+            f"pre-update-{_utc_filename()}-{APP_VERSION}.searchcar-backup"
+        )
+        result = export_backup(
+            data_dir / "data" / "searchcar.sqlite3",
+            data_dir / "storage",
+            backup_path,
+            app_version=APP_VERSION,
+        )
+    except Exception:
+        finish_update_install()
+        raise
+    return {
+        "status": "ready",
+        "backup": backup_path.name,
+        "bytes": result.bytes,
+    }
+
+
 class DesktopInstanceLock:
     """Hold one backend process per desktop data directory."""
 
@@ -408,6 +501,7 @@ def create_desktop_app(
 
     expected_cookie = _session_cookie(session_secret)
     update_check_relay = DesktopUpdateCheckRelay()
+    update_state_relay = DesktopUpdateStateRelay()
 
     class DesktopSessionMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
@@ -419,6 +513,9 @@ def create_desktop_app(
                 "/desktop/scheduler/toggle",
                 "/desktop/scheduler/resumed",
                 "/desktop/update-check/consume",
+                "/desktop/update/status",
+                "/desktop/update/prepare",
+                "/desktop/update/abort",
             }:
                 return await call_next(request)
             supplied = request.cookies.get(DESKTOP_COOKIE_NAME, "")
@@ -541,10 +638,15 @@ def create_desktop_app(
 
     @app.get("/api/desktop/runtime", include_in_schema=False)
     def desktop_runtime_info():
-        return {"desktop": True, "updater": True}
+        return {
+            "desktop": True,
+            "updater": True,
+            "update_status": update_state_relay.snapshot(),
+        }
 
     @app.post("/api/desktop/update-check", include_in_schema=False, status_code=202)
     def desktop_update_check_request():
+        update_state_relay.set("checking")
         update_check_relay.request()
         return {"status": "requested"}
 
@@ -553,6 +655,43 @@ def create_desktop_app(
         if not hmac.compare_digest(token, session_secret):
             raise HTTPException(403, "invalid_desktop_session")
         return PlainTextResponse("1" if update_check_relay.consume() else "0")
+
+    @app.post("/desktop/update/status", include_in_schema=False)
+    def desktop_update_status(
+        token: str,
+        state: str,
+        progress: int | None = None,
+    ):
+        if not hmac.compare_digest(token, session_secret):
+            raise HTTPException(403, "invalid_desktop_session")
+        try:
+            update_state_relay.set(state, progress)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return PlainTextResponse("updated")
+
+    @app.post("/desktop/update/prepare", include_in_schema=False)
+    def desktop_update_prepare(token: str):
+        if not hmac.compare_digest(token, session_secret):
+            raise HTTPException(403, "invalid_desktop_session")
+        data_dir = Path(os.environ["SEARCHCAR_DESKTOP_DATA_DIR"])
+        try:
+            result = prepare_desktop_update(data_dir)
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Could not prepare desktop update")
+            return PlainTextResponse(f"error|{type(exc).__name__}")
+        if result["status"] == "active_scan":
+            return PlainTextResponse(f"active|{result['count']}")
+        return PlainTextResponse(f"ready|{result['backup']}")
+
+    @app.post("/desktop/update/abort", include_in_schema=False)
+    def desktop_update_abort(token: str):
+        if not hmac.compare_digest(token, session_secret):
+            raise HTTPException(403, "invalid_desktop_session")
+        from .maintenance import finish_update_install
+
+        finish_update_install()
+        return PlainTextResponse("aborted")
 
     app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="desktop-ui")
     return app

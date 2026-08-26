@@ -160,10 +160,13 @@ jobs:
 
           ditto -c -k --sequesterRsrc --keepParent "$app" \
             work/macos-artifact/SearchCar-Desktop-macOS-arm64.zip
-          shasum -a 256 \
-            work/macos-artifact/SearchCar-Desktop-macOS-arm64.zip \
-            "$updater_artifact" \
-            > work/macos-artifact/SHA256SUMS.txt
+          (
+            cd work/macos-artifact
+            shasum -a 256 \
+              SearchCar-Desktop-macOS-arm64.zip \
+              SearchCar-Desktop-macOS-arm64.app.tar.gz \
+              > SHA256SUMS.txt
+          )
           cat work/macos-artifact/SHA256SUMS.txt
 
       - name: Upload macOS pilot artifact

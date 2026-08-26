@@ -1,0 +1,206 @@
+name: Publish desktop release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact package.json version, without the v prefix"
+        required: true
+        type: string
+      macos_run_id:
+        description: "Successful macOS desktop pilot run ID"
+        required: true
+        type: string
+      windows_run_id:
+        description: "Successful Windows desktop pilot run ID"
+        required: true
+        type: string
+      release_notes:
+        description: "Short customer-facing release notes"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: publish-desktop-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Verify and publish signed desktop release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RELEASES_REPOSITORY: KaplunSergey/searchcar-desktop-releases
+      GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+      SOURCE_GITHUB_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out the release source
+        uses: actions/checkout@v6
+
+      - name: Validate source workflow runs
+        shell: bash
+        env:
+          MACOS_RUN_ID: ${{ inputs.macos_run_id }}
+          WINDOWS_RUN_ID: ${{ inputs.windows_run_id }}
+        run: |
+          set -euo pipefail
+          validate_run() {
+            local run_id="$1"
+            local expected_workflow="$2"
+            if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
+              echo "Workflow run IDs must contain digits only" >&2
+              exit 1
+            fi
+            local run_json
+            run_json="$(GH_TOKEN="$SOURCE_GITHUB_TOKEN" gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+            if [[ "$(jq -r .conclusion <<<"$run_json")" != "success" ]]; then
+              echo "Workflow run $run_id is not successful" >&2
+              exit 1
+            fi
+            if [[ "$(jq -r .head_sha <<<"$run_json")" != "$GITHUB_SHA" ]]; then
+              echo "Workflow run $run_id was built from another commit" >&2
+              exit 1
+            fi
+            local workflow_path
+            workflow_path="$(jq -r .path <<<"$run_json")"
+            if [[ "$workflow_path" != "$expected_workflow" && "$workflow_path" != "$expected_workflow@"* ]]; then
+              echo "Workflow run $run_id is not $expected_workflow" >&2
+              exit 1
+            fi
+          }
+          validate_run "$MACOS_RUN_ID" ".github/workflows/macos-desktop.yml"
+          validate_run "$WINDOWS_RUN_ID" ".github/workflows/windows-desktop.yml"
+
+      - name: Download macOS updater artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: searchcar-desktop-macos-arm64-pilot
+          path: work/release-input/macos
+          run-id: ${{ inputs.macos_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+
+      - name: Download Windows updater artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: searchcar-desktop-windows-x64-pilot
+          path: work/release-input/windows
+          run-id: ${{ inputs.windows_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+
+      - name: Validate version, token and signed artifacts
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "Missing GitHub secret: RELEASES_REPO_TOKEN" >&2
+            exit 1
+          fi
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Version must be valid SemVer without a v prefix" >&2
+            exit 1
+          fi
+          package_version="$(node -p "require('./package.json').version")"
+          if [[ "$RELEASE_VERSION" != "$package_version" ]]; then
+            echo "Requested v$RELEASE_VERSION does not match package.json v$package_version" >&2
+            exit 1
+          fi
+          if [[ -z "${RELEASE_NOTES//[[:space:]]/}" ]]; then
+            echo "Release notes must not be empty" >&2
+            exit 1
+          fi
+
+          mac_dir="work/release-input/macos/macos-artifact"
+          windows_dir="work/release-input/windows/windows-artifact"
+          required=(
+            "$mac_dir/SearchCar-Desktop-macOS-arm64.app.tar.gz"
+            "$mac_dir/SearchCar-Desktop-macOS-arm64.app.tar.gz.sig"
+            "$mac_dir/SearchCar-Desktop-macOS-arm64.zip"
+            "$windows_dir/SearchCar-Desktop-Windows-x64-setup.exe"
+            "$windows_dir/SearchCar-Desktop-Windows-x64-setup.exe.sig"
+          )
+          for artifact in "${required[@]}"; do
+            test -s "$artifact" || { echo "Missing or empty artifact: $artifact" >&2; exit 1; }
+          done
+          test -s "$mac_dir/SHA256SUMS.txt"
+          test -s "$windows_dir/SHA256SUMS.txt"
+          (cd "$mac_dir" && sha256sum --check SHA256SUMS.txt)
+          (cd "$windows_dir" && sha256sum --check SHA256SUMS.txt)
+          printf '%s\n' "$RELEASE_NOTES" > work/release-notes.md
+
+      - name: Generate static signed updater manifest
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v$RELEASE_VERSION"
+          base="https://github.com/$RELEASES_REPOSITORY/releases/download/$tag"
+          node scripts/generate_tauri_updater_manifest.mjs \
+            --version "$RELEASE_VERSION" \
+            --notes-file work/release-notes.md \
+            --darwin-aarch64-url "$base/SearchCar-Desktop-macOS-arm64.app.tar.gz" \
+            --darwin-aarch64-signature-file work/release-input/macos/macos-artifact/SearchCar-Desktop-macOS-arm64.app.tar.gz.sig \
+            --windows-x86_64-url "$base/SearchCar-Desktop-Windows-x64-setup.exe" \
+            --windows-x86_64-signature-file work/release-input/windows/windows-artifact/SearchCar-Desktop-Windows-x64-setup.exe.sig \
+            --output work/latest.json
+
+      - name: Publish assets atomically through a draft release
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v$RELEASE_VERSION"
+          if gh release view "$tag" --repo "$RELEASES_REPOSITORY" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$tag" --repo "$RELEASES_REPOSITORY" --json isDraft --jq .isDraft)"
+            if [[ "$is_draft" != "true" ]]; then
+              echo "Published release $tag already exists; version reuse is forbidden" >&2
+              exit 1
+            fi
+            gh release edit "$tag" --repo "$RELEASES_REPOSITORY" \
+              --title "SearchCar Desktop $tag" \
+              --notes-file work/release-notes.md
+          else
+            gh release create "$tag" --repo "$RELEASES_REPOSITORY" \
+              --draft \
+              --title "SearchCar Desktop $tag" \
+              --notes-file work/release-notes.md
+          fi
+
+          gh release upload "$tag" --repo "$RELEASES_REPOSITORY" --clobber \
+            work/release-input/macos/macos-artifact/SearchCar-Desktop-macOS-arm64.zip \
+            work/release-input/macos/macos-artifact/SearchCar-Desktop-macOS-arm64.app.tar.gz \
+            work/release-input/macos/macos-artifact/SearchCar-Desktop-macOS-arm64.app.tar.gz.sig \
+            work/release-input/windows/windows-artifact/SearchCar-Desktop-Windows-x64-setup.exe \
+            work/release-input/windows/windows-artifact/SearchCar-Desktop-Windows-x64-setup.exe.sig \
+            work/latest.json
+
+          gh release edit "$tag" --repo "$RELEASES_REPOSITORY" \
+            --draft=false \
+            --latest
+
+      - name: Verify the anonymous updater endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          endpoint="https://github.com/$RELEASES_REPOSITORY/releases/latest/download/latest.json"
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --silent --show-error --location "$endpoint" --output work/published-latest.json; then
+              cmp work/latest.json work/published-latest.json
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Published updater endpoint did not become anonymously available" >&2
+          exit 1

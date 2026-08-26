@@ -3,22 +3,29 @@ import os
 import json
 from pathlib import Path
 import threading
+from types import SimpleNamespace
 
 import pytest
 
 from sqlalchemy import text
+from sqlalchemy.orm import Session, sessionmaker
 
-from app.database import create_database_engine
+import app.database as database_module
+from app.database import Base, create_database_engine
 from app.desktop_runtime import (
     DesktopInstanceLock,
     DesktopUpdateCheckRelay,
+    DesktopUpdateStateRelay,
     bundled_headless_chromium,
     configure_desktop_environment,
     configure_playwright_driver,
     configure_playwright_environment,
     parent_process_is_alive,
+    prepare_desktop_update,
     watch_parent_process,
 )
+from app.maintenance import finish_update_install, maintenance_active
+from app.models import ScanRun, User
 
 
 def test_desktop_update_check_relay_collapses_requests_and_consumes_once() -> None:
@@ -29,6 +36,82 @@ def test_desktop_update_check_relay_collapses_requests_and_consumes_once() -> No
     relay.request()
     assert relay.consume() is True
     assert relay.consume() is False
+
+
+def test_desktop_update_state_relay_validates_public_snapshot() -> None:
+    relay = DesktopUpdateStateRelay()
+
+    assert relay.snapshot() == {"state": "idle", "progress": None}
+    relay.set("downloading", 45)
+    assert relay.snapshot() == {"state": "downloading", "progress": 45}
+    relay.set("installing", 45)
+    assert relay.snapshot() == {"state": "installing", "progress": None}
+    with pytest.raises(ValueError, match="desktop_update_state_invalid"):
+        relay.set("arbitrary")
+    with pytest.raises(ValueError, match="desktop_update_progress_invalid"):
+        relay.set("downloading", 101)
+
+
+def _update_test_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    data_dir = tmp_path / "SearchCar"
+    database_path = data_dir / "data" / "searchcar.sqlite3"
+    database_path.parent.mkdir(parents=True)
+    (data_dir / "storage").mkdir(parents=True)
+    engine = create_database_engine(f"sqlite+pysqlite:///{database_path.as_posix()}")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(database_module, "SessionLocal", sessionmaker(bind=engine))
+    monkeypatch.setenv("SEARCHCAR_DESKTOP_DATA_DIR", str(data_dir))
+    return data_dir, engine
+
+
+def test_update_preparation_creates_backup_and_blocks_new_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir, engine = _update_test_engine(tmp_path, monkeypatch)
+    observed = {}
+
+    def fake_export(_database, _storage, destination, **_options):
+        observed["guard"] = maintenance_active()
+        observed["destination"] = destination
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"verified backup")
+        return SimpleNamespace(bytes=destination.stat().st_size)
+
+    monkeypatch.setattr("app.desktop_backup.export_backup", fake_export)
+    result = prepare_desktop_update(data_dir)
+
+    assert result["status"] == "ready"
+    assert result["backup"].startswith("pre-update-")
+    assert observed["guard"] is True
+    assert observed["destination"].name == result["backup"]
+    assert maintenance_active()
+    assert finish_update_install()
+    assert not maintenance_active()
+    engine.dispose()
+
+
+def test_update_preparation_refuses_an_active_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir, engine = _update_test_engine(tmp_path, monkeypatch)
+    with Session(engine) as database:
+        user = User(
+            username="Update owner",
+            username_key="update-owner",
+            password_hash="test-only",
+        )
+        database.add(user)
+        database.flush()
+        database.add(ScanRun(owner_id=user.id, kind="PROJECTS", status="RUNNING"))
+        database.commit()
+
+    result = prepare_desktop_update(data_dir)
+
+    assert result == {"status": "active_scan", "count": 1}
+    assert not maintenance_active()
+    engine.dispose()
 
 
 def test_desktop_instance_lock_allows_only_one_backend(tmp_path: Path) -> None:
