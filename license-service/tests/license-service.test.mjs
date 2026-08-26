@@ -237,6 +237,10 @@ test("owner transfer picker excludes licenses without an active source device", 
     ownerUi,
     /fill\('transfer-license-select', activeLicenses/u,
   );
+  assert.match(
+    ownerUi,
+    /data\.transfers\.filter\(x=>x\.status==='PENDING' && Date\.parse\(x\.expires_at\)>Date\.now\(\)\)/u,
+  );
 });
 
 test("owner bootstrap creates a protected cookie session exactly once", async (context) => {
@@ -905,6 +909,43 @@ test("approved transfer atomically moves the binding and invalidates old checks"
     .first();
   assert.equal(binding.active_count, 1);
   assert.equal(binding.activation_count, 2);
+});
+
+test("expired transfer requests are rejected with an explicit error", async (context) => {
+  if (!localRuntimeAvailable) return context.skip("loopback sockets are blocked by this sandbox");
+  const oldDevice = await createDevice("expired-transfer-old");
+  const trial = await api(
+    "/v1/trials/activate",
+    await signedBody(oldDevice, { subject_hash: "7".repeat(64) }),
+  );
+  assert.equal(trial.response.status, 200);
+  const newDevice = await createDevice("expired-transfer-new");
+  const requested = await api(
+    "/v1/transfers/request",
+    await signedBody(newDevice),
+  );
+  assert.equal(requested.response.status, 200);
+  await database
+    .prepare("UPDATE device_transfers SET expires_at = ? WHERE public_code_hint = ?")
+    .bind("2000-01-01T00:00:00.000Z", requested.json.data.transfer_code.slice(-5))
+    .run();
+
+  const rejected = await admin("/v1/admin/transfers/approve", {
+    transfer_code: requested.json.data.transfer_code,
+    license_id: trial.json.data.license_id,
+  });
+  assert.equal(rejected.response.status, 409);
+  assert.equal(rejected.json.error.code, "TRANSFER_EXPIRED");
+
+  const claim = await api(
+    "/v1/transfers/claim",
+    await signedBody(newDevice, {
+      transfer_code: requested.json.data.transfer_code,
+      claim_token: requested.json.data.claim_token,
+    }),
+  );
+  assert.equal(claim.response.status, 409);
+  assert.equal(claim.json.error.code, "TRANSFER_EXPIRED");
 });
 
 test("transfer approval rejects an inactive license without moving its device", async (context) => {

@@ -326,7 +326,7 @@ async function runOwnerMutation(
   }
 }
 
-async function ownerDashboard(request: Request, env: Env): Promise<Response> {
+async function ownerDashboard(request: Request, env: Env, now: Date): Promise<Response> {
   await requireSession(request, env);
   const [customers, licenses, codes, transfers, devices, auditEvents, sources, licenseSources] = await Promise.all([
     env.LICENSE_DB.prepare(
@@ -351,12 +351,17 @@ async function ownerDashboard(request: Request, env: Env): Promise<Response> {
          ORDER BY ac.created_at DESC LIMIT 100`,
     ).all(),
     env.LICENSE_DB.prepare(
-      `SELECT t.id, t.public_code_hint, t.status, t.requested_label, t.requested_at,
+      `SELECT t.id, t.public_code_hint,
+              CASE
+                WHEN t.status = 'PENDING' AND t.expires_at <= ? THEN 'EXPIRED'
+                ELSE t.status
+              END AS status,
+              t.requested_label, t.requested_at,
               t.expires_at, t.license_id, c.display_name AS customer_name
          FROM device_transfers t LEFT JOIN licenses l ON l.id = t.license_id
          LEFT JOIN customers c ON c.id = l.customer_id
          ORDER BY t.requested_at DESC LIMIT 100`,
-    ).all(),
+    ).bind(now.toISOString()).all(),
     env.LICENSE_DB.prepare(
       `SELECT d.id, d.license_id, d.label, d.is_active, d.first_seen_at, d.last_seen_at,
               d.deactivated_at, l.kind AS license_kind, c.display_name AS customer_name
@@ -412,7 +417,7 @@ export async function handleOwnerRoute(request: Request, env: Env): Promise<Resp
       return ownerStatus(env);
     }
     if (request.method === "GET" && path === "/v1/owner/dashboard") {
-      return ownerDashboard(request, env);
+      return ownerDashboard(request, env, now);
     }
     if (request.method === "POST" && path === "/v1/owner/customers") {
       return runOwnerMutation(request, env, "customers", (body, now, owner) =>

@@ -80,10 +80,11 @@ test("desktop onboarding and notifications are clear inside a small app window",
   assert.match(styles,/\.toast\{[^}]*max-height:calc\(100vh - 40px\)[^}]*overflow:auto[^}]*overflow-wrap:anywhere/);
 });
 test("passwordless desktop backup tools support portable import and export",async()=>{
-  const [page,backend,styles]=await Promise.all([
+  const [page,backend,styles,translations]=await Promise.all([
     readFile(new URL("app/page.tsx",root),"utf8"),
     readFile(new URL("backend/app/main.py",root),"utf8"),
     readFile(new URL("app/globals.css",root),"utf8"),
+    readFile(new URL("app/translations.ts",root),"utf8"),
   ]);
   assert.match(page,/type="file"/);
   assert.match(page,/accept="\.searchcar-backup,application\/octet-stream,application\/zip"/);
@@ -95,6 +96,11 @@ test("passwordless desktop backup tools support portable import and export",asyn
   assert.match(backend,/os\.replace\(temporary, destination\)/);
   assert.match(backend,/def download_desktop_backup\(/);
   assert.match(styles,/\.backup-file-input\{display:none\}/);
+  assert.match(page,/restoreResultPresentation/);
+  assert.match(page,/role="status"/);
+  assert.match(translations,/restoreStatusPending: "Ожидает перезапуска"/);
+  assert.match(translations,/restoreStatusRestored: "Восстановлено"/);
+  assert.match(styles,/\.restore-result\.pending,/);
 });
 test("product version metadata has one checked source of truth", async () => {
   const [pkg, cargo, tauri, backend, frontend, script, page] = await Promise.all([

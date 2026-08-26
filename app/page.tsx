@@ -223,6 +223,38 @@ type DesktopDataStatus = {
   backups: DesktopBackup[];
   restore_result?: { status: string; error?: string } | null;
 };
+
+function restoreResultPresentation(
+  result: NonNullable<DesktopDataStatus["restore_result"]>,
+  t: Translate,
+) {
+  switch (result.status) {
+    case "pending":
+      return {
+        className: "pending",
+        label: t("restoreStatusPending"),
+        help: t("restoreStatusPendingHelp"),
+      };
+    case "restored":
+      return {
+        className: "restored",
+        label: t("restoreStatusRestored"),
+        help: t("restoreStatusRestoredHelp"),
+      };
+    case "failed":
+      return {
+        className: "failed",
+        label: t("restoreStatusFailed"),
+        help: t("restoreStatusFailedHelp"),
+      };
+    default:
+      return {
+        className: "unreadable",
+        label: t("restoreStatusUnknown"),
+        help: t("restoreStatusUnknownHelp"),
+      };
+  }
+}
 type DesktopLicenseStatus = {
   mode: "disabled" | "required";
   status: "pilot" | "active" | "blocked";
@@ -3344,6 +3376,9 @@ function Settings({
       interval_minutes: 180 as const,
       project_ids: [],
     };
+  const restorePresentation = desktopDataQuery.data?.restore_result
+    ? restoreResultPresentation(desktopDataQuery.data.restore_result, t)
+    : null;
   const saveScheduler = useMutation({
     mutationFn: () =>
       request<SchedulerRecord>("/settings", {
@@ -3814,9 +3849,10 @@ function Settings({
           <p className="data-directory">
             {t("dataFolder")}: <code>{desktopDataQuery.data.data_directory}</code>
           </p>
-          {desktopDataQuery.data.restore_result ? (
-            <div className={`restore-result ${desktopDataQuery.data.restore_result.status}`}>
-              {t("lastRestore")}: {desktopDataQuery.data.restore_result.status}
+          {restorePresentation ? (
+            <div className={`restore-result ${restorePresentation.className}`} role="status">
+              <b>{t("lastRestore")}: {restorePresentation.label}</b>
+              <p>{restorePresentation.help}</p>
             </div>
           ) : null}
           <div className="backup-list">

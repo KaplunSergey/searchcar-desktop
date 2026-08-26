@@ -694,11 +694,13 @@ export async function claimTransfer(
   )
     .bind(await pepperedHash(env.CODE_PEPPER, transferCode))
     .first<TransferRow>();
+  if (transfer && new Date(transfer.expires_at).getTime() <= now.getTime()) {
+    throw new ApiError(409, "TRANSFER_EXPIRED", "The transfer request has expired.");
+  }
   if (
     !transfer ||
     transfer.status === "PENDING" ||
     (transfer.status !== "APPROVED" && transfer.status !== "CLAIMED") ||
-    new Date(transfer.expires_at).getTime() <= now.getTime() ||
     !(await constantTimeEqual(
       transfer.claim_token_hash,
       await pepperedHash(env.CODE_PEPPER, claimToken),
@@ -1087,10 +1089,12 @@ export async function approveAdminTransfer(
   )
     .bind(transferId ?? (await pepperedHash(env.CODE_PEPPER, transferCode!)))
     .first<TransferRow>();
+  if (transfer && new Date(transfer.expires_at).getTime() <= now.getTime()) {
+    throw new ApiError(409, "TRANSFER_EXPIRED", "The transfer request has expired.");
+  }
   if (
     !transfer ||
-    transfer.status !== "PENDING" ||
-    new Date(transfer.expires_at).getTime() <= now.getTime()
+    transfer.status !== "PENDING"
   ) {
     throw new ApiError(409, "TRANSFER_NOT_AVAILABLE", "The transfer cannot be approved.");
   }
