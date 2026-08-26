@@ -269,8 +269,12 @@ Implemented and deployed:
 - local implementation now separates source access from license lifecycle:
   empty source grants keep the signed license visible while blocking search;
 - migration `0004_license_deletion.sql`, the owner delete control and desktop
-  `LICENSE_DELETED` cleanup are implemented locally and await production D1
-  migration plus Worker/desktop deployment.
+  `LICENSE_DELETED` cleanup are implemented and verified in the production
+  pilot;
+- migration `0005_device_rebinding.sql` allows the signing key retained after
+  license deletion to activate one replacement license while keeping the old
+  device row as inactive history; the owner transfer form now lists only
+  licenses that actually have an active source device.
 
 Follow-up validation before sales beyond the pilot:
 

@@ -86,9 +86,10 @@ const OWNER_APP = String.raw`<!doctype html>
       state.data=data;
       fill('customer-select', data.customers, x => x.display_name + (x.contact ? ' · ' + x.contact : ''));
       const activeLicenses=data.licenses.filter(x=>!x.deleted_at && x.status==='ACTIVE');
+      const transferableLicenses=activeLicenses.filter(x=>x.active_device_id);
       const existingLicenses=data.licenses.filter(x=>!x.deleted_at);
       fill('license-select', activeLicenses, x => x.customer_name + ' · ' + x.kind + ' · ' + x.id.slice(0,8));
-      fill('transfer-license-select', activeLicenses, x => x.customer_name + ' · ' + x.kind + ' · ' + (x.active_device_label || x.active_device_id || 'не привязана') + ' · ' + x.id.slice(0,8));
+      fill('transfer-license-select', transferableLicenses, x => x.customer_name + ' · ' + x.kind + ' · ' + (x.active_device_label || x.active_device_id) + ' · ' + x.id.slice(0,8));
       fill('transfer-select', data.transfers.filter(x=>x.status==='PENDING'), x => x.public_code_hint + ' · ' + (x.customer_name || 'лицензия не назначена'));
       fill('source-license-select', existingLicenses, x => x.customer_name + ' · ' + x.kind + ' · ' + x.id.slice(0,8));
       fill('delete-license-select', existingLicenses, x => x.customer_name + ' · ' + x.kind + ' · ' + x.id.slice(0,8));

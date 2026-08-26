@@ -7,7 +7,13 @@ import { Miniflare } from "miniflare";
 
 const encoder = new TextEncoder();
 const migrations = await Promise.all(
-  ["0001_initial.sql", "0002_owner_admin.sql", "0003_source_entitlements.sql", "0004_license_deletion.sql"].map((name) =>
+  [
+    "0001_initial.sql",
+    "0002_owner_admin.sql",
+    "0003_source_entitlements.sql",
+    "0004_license_deletion.sql",
+    "0005_device_rebinding.sql",
+  ].map((name) =>
     readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"),
   ),
 );
@@ -220,6 +226,19 @@ test("Worker signing identity matches the desktop trust store", async () => {
   assert.equal(worker.vars.LICENSE_SIGNING_PUBLIC_KEY, desktop.public_keys[keyId]);
 });
 
+test("owner transfer picker excludes licenses without an active source device", async () => {
+  const ownerUi = await readFile(new URL("../src/owner_ui.ts", import.meta.url), "utf8");
+  assert.match(
+    ownerUi,
+    /const transferableLicenses=activeLicenses\.filter\(x=>x\.active_device_id\)/u,
+  );
+  assert.match(ownerUi, /fill\('transfer-license-select', transferableLicenses/u);
+  assert.doesNotMatch(
+    ownerUi,
+    /fill\('transfer-license-select', activeLicenses/u,
+  );
+});
+
 test("owner bootstrap creates a protected cookie session exactly once", async (context) => {
   if (!localRuntimeAvailable) return context.skip("loopback sockets are blocked by this sandbox");
   const password = "correct-horse-battery-staple-owner";
@@ -413,6 +432,44 @@ test("owner bootstrap creates a protected cookie session exactly once", async (c
   );
   assert.equal(deletedCheck.response.status, 410);
   assert.equal(deletedCheck.json.error.code, "LICENSE_DELETED");
+
+  // Deleting a license deliberately retains the desktop signing key. A
+  // replacement license must accept that same key while preserving the old
+  // device record as inactive history.
+  const replacementLicense = await ownerApi(
+    "/v1/owner/licenses",
+    { customer_id: customer.json.data.customer_id },
+    ownerCookie,
+  );
+  assert.equal(replacementLicense.response.status, 200);
+  const replacementCode = await ownerApi(
+    "/v1/owner/activation-codes",
+    { license_id: replacementLicense.json.data.license_id, duration: "P1M" },
+    ownerCookie,
+  );
+  assert.equal(replacementCode.response.status, 200);
+  const rebound = await api(
+    "/v1/licenses/redeem",
+    await signedBody(licensedDevice, {
+      activation_code: replacementCode.json.data.activation_code,
+    }),
+  );
+  assert.equal(rebound.response.status, 200);
+  assert.equal(rebound.json.data.license_id, replacementLicense.json.data.license_id);
+  assert.notEqual(rebound.json.data.device_id, redeemed.json.data.device_id);
+  const deviceHistory = await database.prepare(
+    `SELECT license_id, is_active
+       FROM devices
+      WHERE public_key = ?
+      ORDER BY created_at ASC`,
+  ).bind(licensedDevice.device.public_key).all();
+  assert.deepEqual(
+    deviceHistory.results.map((row) => [row.license_id, row.is_active]),
+    [
+      [license.json.data.license_id, 0],
+      [replacementLicense.json.data.license_id, 1],
+    ],
+  );
 
   const logout = await mf.dispatchFetch("https://license.test/v1/owner/logout", {
     method: "POST",

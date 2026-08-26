@@ -150,6 +150,11 @@ binding, lease and trusted-time files. The Keychain/DPAPI device identity is
 retained, and a replacement owner-issued activation code may bind a new
 license to that device.
 
+Migration `0005_device_rebinding.sql` makes that replacement flow possible
+without losing device history: inactive rows may retain the same public key,
+while a partial unique index still permits only one active binding for that
+key at a time.
+
 Before deploying this version, apply the migration once to the production D1
 database, then deploy the Worker:
 
