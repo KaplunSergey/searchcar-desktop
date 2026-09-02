@@ -42,6 +42,8 @@ jobs:
     steps:
       - name: Check out the release source
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Validate source workflow runs
         shell: bash
@@ -116,6 +118,12 @@ jobs:
             echo "Requested v$RELEASE_VERSION does not match package.json v$package_version" >&2
             exit 1
           fi
+          tag="v$RELEASE_VERSION"
+          tag_sha="$(git rev-list -n 1 "$tag" 2>/dev/null || true)"
+          if [[ "${GITHUB_REF_TYPE:-}" != "tag" || "${GITHUB_REF_NAME:-}" != "$tag" || "$tag_sha" != "$GITHUB_SHA" ]]; then
+            echo "Run this workflow from tag $tag pointing to the release commit" >&2
+            exit 1
+          fi
           if [[ -z "${RELEASE_NOTES//[[:space:]]/}" ]]; then
             echo "Release notes must not be empty" >&2
             exit 1
@@ -137,6 +145,11 @@ jobs:
           test -s "$windows_dir/SHA256SUMS.txt"
           (cd "$mac_dir" && sha256sum --check SHA256SUMS.txt)
           (cd "$windows_dir" && sha256sum --check SHA256SUMS.txt)
+          {
+            sha256sum "$mac_dir/SearchCar-Desktop-macOS-arm64.zip"
+            sha256sum "$mac_dir/SearchCar-Desktop-macOS-arm64.app.tar.gz"
+            sha256sum "$windows_dir/SearchCar-Desktop-Windows-x64-setup.exe"
+          } | sed "s#  $mac_dir/#  #; s#  $windows_dir/#  #" > work/SHA256SUMS.txt
           printf '%s\n' "$RELEASE_NOTES" > work/release-notes.md
 
       - name: Generate static signed updater manifest
@@ -179,13 +192,39 @@ jobs:
               --notes-file work/release-notes.md
           fi
 
+          expected_assets=(
+            SearchCar-Desktop-macOS-arm64.zip
+            SearchCar-Desktop-macOS-arm64.app.tar.gz
+            SearchCar-Desktop-macOS-arm64.app.tar.gz.sig
+            SearchCar-Desktop-Windows-x64-setup.exe
+            SearchCar-Desktop-Windows-x64-setup.exe.sig
+            SHA256SUMS.txt
+            latest.json
+          )
+          mapfile -t existing_assets < <(
+            gh release view "$tag" --repo "$RELEASES_REPOSITORY" \
+              --json assets --jq '.assets[].name'
+          )
+          for asset in "${existing_assets[@]}"; do
+            if [[ ! " ${expected_assets[*]} " == *" $asset "* ]]; then
+              gh release delete-asset "$tag" "$asset" \
+                --repo "$RELEASES_REPOSITORY" --yes
+            fi
+          done
+
           gh release upload "$tag" --repo "$RELEASES_REPOSITORY" --clobber \
             work/release-input/macos/macos-artifact/SearchCar-Desktop-macOS-arm64.zip \
             work/release-input/macos/macos-artifact/SearchCar-Desktop-macOS-arm64.app.tar.gz \
             work/release-input/macos/macos-artifact/SearchCar-Desktop-macOS-arm64.app.tar.gz.sig \
             work/release-input/windows/windows-artifact/SearchCar-Desktop-Windows-x64-setup.exe \
             work/release-input/windows/windows-artifact/SearchCar-Desktop-Windows-x64-setup.exe.sig \
+            work/SHA256SUMS.txt \
             work/latest.json
+
+          printf '%s\n' "${expected_assets[@]}" | sort > work/expected-assets.txt
+          gh release view "$tag" --repo "$RELEASES_REPOSITORY" \
+            --json assets --jq '.assets[].name' | sort > work/actual-assets.txt
+          diff --unified work/expected-assets.txt work/actual-assets.txt
 
           gh release edit "$tag" --repo "$RELEASES_REPOSITORY" \
             --draft=false \

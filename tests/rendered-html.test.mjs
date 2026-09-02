@@ -139,7 +139,7 @@ test("updater key generation keeps the private key outside Git with strict permi
   assert.match(runbook, /independent from the Cloudflare license signing key/i);
 });
 test("desktop updater uses the checked public key and signed CI artifacts", async () => {
-  const [tauriConfig, updaterPublicKey, shell, runtime, macWorkflow, windowsWorkflow, publishWorkflow] = await Promise.all([
+  const [tauriConfig, updaterPublicKey, shell, runtime, macWorkflow, windowsWorkflow, publishWorkflow, sidecarBuild, updaterVerifier] = await Promise.all([
     "desktop/src-tauri/tauri.conf.json",
     "desktop/updater-public-key.txt",
     "desktop/src-tauri/src/lib.rs",
@@ -147,6 +147,8 @@ test("desktop updater uses the checked public key and signed CI artifacts", asyn
     ".github/workflows/macos-desktop.yml",
     ".github/workflows/windows-desktop.yml",
     ".github/workflows/publish-desktop-release.yml",
+    "scripts/build_desktop_sidecar.py",
+    "desktop/src-tauri/src/bin/verify_updater_signature.rs",
   ].map((path) => readFile(new URL(path, root), "utf8")));
   const tauri = JSON.parse(tauriConfig);
   const publicKey = updaterPublicKey.trim();
@@ -180,17 +182,31 @@ test("desktop updater uses the checked public key and signed CI artifacts", asyn
   assert.match(macWorkflow, /TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/);
   assert.match(macWorkflow, /pnpm exec tauri signer sign "\$updater"/);
   assert.match(macWorkflow, /test -s "\$updater\.sig"/);
+  assert.match(macWorkflow, /--bin verify_updater_signature/);
   assert.match(macWorkflow, /cd work\/macos-artifact/);
   assert.match(windowsWorkflow, /TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/);
   assert.match(windowsWorkflow, /updater_signed = \$true/);
   assert.match(windowsWorkflow, /SearchCar-Desktop-Windows-x64-setup\.exe/);
   assert.match(windowsWorkflow, /\$artifactSignature = "\$artifactInstaller\.sig"/);
+  assert.match(windowsWorkflow, /actions\/cache\/restore@v4/);
+  assert.match(windowsWorkflow, /path: work\/nuitka\/cache/);
+  assert.match(windowsWorkflow, /--bin verify_updater_signature/);
   assert.match(publishWorkflow, /workflow_dispatch:/);
   assert.match(publishWorkflow, /RELEASES_REPO_TOKEN/);
   assert.match(publishWorkflow, /actions\/download-artifact@v4/);
   assert.match(publishWorkflow, /generate_tauri_updater_manifest\.mjs/);
   assert.match(publishWorkflow, /--draft=false/);
   assert.match(publishWorkflow, /releases\/latest\/download\/latest\.json/);
+  assert.match(publishWorkflow, /fetch-depth: 0/);
+  assert.match(publishWorkflow, /Run this workflow from tag \$tag/);
+  assert.match(publishWorkflow, /GITHUB_REF_TYPE/);
+  assert.match(publishWorkflow, /work\/SHA256SUMS\.txt/);
+  assert.match(sidecarBuild, /Nuitka is still compiling/);
+  assert.match(sidecarBuild, /--report=/);
+  assert.match(sidecarBuild, /backend_root \/ "requirements\.txt"/);
+  assert.match(sidecarBuild, /backend_root \/ "alembic" \/ "script\.py\.mako"/);
+  assert.match(updaterVerifier, /PublicKey::decode/);
+  assert.match(updaterVerifier, /public_key\s*\.verify\(&artifact, &signature, false\)/);
 });
 test("local desktop launchers keep macOS and Windows builds reproducible", async () => {
   const [macLauncher, windowsLauncher, windowsBuild, windowsSmoke, sidecarBuild, buildGuide, rustMain, rustShell, startupPage] = await Promise.all([

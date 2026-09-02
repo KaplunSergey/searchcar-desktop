@@ -88,6 +88,16 @@ jobs:
           python scripts/prepare_desktop_browser.py
           python scripts/prepare_desktop_playwright_driver.py
 
+      # Keep one reusable compiler cache. It is deliberately not keyed by the
+      # commit SHA: GitHub caches are immutable, and a new cache per commit
+      # would quickly exceed the private-repository allowance.
+      - name: Restore bounded Nuitka compile cache
+        id: nuitka-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: work/nuitka/cache
+          key: windows-nuitka-compile-v1-${{ hashFiles('backend/requirements.txt', 'backend/requirements-desktop-build.txt') }}
+
       - name: Compile diagnostic standalone sidecar
         if: ${{ inputs.include_diagnostic_standalone == true }}
         shell: pwsh
@@ -111,6 +121,13 @@ jobs:
         shell: pwsh
         run: |
           python scripts/build_desktop_sidecar.py --mode onefile
+
+      - name: Save bounded Nuitka compile cache
+        if: ${{ success() && steps.nuitka-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: work/nuitka/cache
+          key: ${{ steps.nuitka-cache.outputs.cache-primary-key }}
 
       - name: Smoke-test compiled backend and Chromium
         shell: pwsh
@@ -178,6 +195,13 @@ jobs:
           $artifactSignature = "$artifactInstaller.sig"
           Copy-Item -LiteralPath $installer.FullName -Destination $artifactInstaller
           Copy-Item -LiteralPath $signature -Destination $artifactSignature
+          cargo run --quiet --locked `
+            --manifest-path desktop/src-tauri/Cargo.toml `
+            --bin verify_updater_signature -- `
+            desktop/updater-public-key.txt $artifactInstaller $artifactSignature
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows updater signature does not match desktop/updater-public-key.txt"
+          }
           $artifactHash = (Get-FileHash $artifactInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
           "$artifactHash  SearchCar-Desktop-Windows-x64-setup.exe" | Set-Content `
             "work/windows-artifact/SHA256SUMS.txt" -Encoding ascii
@@ -200,5 +224,6 @@ jobs:
           path: |
             work/windows-artifact/**
             work/windows-smoke/**
+            work/nuitka/**/nuitka-report.xml
           if-no-files-found: error
           retention-days: 14

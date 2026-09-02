@@ -158,6 +158,10 @@ jobs:
           updater_artifact="work/macos-artifact/SearchCar-Desktop-macOS-arm64.app.tar.gz"
           cp "$updater" "$updater_artifact"
           cp "$updater.sig" "$updater_artifact.sig"
+          cargo run --quiet --locked \
+            --manifest-path desktop/src-tauri/Cargo.toml \
+            --bin verify_updater_signature -- \
+            desktop/updater-public-key.txt "$updater_artifact" "$updater_artifact.sig"
 
           ditto -c -k --sequesterRsrc --keepParent "$app" \
             work/macos-artifact/SearchCar-Desktop-macOS-arm64.zip
@@ -177,5 +181,6 @@ jobs:
           path: |
             work/macos-artifact/**
             work/macos-smoke/**
+            work/nuitka/**/nuitka-report.xml
           if-no-files-found: error
           retention-days: 14

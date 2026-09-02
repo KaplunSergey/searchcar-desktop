@@ -154,8 +154,15 @@ release tag or the release commit:
 Leave `include_diagnostic_standalone` disabled. It is a slow troubleshooting
 build, not a normal release prerequisite. Each normal workflow runs tests,
 checks version metadata, creates its native installer and updater artifact,
-requires both updater signing secrets, verifies the `.sig` file and uploads a
-SHA-256 checksum.
+requires both updater signing secrets, verifies each `.sig` cryptographically
+against `desktop/updater-public-key.txt`, and uploads a SHA-256 checksum.
+
+The Windows workflow keeps one bounded Nuitka compiler cache shared across
+commits with unchanged desktop build requirements. It stores compiler objects
+only: never installers, updater bundles, signatures, browser files or a new
+cache for every commit. The first cache-seeding build can still take a long
+time; later builds print a heartbeat every two minutes and upload a small
+Nuitka compilation report with the normal pilot artifact.
 
 Wait for both runs to be green. A workflow blocked by billing or a cancelled
 run is not a successful build and must be re-run after the account issue is
@@ -209,7 +216,9 @@ notes.
 
 The workflow downloads those exact Actions artifacts, verifies checksums and
 requires both updater signature files, then binds their contents into the
-manifest and uploads everything to a draft release. The installed Tauri client
+manifest and uploads everything to a draft release. It also requires that the
+workflow itself was launched from the immutable matching source tag and checks
+the exact final asset list, including the public `SHA256SUMS.txt`. The installed Tauri client
 performs the cryptographic signature verification. Only after all assets and
 `latest.json` exist does the workflow publish the release as `Latest`. A failed
 publication therefore leaves installed clients on the previous release.

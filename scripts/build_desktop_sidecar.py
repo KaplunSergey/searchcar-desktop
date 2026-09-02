@@ -11,6 +11,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -60,6 +61,8 @@ def sidecar_source_fingerprint() -> str:
         *backend_root.joinpath("app").rglob("*.py"),
         *backend_root.joinpath("alembic").rglob("*.py"),
         backend_root / "alembic.ini",
+        backend_root / "alembic" / "script.py.mako",
+        backend_root / "requirements.txt",
         backend_root / "requirements-desktop-build.txt",
         ENTRYPOINT,
         TAURI_CONFIG,
@@ -75,10 +78,35 @@ def sidecar_source_fingerprint() -> str:
     return digest.hexdigest()[:16]
 
 
+def run_nuitka(command: list[str], environment: dict[str, str]) -> None:
+    """Run Nuitka with a periodic CI heartbeat while compiler output stays quiet."""
+
+    started_at = time.monotonic()
+    process = subprocess.Popen(
+        command,
+        cwd=REPOSITORY_ROOT / "backend",
+        env=environment,
+    )
+    while True:
+        try:
+            return_code = process.wait(timeout=120)
+            break
+        except subprocess.TimeoutExpired:
+            elapsed_minutes = int((time.monotonic() - started_at) // 60)
+            print(
+                f"Nuitka is still compiling ({elapsed_minutes} min elapsed); "
+                "the C compiler may not emit progress lines.",
+                flush=True,
+            )
+    if return_code:
+        raise subprocess.CalledProcessError(return_code, command)
+
+
 def build(mode: str) -> dict[str, object]:
     target = rust_target_triple()
     work_dir = WORK_ROOT / target / mode
     work_dir.mkdir(parents=True, exist_ok=True)
+    report_path = work_dir / "nuitka-report.xml"
     binary_name = output_name(target)
     command = [
         sys.executable,
@@ -88,6 +116,7 @@ def build(mode: str) -> dict[str, object]:
         "--assume-yes-for-downloads",
         "--remove-output",
         f"--output-dir={work_dir}",
+        f"--report={report_path}",
         f"--output-filename={binary_name}",
         "--include-package=app",
         "--include-package=pwdlib",
@@ -146,12 +175,7 @@ def build(mode: str) -> dict[str, object]:
         }
     environment = os.environ.copy()
     environment["NUITKA_CACHE_DIR"] = str(WORK_ROOT / "cache")
-    subprocess.run(
-        command,
-        check=True,
-        cwd=REPOSITORY_ROOT / "backend",
-        env=environment,
-    )
+    run_nuitka(command, environment)
 
     candidates = list(work_dir.rglob(binary_name))
     if not candidates:
@@ -166,6 +190,7 @@ def build(mode: str) -> dict[str, object]:
         "compiled": str(compiled),
         "compiled_bytes": compiled.stat().st_size,
         "compiled_sha256": sha256_file(compiled),
+        "nuitka_report": str(report_path) if report_path.is_file() else None,
         **onefile_policy,
     }
     if mode == "onefile":

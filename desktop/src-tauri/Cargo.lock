@@ -3203,6 +3203,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "ed25519-dalek",
+ "minisign-verify",
  "rand",
  "serde_json",
  "tauri",
