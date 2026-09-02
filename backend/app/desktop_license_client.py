@@ -874,6 +874,24 @@ class LicenseServiceClient:
             return self._install(data)
 
 
+def has_local_license_binding(data_dir: Path) -> bool:
+    """Whether this device already has a syntactically valid local binding.
+
+    This does not grant search access. It only lets a rebuilt local database
+    recreate its hidden ownership workspace without asking for a spent code.
+    """
+
+    binding_path, _, _ = _license_paths(data_dir)
+    try:
+        binding = _read_json(binding_path)
+    except LicenseStateError:
+        return False
+    return all(
+        isinstance(binding.get(field), str) and bool(binding[field].strip())
+        for field in ("license_id", "device_id")
+    )
+
+
 def service_is_configured() -> bool:
     try:
         configured_service_url()

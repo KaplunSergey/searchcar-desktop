@@ -825,10 +825,12 @@ function App({
               {t("activeScans")}
               <b>{activeScans.length}</b>
             </span>
-            <span className="current-user">
-              {locale === "uk" ? "Користувач" : "Пользователь"}:
-              <b>{currentUser.username}</b>
-            </span>
+            {!currentUser.passwordless_workspace ? (
+              <span className="current-user">
+                {locale === "uk" ? "Користувач" : "Пользователь"}:
+                <b>{currentUser.username}</b>
+              </span>
+            ) : null}
             {!currentUser.passwordless_workspace ? (
               <button
                 onClick={() => setShowPassword(true)}
@@ -1056,6 +1058,9 @@ function AuthRoot() {
     if (onboardingQuery.data?.required) {
       return <DesktopOnboardingScreen retry={refresh} />;
     }
+    if (onboardingQuery.data) {
+      return <DesktopSessionRecoveryScreen retry={refresh} />;
+    }
     return <LoginScreen retry={refresh} />;
   }
   return (
@@ -1063,6 +1068,19 @@ function AuthRoot() {
       currentUser={authQuery.data.user}
       onSessionChanged={refresh}
     />
+  );
+}
+
+function DesktopSessionRecoveryScreen({ retry }: { retry: () => void }) {
+  return (
+    <div className="auth-page">
+      <div className="auth-card auth-loading">
+        <span className="auth-logo">S</span>
+        <h1>SearchCar</h1>
+        <p>Не удалось открыть локальную рабочую область.</p>
+        <Button kind="primary" onClick={retry}>Повторить</Button>
+      </div>
+    </div>
   );
 }
 

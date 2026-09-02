@@ -97,8 +97,8 @@ start a scan before receiving a valid lease. The unsigned macOS preview keeps
 its file-preview identity only for this pilot; a signed production release
 will use Keychain storage.
 
-`GET /api/desktop/license` exposes the non-secret entitlement decision to an
-authenticated desktop user. CSRF-protected license controls redeem activation
+`GET /api/desktop/license` exposes the non-secret entitlement decision to the
+automatically opened hidden desktop workspace. CSRF-protected license controls redeem activation
 codes, refresh an existing lease and create or claim a transfer from the
 destination device. A fresh replacement computer has dedicated local-only
 onboarding endpoints for the same transfer request and claim before its

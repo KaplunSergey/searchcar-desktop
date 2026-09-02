@@ -291,6 +291,8 @@ test("desktop licensing keeps device secrets outside portable data",async()=>{
   assert.match(page,/function DesktopOnboardingScreen/);
   assert.match(page,/canManageDesktopData=\{/);
   assert.match(page,/currentUser\.passwordless_workspace === true/);
+  assert.match(page,/function DesktopSessionRecoveryScreen/);
+  assert.match(page,/!currentUser\.passwordless_workspace \? \(/);
   assert.match(page,/desktop\/license\/redeem/);
   assert.match(page,/desktop\/license\/refresh/);
   assert.match(page,/desktop\/license\/transfer\/request/);

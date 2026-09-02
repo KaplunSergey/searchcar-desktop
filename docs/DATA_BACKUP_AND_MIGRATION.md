@@ -1,9 +1,11 @@
 # Desktop backup and data migration
 
 This guide covers the desktop data tools. They are available to the single
-passwordless desktop workspace in **Settings → Desktop application data**.
-Legacy administrators keep access for compatibility; ordinary web users do
-not receive desktop data permissions.
+hidden desktop workspace in **Settings → Desktop application data**. A legacy
+one-user database is converted in place without changing its projects or
+history. If an unexpected multi-user desktop database is found, SearchCar
+first saves a verified backup and then starts with a clean workspace; ordinary
+web users do not receive desktop data permissions.
 
 ## What a backup contains
 

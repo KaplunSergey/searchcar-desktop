@@ -6,11 +6,15 @@ from pathlib import Path
 
 import pytest
 from fastapi import HTTPException, Request, Response
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.database import Base
-from app.desktop_onboarding import create_desktop_workspace
+from app.desktop_onboarding import (
+    create_desktop_workspace,
+    desktop_workspace_user,
+    migrate_legacy_desktop_workspace,
+)
 from app.main import (
     _require_desktop_data_access,
     activate_desktop_workspace,
@@ -21,7 +25,7 @@ from app.main import (
     request_desktop_onboarding_transfer,
 )
 from app.desktop_backup import export_backup, validate_backup
-from app.models import User
+from app.models import Project, User
 from app.schemas import (
     DesktopOnboardingActivateIn,
     DesktopOnboardingTransferClaimIn,
@@ -78,6 +82,47 @@ def test_desktop_activation_creates_passwordless_workspace_and_session(
         assert "encar_session=" in cookies
         assert "encar_csrf=" in cookies
         assert desktop_onboarding_status(db) == {"required": False}
+
+
+def test_single_legacy_user_becomes_hidden_workspace_without_losing_identity() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        legacy = User(
+            username="Serhii",
+            username_key="serhii",
+            password_hash="legacy-password-hash",
+            role="ADMIN",
+            status="ACTIVE",
+            project_limit=None,
+            must_change_password=True,
+            preferred_locale="uk",
+        )
+        db.add(legacy)
+        db.flush()
+        legacy_id = legacy.id
+        db.add(
+            Project(
+                owner_id=legacy_id,
+                name="Saved project",
+                name_key="saved project",
+                search_url="https://fem.encar.com/fc/fc_carsearchlist.html",
+                telegram_url=None,
+            )
+        )
+        db.commit()
+
+        assert migrate_legacy_desktop_workspace(db) == "migrated"
+        db.commit()
+        workspace = desktop_workspace_user(db)
+        assert workspace is not None
+        assert workspace.id == legacy_id
+        assert workspace.username == "SearchCar"
+        assert workspace.preferred_locale == "uk"
+        assert workspace.role == "USER"
+        assert workspace.must_change_password is False
+        assert db.scalar(select(Project.owner_id)) == legacy_id
+        assert migrate_legacy_desktop_workspace(db) == "workspace"
 
 
 def test_desktop_transfer_can_complete_before_local_workspace_exists(

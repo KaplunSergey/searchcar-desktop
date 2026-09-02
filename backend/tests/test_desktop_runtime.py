@@ -22,6 +22,7 @@ from app.desktop_runtime import (
     configure_playwright_environment,
     parent_process_is_alive,
     prepare_desktop_update,
+    normalize_desktop_workspace,
     watch_parent_process,
 )
 from app.maintenance import finish_update_install, maintenance_active
@@ -173,6 +174,39 @@ def test_desktop_environment_uses_platform_data_directory(
     assert paths["logs"].is_dir()
     assert os.environ["DATABASE_URL"].startswith("sqlite+pysqlite:///")
     assert os.environ["ALLOWED_ORIGINS"] == "http://127.0.0.1:43123"
+
+
+def test_multiple_legacy_users_are_backed_up_before_clean_desktop_reset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "SearchCar"
+    paths = configure_desktop_environment(data_dir, 43123)
+    engine = create_database_engine(
+        f"sqlite+pysqlite:///{paths['database'].as_posix()}"
+    )
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(database_module, "engine", engine)
+    monkeypatch.setattr(database_module, "SessionLocal", sessionmaker(bind=engine))
+    with Session(engine) as db:
+        db.add_all(
+            [
+                User(username="One", username_key="one", password_hash="test"),
+                User(username="Two", username_key="two", password_hash="test"),
+            ]
+        )
+        db.commit()
+    screenshot = paths["storage"] / "cars" / "1" / "screenshot.png"
+    screenshot.parent.mkdir(parents=True)
+    screenshot.write_bytes(b"old data")
+
+    assert normalize_desktop_workspace(paths) == "reset"
+    backups = list((data_dir / "backups").glob("legacy-multi-user-*.searchcar-backup"))
+    assert len(backups) == 1
+    assert not screenshot.exists()
+    with Session(engine) as db:
+        assert list(db.scalars(text("SELECT id FROM users"))) == []
+    engine.dispose()
 
 
 def test_desktop_environment_configures_bundled_browser(

@@ -6,6 +6,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 import secrets
+import shutil
 import sys
 import threading
 from datetime import datetime, timezone
@@ -476,6 +477,47 @@ def initialize_database() -> int | None:
     return None
 
 
+def normalize_desktop_workspace(paths: dict[str, Path]) -> str:
+    """Remove legacy desktop account UX before workers can use its data."""
+
+    from .database import SessionLocal, engine
+    from .desktop_onboarding import migrate_legacy_desktop_workspace
+
+    with SessionLocal.begin() as db:
+        result = migrate_legacy_desktop_workspace(db)
+    if result != "multiple":
+        return result
+
+    # The selected legacy policy is a clean desktop, but never a silent data
+    # loss: export and verify the old database and images before replacing them.
+    from .desktop_backup import export_backup
+    from .version import APP_VERSION
+
+    backup_path = paths["root"] / "backups" / (
+        f"legacy-multi-user-{_utc_filename()}.searchcar-backup"
+    )
+    engine.dispose()
+    export_backup(
+        paths["database"],
+        paths["storage"],
+        backup_path,
+        app_version=APP_VERSION,
+    )
+    for suffix in ("", "-wal", "-shm"):
+        stale = Path(f"{paths['database']}{suffix}")
+        if stale.exists():
+            stale.unlink()
+    cars_root = paths["storage"] / "cars"
+    if cars_root.exists():
+        shutil.rmtree(cars_root)
+    initialize_database()
+    logging.getLogger(__name__).warning(
+        "Legacy multi-user desktop data reset after verified backup: %s",
+        backup_path.name,
+    )
+    return "reset"
+
+
 def _session_cookie(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
@@ -542,15 +584,23 @@ def create_desktop_app(
             secure=False,
             samesite="strict",
         )
-        # A passwordless workspace receives a fresh local browser session on
-        # every application launch.  Legacy installations retain their normal
-        # local login flow and are never converted implicitly.
+        # Desktop always opens the hidden local workspace. A legacy one-user
+        # database is normalized before the server starts; a clean database
+        # with an existing device binding can recreate the workspace here.
         from .auth import create_session, now_utc, sync_csrf_cookie
         from .database import SessionLocal, settings
-        from .desktop_onboarding import desktop_workspace_user
+        from .desktop_license_client import has_local_license_binding
+        from .desktop_onboarding import create_desktop_workspace, desktop_workspace_user
 
         with SessionLocal() as db:
             user = desktop_workspace_user(db)
+            if user is None and has_local_license_binding(
+                Path(os.environ["SEARCHCAR_DESKTOP_DATA_DIR"])
+            ):
+                user = create_desktop_workspace(
+                    db,
+                    source="EXISTING_LICENSE_BINDING",
+                )
             if user is not None:
                 auth_token, _, session = create_session(db, user, request)
                 user.last_login_at = now_utc()
@@ -1029,6 +1079,7 @@ def main() -> None:
     clear_stale_maintenance_lock()
     apply_pending_restore(paths)
     initialize_database()
+    normalize_desktop_workspace(paths)
     from sqlalchemy import select
     from .database import SessionLocal, engine
     from .desktop_scheduler import prepare_overdue_scheduler_catch_up

@@ -25,6 +25,7 @@ from app.desktop_license_client import (
     MacOSKeychainStore,
     MacOSPreviewFileSecretStore,
     load_or_create_device_identity,
+    has_local_license_binding,
     native_secret_store,
     run_periodic_license_sync,
 )
@@ -639,6 +640,25 @@ def test_refresh_of_deleted_license_clears_license_but_keeps_device_identity(
     assert not (license_dir / "binding.json").exists()
     assert not (license_dir / "lease.json").exists()
     assert not (license_dir / "trusted-time.json").exists()
+
+
+def test_existing_license_binding_is_detected_without_opening_secure_storage(tmp_path) -> None:
+    license_dir = tmp_path / "license"
+    license_dir.mkdir()
+    (license_dir / "binding.json").write_text(
+        json.dumps(
+            {
+                "license_id": "018f6ac2-8c44-7df0-8f6d-2d34af37b337",
+                "device_id": "028f6ac2-8c44-7df0-8f6d-2d34af37b337",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert has_local_license_binding(tmp_path)
+
+    (license_dir / "binding.json").write_text("{}", encoding="utf-8")
+    assert not has_local_license_binding(tmp_path)
 
 
 def test_desktop_license_operation_logs_only_sanitized_diagnostics(

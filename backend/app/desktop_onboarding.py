@@ -7,10 +7,10 @@ customer, license and device binding.
 
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from .models import AuditLog, User
+from .models import AuditLog, AuthAttempt, AuthSession, User
 
 
 DESKTOP_WORKSPACE_USERNAME = "SearchCar"
@@ -34,12 +34,58 @@ def desktop_workspace_user(db: Session) -> User | None:
     )
 
 
+def migrate_legacy_desktop_workspace(db: Session) -> str:
+    """Turn a single pre-license local account into the hidden workspace.
+
+    The row is updated in place so every project, run, scheduler setting and
+    history record keeps its existing owner id. Multiple legacy users are not
+    merged: the desktop runtime creates a verified backup and starts clean.
+    """
+
+    users = list(db.scalars(select(User).order_by(User.id)))
+    if not users:
+        return "empty"
+    if len(users) != 1:
+        return "multiple"
+    user = users[0]
+    if (
+        user.username_key == DESKTOP_WORKSPACE_USERNAME_KEY
+        and user.password_hash == DESKTOP_WORKSPACE_PASSWORD_MARKER
+        and user.status == "ACTIVE"
+    ):
+        return "workspace"
+
+    user.username = DESKTOP_WORKSPACE_USERNAME
+    user.username_key = DESKTOP_WORKSPACE_USERNAME_KEY
+    user.password_hash = DESKTOP_WORKSPACE_PASSWORD_MARKER
+    user.role = "USER"
+    user.status = "ACTIVE"
+    user.project_limit = None
+    user.must_change_password = False
+    db.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
+    db.execute(delete(AuthAttempt))
+    db.add(
+        AuditLog(
+            actor_user_id=user.id,
+            target_user_id=user.id,
+            action="DESKTOP_WORKSPACE_MIGRATED",
+            entity_type="USER",
+            entity_id=str(user.id),
+            outcome="SUCCESS",
+            payload={"source": "LEGACY_SINGLE_USER"},
+        )
+    )
+    db.flush()
+    return "migrated"
+
+
 def create_desktop_workspace(
     db: Session,
     *,
     preferred_locale: str = "ru",
+    source: str = "LICENSE_ACTIVATION",
 ) -> User:
-    """Create the one local ownership workspace after a license is redeemed.
+    """Create the one local ownership workspace after license setup.
 
     A pre-existing user means the database belongs to an older installation or
     has already completed activation.  It must never be silently repurposed.
@@ -69,7 +115,7 @@ def create_desktop_workspace(
             entity_type="USER",
             entity_id=str(user.id),
             outcome="SUCCESS",
-            payload={"source": "LICENSE_ACTIVATION"},
+            payload={"source": source},
         )
     )
     return user

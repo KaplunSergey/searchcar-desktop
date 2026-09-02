@@ -252,8 +252,8 @@ Implemented and deployed:
 
 - a first-run device accepts an owner-issued activation code, creates a single
   passwordless local workspace and immediately signs it in;
-- existing local installations keep their existing login and data rather than
-  being silently rewritten;
+- an existing single-user desktop installation keeps all local data while its
+  visible legacy account is converted into the hidden workspace;
 - migration `0003_source_entitlements.sql` creates the source catalog and
   grants `encar` to all current active licenses;
 - new trials and owner-created licenses receive `encar` by default;
@@ -264,6 +264,13 @@ Implemented and deployed:
 - desktop hides the legacy local user-administration screen, including for an
   existing local administrator; customer, license and source management are
   centralised in Cloudflare `/owner`.
+- a legacy desktop database with one local account is converted in place to
+  the hidden passwordless `SearchCar` workspace before worker startup, keeping
+  all owner IDs, projects, history and scheduler data; desktop never presents
+  a login or logout control after the conversion.
+- an unexpected legacy multi-user database is exported as a verified local
+  backup before the desktop starts with a clean workspace; device and license
+  state remain outside that reset.
 - production D1 migration `0003_source_entitlements.sql` and the matching
   Worker version were deployed successfully.
 - local implementation now separates source access from license lifecycle:
