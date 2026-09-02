@@ -20,6 +20,7 @@ jobs:
   build-macos-arm64:
     name: macOS Apple Silicon app
     runs-on: macos-15
+    environment: license-production
     timeout-minutes: 120
     env:
       CARGO_TERM_COLOR: always

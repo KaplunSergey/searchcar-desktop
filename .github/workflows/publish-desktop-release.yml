@@ -32,6 +32,7 @@ jobs:
   publish:
     name: Verify and publish signed desktop release
     runs-on: ubuntu-latest
+    environment: license-production
     timeout-minutes: 15
     env:
       RELEASES_REPOSITORY: KaplunSergey/searchcar-desktop-releases

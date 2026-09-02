@@ -20,6 +20,7 @@ jobs:
   build-windows-x64:
     name: Windows x64 sidecar and NSIS
     runs-on: windows-latest
+    environment: license-production
     timeout-minutes: 120
     env:
       CARGO_TERM_COLOR: always
