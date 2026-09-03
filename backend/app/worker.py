@@ -9,6 +9,7 @@ from uuid import uuid4
 from sqlalchemy import select
 
 from .database import SessionLocal, engine, settings
+from .external_links import validated_external_url
 from .job_queue import claim_next_job
 from .models import (
     Car,
@@ -239,6 +240,7 @@ def _failure_detail(
     scope: str,
     project: Project | None = None,
     car: Car | None = None,
+    url: str | None = None,
 ) -> dict:
     technical = str(exc)
     if isinstance(exc, ScanError) or isinstance(getattr(exc, "code", None), str):
@@ -247,12 +249,18 @@ def _failure_detail(
         code = "TIMEOUT"
     else:
         code = type(exc).__name__[:30].upper()
+    external_url = url or (car.url if car else None)
+    try:
+        external_url = validated_external_url(external_url) if external_url else None
+    except ValueError:
+        external_url = None
     return {
         "scope": scope,
         "project_id": project.id if project else None,
         "project_name": project.name if project else None,
         "car_id": car.id if car else None,
         "encar_id": car.canonical_encar_id if car else None,
+        "url": external_url,
         "code": code,
         "technical": technical[:4000],
     }
@@ -301,6 +309,23 @@ def _should_apply_search_absence(page_mode: str) -> bool:
     # A first-page scan is deliberately a partial view of the search result,
     # so absence from it cannot change project-wide search membership.
     return page_mode == "ALL_PAGES"
+
+
+def _requires_initial_full_scan(db, project_id: int) -> bool:
+    return db.scalar(
+        select(ProjectScanRun.id)
+        .where(
+            ProjectScanRun.project_id == project_id,
+            ProjectScanRun.status == "SUCCEEDED",
+        )
+        .limit(1)
+    ) is None
+
+
+def _project_scan_modes(project: Project, initial_full_scan: bool) -> tuple[str, str]:
+    if initial_full_scan:
+        return "ACCURATE", "ALL_PAGES"
+    return project.scan_mode, getattr(project, "search_page_mode", "ALL_PAGES")
 
 
 def _list_changed(car: Car, list_data: dict) -> bool:
@@ -575,16 +600,16 @@ def process_job(job_id: int) -> None:
                         )
                     )
                     project_run.status = "RUNNING"
+                    initial_full_scan = _requires_initial_full_scan(db, project.id)
                     job.payload = {
                         **(job.payload or payload),
                         "current_project_id": project.id,
                     }
                     db.commit()
                     try:
-                        page_mode = getattr(
+                        scan_mode, page_mode = _project_scan_modes(
                             project,
-                            "search_page_mode",
-                            "FIRST_PAGE",
+                            initial_full_scan,
                         )
 
                         def update_page_progress(info: dict) -> None:
@@ -594,6 +619,7 @@ def process_job(job_id: int) -> None:
                             pagination[str(project.id)] = {
                                 **info,
                                 "mode": page_mode,
+                                "initial_full_scan": initial_full_scan,
                             }
                             job.payload = {
                                 **(job.payload or payload),
@@ -666,7 +692,7 @@ def process_job(job_id: int) -> None:
                                 )
                             )
                             if should_read_detail(
-                                project.scan_mode,
+                                scan_mode,
                                 is_new=known is None,
                                 list_changed=bool(known and _list_changed(known, list_data)),
                                 incomplete=incomplete,
@@ -702,6 +728,7 @@ def process_job(job_id: int) -> None:
                                         scope="SEARCH_CAR",
                                         project=project,
                                         car=known,
+                                        url=row.get("url"),
                                     )
                                     failure["encar_id"] = source_id
                                     failures.append(

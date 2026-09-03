@@ -54,6 +54,11 @@ test("ships required product surfaces and localization",async()=>{
   assert.match(page,/const displayedReport = current && completedProjectCount \? current : latestReport/);
   assert.match(page,/currentUpdateReport/);
   assert.match(page,/didAutoOpen/);
+  assert.match(page,/search_page_mode: project\?\.search_page_mode \|\| "ALL_PAGES"/);
+  assert.match(page,/className="failure-listing-link"/);
+  assert.match(page,/openExternalUrl\(failure\.url/);
+  assert.match(translations,/initialProjectScanHelp:/);
+  assert.match(translations,/openListing:/);
   assert.match(translations,/currentUpdateReport: "Промежуточный отчёт"/);
 });
 test("web and desktop dropdown controls use the same cross-platform styling",async()=>{

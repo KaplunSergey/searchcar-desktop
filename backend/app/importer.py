@@ -172,6 +172,7 @@ def _project_for(
             name_key=unique_name.casefold(),
             search_url=url,
             scan_mode="FAST",
+            search_page_mode="ALL_PAGES",
             auto_update=True,
         )
         db.add(project)

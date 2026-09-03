@@ -61,7 +61,7 @@ class Project(Base):
     owner_id: Mapped[int]=mapped_column(ForeignKey("users.id"), index=True)
     name: Mapped[str]=mapped_column(String(140)); name_key: Mapped[str]=mapped_column(String(140))
     search_url: Mapped[str]=mapped_column(Text); telegram_url: Mapped[str|None]=mapped_column(Text)
-    scan_mode: Mapped[str]=mapped_column(String(16), default="FAST"); search_page_mode: Mapped[str]=mapped_column(String(16), default="FIRST_PAGE")
+    scan_mode: Mapped[str]=mapped_column(String(16), default="FAST"); search_page_mode: Mapped[str]=mapped_column(String(16), default="ALL_PAGES")
     auto_update: Mapped[bool]=mapped_column(Boolean, default=True); created_at: Mapped[datetime]=mapped_column(UTCDateTime(), server_default=func.now()); updated_at: Mapped[datetime]=mapped_column(UTCDateTime(), server_default=func.now(), onupdate=func.now())
 class Car(Base):
     __tablename__="cars"

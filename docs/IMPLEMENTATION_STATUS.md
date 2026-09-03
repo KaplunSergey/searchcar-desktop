@@ -386,3 +386,22 @@ scoped `RELEASES_REPO_TOKEN` Actions secret.
 Still required: publish the first two signed versions, complete an installed
 old-to-new update and tampered-artifact acceptance test, and later add
 commercial OS signing/notarization.
+
+## Milestone M11 — installer UX and operator support (in progress)
+
+Implemented locally after the first `v0.1.0` publication:
+
+- new projects default to all search-result pages in the frontend, API, ORM
+  and legacy importer without rewriting existing project settings;
+- a project with no successful scan always performs its initial run as
+  `ACCURATE + ALL_PAGES`; failed or cancelled attempts do not disable that
+  initial full pass;
+- car-level scan failures retain a validated Encar URL and show an `Open
+  listing` action in both web and desktop reports; missing or invalid URLs are
+  not rendered;
+- the new-project form explains that the first run is intentionally more
+  thorough than later runs.
+
+Still required in M11: project filtering in scan history, structured rotating
+logs and the redacted one-click support report, documentation screenshots and
+the independent nontechnical walkthrough.

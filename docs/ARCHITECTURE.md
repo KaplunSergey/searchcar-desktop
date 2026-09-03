@@ -24,7 +24,10 @@ another user's change report.
 
 FAST scans read the search list and open details only for new, list-changed, incomplete or manually selected cars. ACCURATE scans open every non-excluded result. Search IDs are taken only from listing links. If the Encar page displays a different registration ID, the row is rejected instead of being merged through an alias. Price changes use the primary detail price and require two identical reads. Individual refresh uses the same protected detail pipeline.
 
-Each project independently selects `FIRST_PAGE` (default) or `ALL_PAGES`.
+Each project independently selects `FIRST_PAGE` or `ALL_PAGES` (default for new
+projects). Until a project has one successful scan, the worker overrides both
+saved choices with `ACCURATE + ALL_PAGES`; later scans use the project's saved
+detail and page modes.
 The full mode decodes Encar's search fragment, preserves filters and sorting,
 and changes only `page`/`cursor`. All pages are collected and deduplicated
 before absence is evaluated. A timeout, CAPTCHA, unexpected active page, empty

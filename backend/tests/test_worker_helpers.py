@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.scanner import TimeoutScanError
+from app.schemas import ProjectIn
 from app.services import merge_reliable_detail
 from app.worker import (
     PreviousState,
@@ -14,6 +15,7 @@ from app.worker import (
     _material_changes,
     _publish_project_results,
     _previous_state,
+    _project_scan_modes,
     _raise_if_cancelled,
     _read_verified_detail,
     _should_apply_search_absence,
@@ -24,6 +26,23 @@ from app.worker import (
 def test_only_complete_all_page_search_can_mark_listing_absent():
     assert _should_apply_search_absence("ALL_PAGES")
     assert not _should_apply_search_absence("FIRST_PAGE")
+
+
+def test_initial_project_scan_is_accurate_and_reads_all_pages():
+    project = SimpleNamespace(scan_mode="FAST", search_page_mode="FIRST_PAGE")
+
+    assert _project_scan_modes(project, True) == ("ACCURATE", "ALL_PAGES")
+    assert _project_scan_modes(project, False) == ("FAST", "FIRST_PAGE")
+
+
+def test_new_project_defaults_to_all_pages():
+    project = ProjectIn(
+        name="Tucson",
+        search_url="https://fem.encar.com/fc/fc_carsearchlist.html",
+    )
+
+    assert project.scan_mode == "FAST"
+    assert project.search_page_mode == "ALL_PAGES"
 
 
 def test_material_changes_are_concise():
@@ -188,6 +207,32 @@ def test_timeout_failure_is_structured():
     )
     assert failure["code"] == "TIMEOUT"
     assert failure["technical"] == "net::ERR_TIMED_OUT"
+
+
+def test_car_failure_exposes_only_a_valid_external_url():
+    car = SimpleNamespace(
+        id=7,
+        canonical_encar_id="42390937",
+        url="https://fem.encar.com/cars/detail/42390937",
+    )
+
+    failure = _failure_detail(
+        exc=TimeoutScanError("timeout"),
+        scope="SEARCH_CAR",
+        car=car,
+    )
+    invalid = _failure_detail(
+        exc=TimeoutScanError("timeout"),
+        scope="SEARCH_CAR",
+        car=SimpleNamespace(
+            id=8,
+            canonical_encar_id="42390938",
+            url="javascript:alert(1)",
+        ),
+    )
+
+    assert failure["url"] == car.url
+    assert invalid["url"] is None
 
 
 def test_every_missing_car_is_refreshed_individually():

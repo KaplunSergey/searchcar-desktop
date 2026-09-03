@@ -26,7 +26,8 @@ never proves a sale. Deletion disables only the selected project relation.
 User exclusion disables that user's relations while retaining the canonical car
 for shared storage and local URL lookup.
 
-`projects.search_page_mode` is `FIRST_PAGE` by default or `ALL_PAGES`.
+`projects.search_page_mode` is `ALL_PAGES` by default for new projects or can
+be set to `FIRST_PAGE`. Existing project settings are not rewritten.
 Only a complete `ALL_PAGES` scan can update project-wide search absence.
 
 `cars`, `car_snapshots`, `price_history`, `car_events` and `car_images`

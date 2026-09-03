@@ -36,6 +36,7 @@ from app.models import (
 )
 from app.sqlite_migrations import migrate_sqlite, sqlite_schema_version
 from app.worker import (
+    _requires_initial_full_scan,
     _reanchor_scheduler_after_manual_projects,
     _record_completed_scheduler_run,
     enqueue_scheduled,
@@ -338,6 +339,50 @@ def test_shutdown_cancels_queue_and_requests_running_job(tmp_path: Path) -> None
             select(ProjectScanRun).where(ProjectScanRun.scan_run_id == queued_id)
         )
         assert project_run.status == "CANCELLED"
+
+
+def test_new_project_uses_all_pages_until_one_scan_succeeds(tmp_path: Path) -> None:
+    engine = sqlite_engine(tmp_path)
+    migrate_sqlite(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        user = add_user(db)
+        project = Project(
+            owner_id=user.id,
+            name="Initial scan",
+            name_key="initial scan",
+            search_url="https://www.encar.com/initial",
+        )
+        db.add(project)
+        db.flush()
+
+        assert project.search_page_mode == "ALL_PAGES"
+        assert _requires_initial_full_scan(db, project.id)
+
+        failed = ScanRun(owner_id=user.id, kind="PROJECTS", status="FAILED")
+        db.add(failed)
+        db.flush()
+        db.add(
+            ProjectScanRun(
+                scan_run_id=failed.id,
+                project_id=project.id,
+                status="FAILED",
+            )
+        )
+        db.flush()
+        assert _requires_initial_full_scan(db, project.id)
+
+        succeeded = ScanRun(owner_id=user.id, kind="PROJECTS", status="SUCCEEDED")
+        db.add(succeeded)
+        db.flush()
+        db.add(
+            ProjectScanRun(
+                scan_run_id=succeeded.id,
+                project_id=project.id,
+                status="SUCCEEDED",
+            )
+        )
+        db.flush()
+        assert not _requires_initial_full_scan(db, project.id)
 
 
 def test_sqlite_datetime_round_trip_is_aware_utc(tmp_path: Path) -> None:

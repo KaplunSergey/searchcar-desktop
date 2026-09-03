@@ -149,6 +149,7 @@ type ScanFailure = {
   project_name?: string | null;
   car_id?: number | null;
   encar_id?: string | null;
+  url?: string | null;
   code: string;
   technical?: string | null;
 };
@@ -170,6 +171,7 @@ type ScanRecord = {
       string,
       {
         mode: "FIRST_PAGE" | "ALL_PAGES";
+        initial_full_scan?: boolean;
         current_page: number;
         total_pages: number;
         pages_visited: number;
@@ -1977,6 +1979,15 @@ function FailureList({ failures, t }: { failures: ScanFailure[]; t: Translate })
               {failure.project_name || failure.encar_id || `${failure.scope} #${failure.project_id || failure.car_id || "—"}`}
             </strong>
             <span>{failureText(failure.code, t)}</span>
+            {failure.url ? (
+              <button
+                type="button"
+                className="failure-listing-link"
+                onClick={() => void openExternalUrl(failure.url || "")}
+              >
+                {t("openListing")} ↗
+              </button>
+            ) : null}
           </div>
           {failure.technical ? (
             <details>
@@ -3989,7 +4000,7 @@ function ProjectModal({
     search_url: project?.search_url || "",
     telegram_url: project?.telegram_url || "",
     scan_mode: project?.scan_mode || "FAST",
-    search_page_mode: project?.search_page_mode || "FIRST_PAGE",
+    search_page_mode: project?.search_page_mode || "ALL_PAGES",
     auto_update: project?.auto_update ?? true,
   });
   const submit = (event: FormEvent) => {
@@ -4067,6 +4078,7 @@ function ProjectModal({
             )}
           </small>
         </label>
+        {!project ? <p className="initial-scan-help">{t("initialProjectScanHelp")}</p> : null}
         <label className="checkbox-label">
           <input
             type="checkbox"

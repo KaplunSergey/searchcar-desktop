@@ -34,7 +34,7 @@ class ProjectIn(BaseModel):
     search_url: str
     telegram_url: str|None=None
     scan_mode: Literal["FAST","ACCURATE"]="FAST"
-    search_page_mode: Literal["FIRST_PAGE","ALL_PAGES"]="FIRST_PAGE"
+    search_page_mode: Literal["FIRST_PAGE","ALL_PAGES"]="ALL_PAGES"
     auto_update: bool=True
     @field_validator("search_url")
     @classmethod
