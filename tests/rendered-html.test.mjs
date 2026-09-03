@@ -207,6 +207,9 @@ test("desktop updater uses the checked public key and signed CI artifacts", asyn
   assert.match(sidecarBuild, /backend_root \/ "requirements\.txt"/);
   assert.match(sidecarBuild, /backend_root \/ "alembic" \/ "script\.py\.mako"/);
   assert.match(updaterVerifier, /PublicKey::decode/);
+  assert.match(updaterVerifier, /decode\(encoded_signature\.trim\(\)\)/);
+  assert.match(updaterVerifier, /Signature::decode\(&decoded_signature\)/);
+  assert.doesNotMatch(updaterVerifier, /Signature::from_file/);
   assert.match(updaterVerifier, /public_key\s*\.verify\(&artifact, &signature, false\)/);
   assert.match(windowsWorkflow, /--features updater-signature-verifier/);
   assert.match(macWorkflow, /--features updater-signature-verifier/);
