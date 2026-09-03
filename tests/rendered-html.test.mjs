@@ -139,7 +139,7 @@ test("updater key generation keeps the private key outside Git with strict permi
   assert.match(runbook, /independent from the Cloudflare license signing key/i);
 });
 test("desktop updater uses the checked public key and signed CI artifacts", async () => {
-  const [tauriConfig, updaterPublicKey, shell, runtime, macWorkflow, windowsWorkflow, publishWorkflow, sidecarBuild, updaterVerifier] = await Promise.all([
+  const [tauriConfig, updaterPublicKey, shell, runtime, macWorkflow, windowsWorkflow, publishWorkflow, sidecarBuild, updaterVerifier, cargo] = await Promise.all([
     "desktop/src-tauri/tauri.conf.json",
     "desktop/updater-public-key.txt",
     "desktop/src-tauri/src/lib.rs",
@@ -148,7 +148,8 @@ test("desktop updater uses the checked public key and signed CI artifacts", asyn
     ".github/workflows/windows-desktop.yml",
     ".github/workflows/publish-desktop-release.yml",
     "scripts/build_desktop_sidecar.py",
-    "desktop/src-tauri/src/bin/verify_updater_signature.rs",
+    "desktop/src-tauri/tools/verify_updater_signature.rs",
+    "desktop/src-tauri/Cargo.toml",
   ].map((path) => readFile(new URL(path, root), "utf8")));
   const tauri = JSON.parse(tauriConfig);
   const publicKey = updaterPublicKey.trim();
@@ -207,6 +208,11 @@ test("desktop updater uses the checked public key and signed CI artifacts", asyn
   assert.match(sidecarBuild, /backend_root \/ "alembic" \/ "script\.py\.mako"/);
   assert.match(updaterVerifier, /PublicKey::decode/);
   assert.match(updaterVerifier, /public_key\s*\.verify\(&artifact, &signature, false\)/);
+  assert.match(windowsWorkflow, /--features updater-signature-verifier/);
+  assert.match(macWorkflow, /--features updater-signature-verifier/);
+  assert.match(cargo, /path = "tools\/verify_updater_signature\.rs"/);
+  assert.match(cargo, /required-features = \["updater-signature-verifier"\]/);
+  assert.doesNotMatch(cargo, /path = "src\/bin\/verify_updater_signature\.rs"/);
 });
 test("local desktop launchers keep macOS and Windows builds reproducible", async () => {
   const [macLauncher, windowsLauncher, windowsBuild, windowsSmoke, sidecarBuild, buildGuide, rustMain, rustShell, startupPage] = await Promise.all([

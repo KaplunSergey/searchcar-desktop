@@ -160,6 +160,7 @@ jobs:
           cp "$updater.sig" "$updater_artifact.sig"
           cargo run --quiet --locked \
             --manifest-path desktop/src-tauri/Cargo.toml \
+            --features updater-signature-verifier \
             --bin verify_updater_signature -- \
             desktop/updater-public-key.txt "$updater_artifact" "$updater_artifact.sig"
 

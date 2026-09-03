@@ -197,6 +197,7 @@ jobs:
           Copy-Item -LiteralPath $signature -Destination $artifactSignature
           cargo run --quiet --locked `
             --manifest-path desktop/src-tauri/Cargo.toml `
+            --features updater-signature-verifier `
             --bin verify_updater_signature -- `
             desktop/updater-public-key.txt $artifactInstaller $artifactSignature
           if ($LASTEXITCODE -ne 0) {

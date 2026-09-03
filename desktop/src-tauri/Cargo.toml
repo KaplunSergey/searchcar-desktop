@@ -5,9 +5,17 @@ description = "SearchCar Desktop"
 authors = ["SearchCar"]
 edition = "2021"
 
+[features]
+updater-signature-verifier = ["dep:minisign-verify"]
+
 [lib]
 name = "searchcar_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "verify_updater_signature"
+path = "tools/verify_updater_signature.rs"
+required-features = ["updater-signature-verifier"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -16,7 +24,7 @@ tauri-build = { version = "2", features = [] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
-minisign-verify = "0.2.5"
+minisign-verify = { version = "0.2.5", optional = true }
 rand = "0.9"
 serde_json = "1"
 tauri = { version = "2", features = ["tray-icon"] }
