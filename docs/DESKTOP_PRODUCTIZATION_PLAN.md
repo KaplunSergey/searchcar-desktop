@@ -1056,9 +1056,12 @@ trial, scan, backup, renewal и transfer только по документац�
   этот режим, успешный запуск снимает);
 - regression-тесты строк ошибок (completed: worker отдаёт только валидный URL,
   UI показывает внешнюю ссылку только для него, а allowlist проверен отдельно);
-- long scan cancellation and crash recovery;
-- scheduler/tray/sleep/wake/DST simulations;
-- network/captcha/server outage simulations;
+- long scan cancellation and crash recovery (completed: checkpoint cancellation,
+  partial report preservation, shutdown and startup-recovery scenarios);
+- scheduler/tray/sleep/wake/DST simulations (completed: single catch-up,
+  tray pause, sleep interruption and UTC/DST repeated-hour scenarios);
+- network/CAPTCHA/server-outage simulations (completed: timeout retries once
+  then becomes a structured error; CAPTCHA interrupts before listing parsing);
 - D1 backup restore drill;
 - corrupted backup/update tests;
 - Windows 10/11 and macOS 13+ matrix;

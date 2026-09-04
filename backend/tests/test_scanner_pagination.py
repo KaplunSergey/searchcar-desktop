@@ -5,8 +5,12 @@ import pytest
 
 from app import scanner
 from app.scanner import (
+    CaptchaError,
     IncompletePaginationError,
     SearchPage,
+    TimeoutScanError,
+    _collect_search_page,
+    _open_page,
     collect_search_pages,
     search_page_number,
     search_url_for_page,
@@ -47,6 +51,21 @@ class FakePage:
 
     def wait_for_timeout(self, milliseconds: int):
         self.waits.append(milliseconds)
+
+
+class OutagePage(FakePage):
+    def goto(self, *_args, **_kwargs):
+        raise scanner.PlaywrightTimeout("net::ERR_TIMED_OUT")
+
+
+class CaptchaPage(FakePage):
+    class Body:
+        def inner_text(self, **_kwargs):
+            return "자동입력 방지 보안문자"
+
+    def locator(self, selector):
+        assert selector == "body"
+        return self.Body()
 
 
 def test_search_page_url_preserves_filters_and_resets_cursor():
@@ -170,3 +189,20 @@ def test_expected_empty_second_page_is_not_treated_as_complete(monkeypatch):
             modern_search_url(),
             all_pages=True,
         )
+
+
+def test_network_outage_retries_once_then_returns_timeout() -> None:
+    page = OutagePage()
+
+    with pytest.raises(TimeoutScanError, match="ERR_TIMED_OUT"):
+        _open_page(page, "https://www.encar.com/list")
+
+    assert page.waits == [2500]
+
+
+def test_captcha_search_page_is_reported_before_any_listing_is_read(monkeypatch) -> None:
+    monkeypatch.setattr(scanner, "_open_page", lambda *_args: None)
+    monkeypatch.setattr(scanner, "_wait_for_search_results", lambda *_args: None)
+
+    with pytest.raises(CaptchaError, match="CAPTCHA"):
+        _collect_search_page(CaptchaPage(), modern_search_url())

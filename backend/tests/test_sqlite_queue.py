@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -15,6 +16,7 @@ from app.desktop_onboarding import (
 )
 from app.desktop_scheduler import (
     prepare_overdue_scheduler_catch_up,
+    scheduler_is_overdue_after_resume,
     toggle_all_schedulers,
     tray_scheduler_status,
 )
@@ -684,6 +686,24 @@ def test_resume_uses_last_completed_run_even_when_old_timer_is_in_future(
 
         assert prepare_overdue_scheduler_catch_up(db, now=now) == [setting.id]
         assert setting.next_run_at == now
+
+
+def test_resume_interval_uses_utc_when_dst_repeats_local_clock_hour() -> None:
+    completed_at = datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc)
+    resumed_at = datetime(2026, 10, 25, 1, 30, tzinfo=timezone.utc)
+    warsaw = ZoneInfo("Europe/Warsaw")
+    setting = SchedulerSetting(
+        user_id=1,
+        enabled=True,
+        interval_minutes=60,
+        last_completed_run_at=completed_at,
+    )
+
+    # Both instants display as 02:30 in Warsaw when summer time ends, but an
+    # hour really elapsed. Scheduler state is UTC, so catch-up is not skipped.
+    assert completed_at.astimezone(warsaw).strftime("%H:%M") == "02:30"
+    assert resumed_at.astimezone(warsaw).strftime("%H:%M") == "02:30"
+    assert scheduler_is_overdue_after_resume(setting, now=resumed_at)
 
 
 def test_completed_scheduler_run_records_full_update_timestamp(tmp_path: Path) -> None:
