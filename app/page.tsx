@@ -243,6 +243,16 @@ type DesktopDataStatus = {
   backups: DesktopBackup[];
   restore_result?: { status: string; error?: string } | null;
 };
+type DesktopSupportReport = {
+  name: string;
+  report_id: string;
+  created_at: string;
+  bytes: number;
+  entries: number;
+};
+type TauriWindow = Window & {
+  __TAURI__?: { core?: { invoke?: (command: string, payload: { name: string }) => Promise<string | null> } };
+};
 
 function restoreResultPresentation(
   result: NonNullable<DesktopDataStatus["restore_result"]>,
@@ -3529,6 +3539,8 @@ function Settings({
   );
   const [migrationStorage, setMigrationStorage] = useState("");
   const backupFileInput = useRef<HTMLInputElement>(null);
+  const [diagnosticHours, setDiagnosticHours] = useState<1 | 24 | 72 | 168>(24);
+  const [supportReport, setSupportReport] = useState<DesktopSupportReport | null>(null);
   const [schedulerDraft, setSchedulerDraft] = useState<SchedulerRecord | null>(null);
   const scheduler = schedulerDraft ??
     schedulerQuery.data ?? {
@@ -3575,6 +3587,42 @@ function Settings({
     },
     onError: () => notify(t("backupFailed")),
   });
+  const supportReportMutation = useMutation({
+    mutationFn: () =>
+      request<DesktopSupportReport>(
+        `/desktop/diagnostics/reports?hours=${diagnosticHours}`,
+        { method: "POST" },
+      ),
+    onSuccess: (report) => {
+      setSupportReport(report);
+      notify(t("diagnosticsCreated"));
+    },
+    onError: () => notify(t("diagnosticsFailed")),
+  });
+  const saveSupportReport = async () => {
+    if (!supportReport) return;
+    const download = () => {
+      const link = document.createElement("a");
+      link.href = `${api}/desktop/diagnostics/reports/${encodeURIComponent(supportReport.name)}/download`;
+      link.download = supportReport.name;
+      link.hidden = true;
+      document.body.append(link);
+      link.click();
+      link.remove();
+    };
+    try {
+      const invoke = (window as TauriWindow).__TAURI__?.core?.invoke;
+      if (invoke) {
+        const destination = await invoke("save_support_report", { name: supportReport.name });
+        if (destination) notify(t("diagnosticsSaved"));
+        return;
+      }
+    } catch {
+      // The protected download route is a safe fallback when the native dialog
+      // is unavailable in a particular WebView build.
+    }
+    download();
+  };
   const importBackupMutation = useMutation({
     mutationFn: (file: File) =>
       request<DesktopBackup>(
@@ -4085,6 +4133,62 @@ function Settings({
               </Button>
             </div>
           </details> : null}
+        </section>
+      ) : null}
+      {canManageDesktopData ? (
+        <section className="panel settings import-panel diagnostics-panel">
+          <div className="setting-row">
+            <div>
+              <h3>{t("diagnosticsTitle")}</h3>
+              <p>{t("diagnosticsHelp")}</p>
+            </div>
+            <div className="diagnostics-actions">
+              <label>
+                {t("diagnosticsPeriod")}
+                <select
+                  value={diagnosticHours}
+                  onChange={(event) => setDiagnosticHours(Number(event.target.value) as 1 | 24 | 72 | 168)}
+                >
+                  <option value={1}>{t("diagnosticsHour")}</option>
+                  <option value={24}>{t("diagnosticsDay")}</option>
+                  <option value={72}>{t("diagnosticsDays3")}</option>
+                  <option value={168}>{t("diagnosticsDays7")}</option>
+                </select>
+              </label>
+              <Button
+                kind="primary"
+                disabled={supportReportMutation.isPending}
+                onClick={() => supportReportMutation.mutate()}
+              >
+                {supportReportMutation.isPending ? t("diagnosticsCreating") : t("createSupportReport")}
+              </Button>
+            </div>
+          </div>
+          {supportReport ? (
+            <div className="diagnostics-result" role="status">
+              <span>
+                <b>{t("diagnosticsReportCode")}: {supportReport.report_id}</b>
+                <small>{supportReport.entries} {t("diagnosticsLogEntries")} · {(supportReport.bytes / 1024).toFixed(1)} KB</small>
+              </span>
+              <div className="backup-actions">
+                <Button kind="primary" onClick={() => void saveSupportReport()}>
+                  {t("saveSupportReport")}
+                </Button>
+                <Button
+                  onClick={() => {
+                    const copy = navigator.clipboard?.writeText(supportReport.report_id);
+                    if (copy) {
+                      void copy
+                        .then(() => notify(t("diagnosticsCodeCopied")))
+                        .catch(() => notify(t("actionFailed")));
+                    }
+                  }}
+                >
+                  {t("copySupportReportCode")}
+                </Button>
+              </div>
+            </div>
+          ) : null}
         </section>
       ) : null}
     </>

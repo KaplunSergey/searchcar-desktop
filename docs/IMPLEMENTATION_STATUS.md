@@ -407,7 +407,12 @@ Implemented locally after the first `v0.1.0` publication:
   filters.
 - renamed active projects use their current name in reports and report filters;
   a deleted project's last saved name remains the fallback.
+- desktop backend writes rotating JSON logs with a per-request correlation ID;
+  `Настройки → Диагностика` creates a redacted ZIP for the last hour, 24 hours,
+  3 days or 7 days. It uses the native system file chooser and falls back to a
+  protected ZIP download when that WebView command is unavailable. The archive
+  contains only `manifest.json` and sanitized `logs.jsonl`; it excludes local
+  data, backups, images, license state and cookies.
 
-Still required in M11: structured rotating logs and the redacted one-click
-support report, documentation screenshots and the independent nontechnical
-walkthrough.
+Still required in M11: archive composition preview/open-folder actions,
+documentation screenshots and the independent nontechnical walkthrough.

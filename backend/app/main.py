@@ -108,6 +108,30 @@ storage_path.mkdir(parents=True, exist_ok=True)
 MAX_DESKTOP_BACKUP_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024
 
 
+@app.middleware("http")
+async def attach_desktop_log_context(request: Request, call_next):
+    """Keep a short request id across local API log records."""
+
+    from .desktop_runtime import desktop_correlation_id
+
+    token = desktop_correlation_id.set(f"request-{uuid4().hex[:12]}")
+    response = None
+    try:
+        response = await call_next(request)
+        return response
+    except Exception:
+        logger.exception("Local API request failed: method=%s path=%s", request.method, request.url.path)
+        raise
+    finally:
+        logger.info(
+            "Local API request completed: method=%s path=%s status=%s",
+            request.method,
+            request.url.path,
+            getattr(response, "status_code", 500),
+        )
+        desktop_correlation_id.reset(token)
+
+
 def user_out(user: User, db: Session, *, include_usage: bool = True) -> dict:
     result = {
         "id": user.id,
@@ -2397,6 +2421,17 @@ def desktop_backup_path(name: str) -> Path:
     return path
 
 
+def desktop_diagnostics_path(name: str) -> Path:
+    from .desktop_diagnostics import support_report_path
+
+    try:
+        return support_report_path(desktop_data_root() / "diagnostics", name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "diagnostic_report_not_found") from exc
+
+
 def _require_desktop_data_access(current: User, db: Session) -> None:
     """Allow data tools to an admin or the one passwordless desktop workspace."""
 
@@ -2451,6 +2486,55 @@ def desktop_data_status(
         ],
         "restore_result": restore_result,
     }
+
+
+@app.post("/api/desktop/diagnostics/reports")
+def create_desktop_support_report(
+    hours: int = Query(24),
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    _require_desktop_data_access(current, db)
+    from .desktop_diagnostics import build_support_report
+
+    root = desktop_data_root()
+    try:
+        report = build_support_report(
+            root / "logs",
+            root / "diagnostics",
+            app_version=app.version,
+            hours=hours,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    audit(
+        db,
+        action="DESKTOP_SUPPORT_REPORT_CREATED",
+        actor_user_id=current.id,
+        entity_type="DIAGNOSTIC_REPORT",
+        entity_id=report.report_id,
+    )
+    db.commit()
+    return report.as_dict()
+
+
+@app.get("/api/desktop/diagnostics/reports/{name}/download")
+def download_desktop_support_report(
+    name: str,
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    _require_desktop_data_access(current, db)
+    path = desktop_diagnostics_path(name)
+    return FileResponse(
+        path,
+        media_type="application/zip",
+        filename=path.name,
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.post("/api/desktop/backups")

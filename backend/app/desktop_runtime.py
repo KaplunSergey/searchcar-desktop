@@ -1,4 +1,5 @@
 import argparse
+from contextvars import ContextVar
 import hashlib
 import hmac
 import json
@@ -19,6 +20,9 @@ PLAYWRIGHT_DRIVER_MANIFEST_NAME = "searchcar-playwright-driver-manifest.json"
 BUNDLED_CHROMIUM_ENV = "SEARCHCAR_CHROMIUM_EXECUTABLE"
 GRACEFUL_SHUTDOWN_SECONDS = 35
 PARENT_WATCH_INTERVAL_SECONDS = 2.0
+desktop_correlation_id: ContextVar[str] = ContextVar(
+    "searchcar_desktop_correlation_id", default="desktop-process"
+)
 
 
 class DesktopUpdateCheckRelay:
@@ -189,6 +193,9 @@ class JsonLogFormatter(logging.Formatter):
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
+            "correlation_id": getattr(
+                record, "correlation_id", desktop_correlation_id.get()
+            ),
         }
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)

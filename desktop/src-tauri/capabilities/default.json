@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Core capability for the SearchCar desktop window",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "allow-save-support-report"]
 }

@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-save-support-report"
+description = "Allows the main SearchCar window to save a generated support report through the native file chooser."
+commands.allow = ["save_support_report"]

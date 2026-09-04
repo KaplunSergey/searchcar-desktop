@@ -8,7 +8,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -55,11 +55,47 @@ struct TrayStatus {
 const LEASE_MESSAGE_PREFIX: &str = "SEARCHCAR-LICENSE-LEASE-V1\n";
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const SUPPORT_REPORT_PREFIX: &str = "searchcar-support-";
 
 enum StartupWait {
     Ready,
     Terminated,
     TimedOut,
+}
+
+#[tauri::command]
+async fn save_support_report(app: tauri::AppHandle, name: String) -> Result<Option<String>, String> {
+    if Path::new(&name).file_name().and_then(|value| value.to_str()) != Some(name.as_str())
+        || !name.starts_with(SUPPORT_REPORT_PREFIX)
+        || !name.ends_with(".zip")
+    {
+        return Err("Недопустимое имя отчёта.".to_string());
+    }
+    let source: PathBuf = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("diagnostics")
+        .join(&name);
+    if !source.is_file() || source.is_symlink() {
+        return Err("Отчёт больше недоступен. Создайте его снова.".to_string());
+    }
+    let Some(destination) = app
+        .dialog()
+        .file()
+        .set_title("Сохранить отчёт SearchCar")
+        .set_file_name(&name)
+        .add_filter("Архив отчёта SearchCar", &["zip"])
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let destination = destination
+        .into_path()
+        .map_err(|error| format!("Не удалось выбрать папку: {error}"))?;
+    fs::copy(&source, &destination)
+        .map_err(|error| format!("Не удалось сохранить отчёт: {error}"))?;
+    Ok(Some(destination.to_string_lossy().into_owned()))
 }
 
 /// Defense in depth for production builds.  The Python sidecar enforces the
@@ -806,6 +842,7 @@ fn start_update_check(app: &tauri::AppHandle, interactive: bool) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![save_support_report])
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
         }))
