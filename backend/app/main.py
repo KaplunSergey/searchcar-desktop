@@ -2537,6 +2537,34 @@ def download_desktop_support_report(
     )
 
 
+@app.post("/api/desktop/diagnostics/reports/{name}/reveal", status_code=202)
+def reveal_desktop_support_report(
+    name: str,
+    current: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    _require_desktop_data_access(current, db)
+    from .desktop_diagnostics import reveal_support_report
+
+    try:
+        reveal_support_report(desktop_data_root() / "diagnostics", name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "diagnostic_report_not_found") from exc
+    except OSError as exc:
+        raise HTTPException(503, "diagnostic_folder_unavailable") from exc
+    audit(
+        db,
+        action="DESKTOP_SUPPORT_REPORT_REVEALED",
+        actor_user_id=current.id,
+        entity_type="DIAGNOSTIC_REPORT",
+        entity_id=name,
+    )
+    db.commit()
+    return {"status": "opened"}
+
+
 @app.post("/api/desktop/backups")
 def create_desktop_backup(
     current: User = Depends(require_csrf),

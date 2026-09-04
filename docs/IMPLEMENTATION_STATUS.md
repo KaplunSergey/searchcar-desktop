@@ -410,9 +410,12 @@ Implemented locally after the first `v0.1.0` publication:
 - desktop backend writes rotating JSON logs with a per-request correlation ID;
   `Настройки → Диагностика` creates a redacted ZIP for the last hour, 24 hours,
   3 days or 7 days. It uses the native system file chooser and falls back to a
-  protected ZIP download when that WebView command is unavailable. The archive
-  contains only `manifest.json` and sanitized `logs.jsonl`; it excludes local
-  data, backups, images, license state and cookies.
+  protected ZIP download when that WebView command is unavailable. The result
+  previews its two archive files and can reveal the report in Finder/Explorer
+  through the local authenticated backend.
+  The archive contains only `manifest.json` and sanitized `logs.jsonl`; it
+  excludes local data, backups, images, license state and cookies.
 
-Still required in M11: archive composition preview/open-folder actions,
-documentation screenshots and the independent nontechnical walkthrough.
+Still required in M11: add screenshots from the final Windows and macOS
+installers to the completed pilot guide and run its independent nontechnical
+walkthrough.

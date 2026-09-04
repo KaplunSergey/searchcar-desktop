@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -164,3 +166,16 @@ def support_report_path(reports_dir: Path, name: str) -> Path:
     if not path.is_file() or path.is_symlink():
         raise FileNotFoundError(name)
     return path
+
+
+def reveal_support_report(reports_dir: Path, name: str) -> None:
+    """Reveal one validated local report without passing a path through a shell."""
+
+    path = support_report_path(reports_dir, name)
+    if sys.platform == "darwin":
+        command = ["open", "-R", str(path)]
+    elif sys.platform.startswith("win"):
+        command = ["explorer.exe", f"/select,{path}"]
+    else:
+        command = ["xdg-open", str(path.parent)]
+    subprocess.Popen(command, close_fds=True)

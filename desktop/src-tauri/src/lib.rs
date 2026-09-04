@@ -63,15 +63,14 @@ enum StartupWait {
     TimedOut,
 }
 
-#[tauri::command]
-async fn save_support_report(app: tauri::AppHandle, name: String) -> Result<Option<String>, String> {
-    if Path::new(&name).file_name().and_then(|value| value.to_str()) != Some(name.as_str())
+fn support_report_path(app: &tauri::AppHandle, name: &str) -> Result<PathBuf, String> {
+    if Path::new(name).file_name().and_then(|value| value.to_str()) != Some(name)
         || !name.starts_with(SUPPORT_REPORT_PREFIX)
         || !name.ends_with(".zip")
     {
         return Err("Недопустимое имя отчёта.".to_string());
     }
-    let source: PathBuf = app
+    let source = app
         .path()
         .app_data_dir()
         .map_err(|error| error.to_string())?
@@ -80,6 +79,12 @@ async fn save_support_report(app: tauri::AppHandle, name: String) -> Result<Opti
     if !source.is_file() || source.is_symlink() {
         return Err("Отчёт больше недоступен. Создайте его снова.".to_string());
     }
+    Ok(source)
+}
+
+#[tauri::command]
+async fn save_support_report(app: tauri::AppHandle, name: String) -> Result<Option<String>, String> {
+    let source = support_report_path(&app, &name)?;
     let Some(destination) = app
         .dialog()
         .file()

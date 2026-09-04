@@ -19,6 +19,8 @@ documented in
 [`docs/DESKTOP_LICENSE_ENFORCEMENT.md`](docs/DESKTOP_LICENSE_ENFORCEMENT.md).
 The maintainer checklist for preparing, building, validating and rolling back
 a desktop pilot release is in [`docs/RELEASE_RUNBOOK.md`](docs/RELEASE_RUNBOOK.md).
+The Russian-language guide for a pilot user is in
+[`docs/DESKTOP_PILOT_GUIDE.md`](docs/DESKTOP_PILOT_GUIDE.md).
 
 Until the desktop milestones are implemented, the baseline application below
 continues to run through Docker exactly as it did in the source repository.

@@ -251,7 +251,7 @@ type DesktopSupportReport = {
   entries: number;
 };
 type TauriWindow = Window & {
-  __TAURI__?: { core?: { invoke?: (command: string, payload: { name: string }) => Promise<string | null> } };
+  __TAURI__?: { core?: { invoke?: <T>(command: string, payload: { name: string }) => Promise<T> } };
 };
 
 function restoreResultPresentation(
@@ -3613,7 +3613,7 @@ function Settings({
     try {
       const invoke = (window as TauriWindow).__TAURI__?.core?.invoke;
       if (invoke) {
-        const destination = await invoke("save_support_report", { name: supportReport.name });
+        const destination = await invoke<string | null>("save_support_report", { name: supportReport.name });
         if (destination) notify(t("diagnosticsSaved"));
         return;
       }
@@ -3622,6 +3622,16 @@ function Settings({
       // is unavailable in a particular WebView build.
     }
     download();
+  };
+  const openSupportReportFolder = async () => {
+    if (!supportReport) return;
+    try {
+      await request(`/desktop/diagnostics/reports/${encodeURIComponent(supportReport.name)}/reveal`, {
+        method: "POST",
+      });
+    } catch {
+      notify(t("actionFailed"));
+    }
   };
   const importBackupMutation = useMutation({
     mutationFn: (file: File) =>
@@ -4169,10 +4179,14 @@ function Settings({
               <span>
                 <b>{t("diagnosticsReportCode")}: {supportReport.report_id}</b>
                 <small>{supportReport.entries} {t("diagnosticsLogEntries")} · {(supportReport.bytes / 1024).toFixed(1)} KB</small>
+                <small>{t("diagnosticsContents")}</small>
               </span>
               <div className="backup-actions">
                 <Button kind="primary" onClick={() => void saveSupportReport()}>
                   {t("saveSupportReport")}
+                </Button>
+                <Button onClick={() => void openSupportReportFolder()}>
+                  {t("openSupportReportFolder")}
                 </Button>
                 <Button
                   onClick={() => {
