@@ -203,6 +203,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Windows updater signature does not match desktop/updater-public-key.txt"
           }
+          $tamperedInstaller = "work/windows-smoke/tampered-updater.exe"
+          $tamperedBytes = [System.IO.File]::ReadAllBytes($artifactInstaller)
+          $tamperedBytes[$tamperedBytes.Length - 1] = $tamperedBytes[$tamperedBytes.Length - 1] -bxor 1
+          [System.IO.File]::WriteAllBytes($tamperedInstaller, $tamperedBytes)
+          cargo run --quiet --locked `
+            --manifest-path desktop/src-tauri/Cargo.toml `
+            --features updater-signature-verifier `
+            --bin verify_updater_signature -- `
+            desktop/updater-public-key.txt $tamperedInstaller $artifactSignature
+          if ($LASTEXITCODE -eq 0) {
+            throw "Tampered updater unexpectedly passed signature verification"
+          }
+          Remove-Item -LiteralPath $tamperedInstaller -Force
           $artifactHash = (Get-FileHash $artifactInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
           "$artifactHash  SearchCar-Desktop-Windows-x64-setup.exe" | Set-Content `
             "work/windows-artifact/SHA256SUMS.txt" -Encoding ascii

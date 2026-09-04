@@ -17,7 +17,13 @@ def test_support_report_keeps_only_redacted_structured_logs(tmp_path) -> None:
                 "timestamp": now,
                 "level": "ERROR",
                 "logger": "app.scanner",
-                "message": "token=do-not-share password:also-secret /Users/alice/SearchCar?code=hidden",
+                "message": (
+                    "token=do-not-share password:also-secret "
+                    "activation_code=unused-code device_key=private-device-key "
+                    "private_key=private-signing-key comment=internal-note "
+                    "C:\\Users\\Alice\\SearchCar\\data\\searchcar.sqlite3 "
+                    "/Users/alice/SearchCar?code=hidden"
+                ),
                 "exception": "private stack trace",
             }
         )
@@ -35,6 +41,10 @@ def test_support_report_keeps_only_redacted_structured_logs(tmp_path) -> None:
     assert report.entries == 1
     assert "do-not-share" not in output
     assert "also-secret" not in output
+    assert "unused-code" not in output
+    assert "private-device-key" not in output
+    assert "private-signing-key" not in output
+    assert "internal-note" not in output
     assert "alice" not in output
     assert "private stack trace" not in output
     assert "<redacted>" in output

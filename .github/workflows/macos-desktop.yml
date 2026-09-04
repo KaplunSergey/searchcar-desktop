@@ -163,6 +163,25 @@ jobs:
             --features updater-signature-verifier \
             --bin verify_updater_signature -- \
             desktop/updater-public-key.txt "$updater_artifact" "$updater_artifact.sig"
+          tampered_updater="work/macos-artifact/tampered-updater.tar.gz"
+          cp "$updater_artifact" "$tampered_updater"
+          python - "$tampered_updater" <<'PY'
+          from pathlib import Path
+          import sys
+          path = Path(sys.argv[1])
+          data = bytearray(path.read_bytes())
+          data[-1] ^= 1
+          path.write_bytes(data)
+          PY
+          if cargo run --quiet --locked \
+            --manifest-path desktop/src-tauri/Cargo.toml \
+            --features updater-signature-verifier \
+            --bin verify_updater_signature -- \
+            desktop/updater-public-key.txt "$tampered_updater" "$updater_artifact.sig"; then
+            echo "Tampered updater unexpectedly passed signature verification" >&2
+            exit 1
+          fi
+          rm -f "$tampered_updater"
 
           ditto -c -k --sequesterRsrc --keepParent "$app" \
             work/macos-artifact/SearchCar-Desktop-macOS-arm64.zip

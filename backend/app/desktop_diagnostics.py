@@ -15,7 +15,8 @@ MAX_REPORT_LOG_BYTES = 2 * 1024 * 1024
 MAX_REPORTS = 10
 REPORT_PREFIX = "searchcar-support-"
 _SENSITIVE_VALUE = re.compile(
-    r"(?i)\b(activation[_ -]?code|authorization|bearer|cookie|csrf|password|secret|token)"
+    r"(?i)\b(activation[_ -]?code|authorization|bearer|comment|cookie|csrf|"
+    r"device[_ -]?key|license[_ -]?key|password|private[_ -]?key|secret|token)"
     r"\s*([=:])\s*[^\s,;]+"
 )
 _URL_QUERY_VALUE = re.compile(r"([?&][^=&\s]+)=([^&\s]+)")

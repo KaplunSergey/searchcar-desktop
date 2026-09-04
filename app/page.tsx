@@ -18,6 +18,7 @@ import {
 } from "recharts";
 import { FormEvent, PointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { dict, type Key, type Locale } from "./translations";
+import { filterReportItems, reportProjectIds } from "./report-filter";
 import { APP_VERSION } from "./version";
 
 type View =
@@ -184,10 +185,6 @@ type ScanRecord = {
   error?: string | null;
   created_at: string;
 };
-
-function reportProjectIds(item: ScanReportItem) {
-  return item.project_ids?.length ? item.project_ids : [item.project_id];
-}
 
 function reportProjectNames(
   item: ScanReportItem,
@@ -1908,12 +1905,13 @@ function ReportList({
   const effectiveSelectedProjectIds = selectedProjectIds.length
     ? new Set(selectedProjectIds)
     : new Set(availableProjects.map((project) => project.id));
-  const sorted = items
-    .filter((item) => {
-      const projectIds = reportProjectIds(item);
-      return effectiveSelectedChanges.has(item.change)
-        && projectIds.some((id) => effectiveSelectedProjectIds.has(id));
-    })
+  const sorted = filterReportItems(
+    items,
+    availableChanges,
+    availableProjects.map((project) => project.id),
+    excludedChanges,
+    excludedProjectIds,
+  )
     .sort(
       (left, right) =>
         reportPriority(left) - reportPriority(right) ||

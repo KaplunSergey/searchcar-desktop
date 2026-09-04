@@ -1046,8 +1046,9 @@ trial, scan, backup, renewal и transfer только по документац�
 - parser regression against known fixtures (completed: sanitised Encar detail,
   similar-price and sold-page fixtures cover primary price, key fields and
   identity handling);
-- regression-тесты совместного фильтра истории по проектам и статусам, включая
-  удалённый после запуска проект, пустой результат и сброс фильтров;
+- regression-тесты совместного фильтра истории по проектам и статусам
+  (completed: отдельный тест покрывает удалённый после запуска проект, пустой
+  результат, несколько проектов у одной машины и безопасный сброс фильтров);
 - regression-тест переименования проекта (completed: история отдаёт новое имя
   существующего проекта, а удалённый проект сохраняет последнее известное имя
   из отчёта);
@@ -1063,13 +1064,16 @@ trial, scan, backup, renewal и transfer только по документац�
 - network/CAPTCHA/server-outage simulations (completed: timeout retries once
   then becomes a structured error; CAPTCHA interrupts before listing parsing);
 - D1 backup restore drill;
-- corrupted backup/update tests;
+- corrupted backup/update tests (completed: backup отклоняет пустой,
+  обрезанный и изменённый архив; macOS/Windows release workflow намеренно
+  изменяет подписанный updater и требует отклонить его подпись);
 - Windows 10/11 and macOS 13+ matrix;
 - 1–3 pilot devices;
 - проверка диагностических архивов с реальных pilot devices и исправления по
   telemetry-free support logs;
 - негативный тест, подтверждающий отсутствие паролей, кодов активации, device
-  keys, базы, изображений и комментариев в готовом архиве.
+  keys, базы, изображений и комментариев в готовом архиве (completed:
+  structured log с этими значениями попадает в ZIP только после redaction).
 
 Критерий: все acceptance scenarios ниже пройдены, critical defects отсутствуют,
 rollback и disaster recovery проверены практикой.

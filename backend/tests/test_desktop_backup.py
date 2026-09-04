@@ -225,6 +225,15 @@ def test_backup_rejects_tampered_payload(tmp_path: Path) -> None:
         validate_backup(tampered)
 
 
+@pytest.mark.parametrize("content", [b"", b"PK", b"not a zip archive"])
+def test_backup_rejects_empty_or_truncated_archive(tmp_path: Path, content: bytes) -> None:
+    backup = tmp_path / "broken.searchcar-backup"
+    backup.write_bytes(content)
+
+    with pytest.raises(BackupValidationError, match="invalid_backup_archive"):
+        validate_backup(backup)
+
+
 @pytest.mark.parametrize(
     "unsafe_name",
     ["../outside", "/absolute", "C:/windows/file"],

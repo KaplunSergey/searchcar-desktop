@@ -81,9 +81,10 @@ test("scan reports combine project and status filters",async()=>{
     readFile(new URL("app/details.css",root),"utf8"),
   ]);
   assert.match(page,/const availableProjects = useMemo/);
+  assert.match(page,/import \{ filterReportItems, reportProjectIds \} from "\.\/report-filter"/);
   assert.match(page,/function reportProjectNames\(/);
   assert.match(page,/currentProjectNames\.get\(id\)[\s\S]*savedNames\[index\]/);
-  assert.match(page,/effectiveSelectedChanges\.has\(item\.change\)[\s\S]*projectIds\.some\(\(id\) => effectiveSelectedProjectIds\.has\(id\)\)/);
+  assert.match(page,/const sorted = filterReportItems\(/);
   assert.match(page,/setExcludedProjectIds\(new Set\(\)\);[\s\S]*setExcludedChanges\(new Set\(\)\)/);
   assert.match(page,/projects=\{projectsQuery\.data \|\| \[\]\}/);
   assert.match(styles,/\.report-filter-menu\{[^}]*max-height:min\(70vh,520px\)[^}]*overflow:auto/);
@@ -231,6 +232,8 @@ test("desktop updater uses the checked public key and signed CI artifacts", asyn
   assert.match(updaterVerifier, /public_key\s*\.verify\(&artifact, &signature, false\)/);
   assert.match(windowsWorkflow, /--features updater-signature-verifier/);
   assert.match(macWorkflow, /--features updater-signature-verifier/);
+  assert.match(macWorkflow, /Tampered updater unexpectedly passed signature verification/);
+  assert.match(windowsWorkflow, /Tampered updater unexpectedly passed signature verification/);
   assert.match(cargo, /path = "tools\/verify_updater_signature\.rs"/);
   assert.match(cargo, /required-features = \["updater-signature-verifier"\]/);
   assert.doesNotMatch(cargo, /path = "src\/bin\/verify_updater_signature\.rs"/);
