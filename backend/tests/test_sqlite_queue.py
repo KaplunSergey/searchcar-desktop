@@ -358,18 +358,19 @@ def test_new_project_uses_all_pages_until_one_scan_succeeds(tmp_path: Path) -> N
         assert project.search_page_mode == "ALL_PAGES"
         assert _requires_initial_full_scan(db, project.id)
 
-        failed = ScanRun(owner_id=user.id, kind="PROJECTS", status="FAILED")
-        db.add(failed)
-        db.flush()
-        db.add(
-            ProjectScanRun(
-                scan_run_id=failed.id,
-                project_id=project.id,
-                status="FAILED",
+        for status in ("FAILED", "CANCELLED"):
+            interrupted = ScanRun(owner_id=user.id, kind="PROJECTS", status=status)
+            db.add(interrupted)
+            db.flush()
+            db.add(
+                ProjectScanRun(
+                    scan_run_id=interrupted.id,
+                    project_id=project.id,
+                    status=status,
+                )
             )
-        )
-        db.flush()
-        assert _requires_initial_full_scan(db, project.id)
+            db.flush()
+            assert _requires_initial_full_scan(db, project.id)
 
         succeeded = ScanRun(owner_id=user.id, kind="PROJECTS", status="SUCCEEDED")
         db.add(succeeded)

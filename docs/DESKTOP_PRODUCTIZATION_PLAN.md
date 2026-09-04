@@ -1043,18 +1043,19 @@ trial, scan, backup, renewal и transfer только по документац�
 - threat-model review (completed: [`THREAT_MODEL.md`](THREAT_MODEL.md));
 - dependency/license/SBOM review (completed: local CycloneDX inventory and
   review procedure in [`DEPENDENCY_REVIEW.md`](DEPENDENCY_REVIEW.md));
-- parser regression against known fixtures;
+- parser regression against known fixtures (completed: sanitised Encar detail,
+  similar-price and sold-page fixtures cover primary price, key fields and
+  identity handling);
 - regression-тесты совместного фильтра истории по проектам и статусам, включая
   удалённый после запуска проект, пустой результат и сброс фильтров;
-- regression-тест переименования проекта: история и фильтр отображают новое
-  имя существующего проекта, а удалённый проект сохраняет последнее известное
-  имя из отчёта;
-- regression-тесты начального поиска: новый проект всегда выполняет точное
-  чтение всех страниц, отменённый или ошибочный первый запуск повторяет этот
-  режим, а после успешного полного запуска последующие scans используют
-  сохранённые настройки;
-- regression-тесты строк ошибок: валидный URL объявления открывается внешней
-  ссылкой в web и desktop, а невалидный или отсутствующий URL не отображается;
+- regression-тест переименования проекта (completed: история отдаёт новое имя
+  существующего проекта, а удалённый проект сохраняет последнее известное имя
+  из отчёта);
+- regression-тесты начального поиска (completed: новый проект принудительно
+  использует точное чтение всех страниц; `FAILED` и `CANCELLED` не снимают
+  этот режим, успешный запуск снимает);
+- regression-тесты строк ошибок (completed: worker отдаёт только валидный URL,
+  UI показывает внешнюю ссылку только для него, а allowlist проверен отдельно);
 - long scan cancellation and crash recovery;
 - scheduler/tray/sleep/wake/DST simulations;
 - network/captcha/server outage simulations;

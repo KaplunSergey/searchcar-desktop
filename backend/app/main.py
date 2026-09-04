@@ -1738,6 +1738,14 @@ def scan_out(run: ScanRun, db: Session) -> dict:
         for item in raw_report
         if item.get("project_id") and item.get("car_id")
     }
+    existing_project_ids = {
+        project_id
+        for project_id in db.scalars(
+            select(Project.id).where(
+                Project.id.in_({project_id for project_id, _ in candidate_pairs})
+            )
+        )
+    } if candidate_pairs else set()
     active_pairs = (
         {
             (project_id, car_id)
@@ -1759,6 +1767,9 @@ def scan_out(run: ScanRun, db: Session) -> dict:
         for item in raw_report
         if not item.get("project_id")
         or not item.get("car_id")
+        # A completed run is still useful history after its project was
+        # deleted. Keep the report's last known project name in that case.
+        or item["project_id"] not in existing_project_ids
         or (item.get("project_id"), item.get("car_id")) in active_pairs
     ]
     report_project_ids = {
@@ -1813,8 +1824,11 @@ def scan_out(run: ScanRun, db: Session) -> dict:
         _report_change_details(
             {
                 **item,
-                "project_name": item.get("project_name")
-                or projects.get(item.get("project_id")),
+                # History keeps the original name only when a project was
+                # deleted. Existing projects must always show their current
+                # name after a rename.
+                "project_name": projects.get(item.get("project_id"))
+                or item.get("project_name"),
                 "registration_number": item.get("registration_number")
                 or report_registrations.get(item.get("car_id")),
                 "favorite": (item.get("project_id"), item.get("car_id"))
