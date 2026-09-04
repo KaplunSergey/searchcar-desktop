@@ -21,6 +21,10 @@ The maintainer checklist for preparing, building, validating and rolling back
 a desktop pilot release is in [`docs/RELEASE_RUNBOOK.md`](docs/RELEASE_RUNBOOK.md).
 The Russian-language guide for a pilot user is in
 [`docs/DESKTOP_PILOT_GUIDE.md`](docs/DESKTOP_PILOT_GUIDE.md).
+The pilot's security boundaries, accepted risks and release checklist are in
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+The local, cache-free dependency inventory and review procedure are in
+[`docs/DEPENDENCY_REVIEW.md`](docs/DEPENDENCY_REVIEW.md).
 
 Until the desktop milestones are implemented, the baseline application below
 continues to run through Docker exactly as it did in the source repository.

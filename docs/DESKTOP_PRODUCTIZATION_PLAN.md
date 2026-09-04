@@ -1040,8 +1040,9 @@ trial, scan, backup, renewal и transfer только по документац�
 
 Задачи:
 
-- threat-model review;
-- dependency/license/SBOM review;
+- threat-model review (completed: [`THREAT_MODEL.md`](THREAT_MODEL.md));
+- dependency/license/SBOM review (completed: local CycloneDX inventory and
+  review procedure in [`DEPENDENCY_REVIEW.md`](DEPENDENCY_REVIEW.md));
 - parser regression against known fixtures;
 - regression-тесты совместного фильтра истории по проектам и статусам, включая
   удалённый после запуска проект, пустой результат и сброс фильтров;
