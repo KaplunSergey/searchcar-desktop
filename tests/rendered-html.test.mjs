@@ -75,6 +75,19 @@ test("web and desktop dropdown controls use the same cross-platform styling",asy
   assert.match(sharedStyles,/padding-right:44px!important/);
   assert.match(sharedStyles,/select:not\(\[multiple\]\):focus-visible/);
 });
+test("scan reports combine project and status filters",async()=>{
+  const [page,styles]=await Promise.all([
+    readFile(new URL("app/page.tsx",root),"utf8"),
+    readFile(new URL("app/details.css",root),"utf8"),
+  ]);
+  assert.match(page,/const availableProjects = useMemo/);
+  assert.match(page,/function reportProjectNames\(/);
+  assert.match(page,/currentProjectNames\.get\(id\)[\s\S]*savedNames\[index\]/);
+  assert.match(page,/effectiveSelectedChanges\.has\(item\.change\)[\s\S]*projectIds\.some\(\(id\) => effectiveSelectedProjectIds\.has\(id\)\)/);
+  assert.match(page,/setExcludedProjectIds\(new Set\(\)\);[\s\S]*setExcludedChanges\(new Set\(\)\)/);
+  assert.match(page,/projects=\{projectsQuery\.data \|\| \[\]\}/);
+  assert.match(styles,/\.report-filter-menu\{[^}]*max-height:min\(70vh,520px\)[^}]*overflow:auto/);
+});
 test("desktop onboarding and notifications are clear inside a small app window",async()=>{
   const [page,styles]=await Promise.all([
     readFile(new URL("app/page.tsx",root),"utf8"),

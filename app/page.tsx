@@ -184,6 +184,24 @@ type ScanRecord = {
   error?: string | null;
   created_at: string;
 };
+
+function reportProjectIds(item: ScanReportItem) {
+  return item.project_ids?.length ? item.project_ids : [item.project_id];
+}
+
+function reportProjectNames(
+  item: ScanReportItem,
+  currentProjectNames: Map<number, string>,
+) {
+  const savedNames = item.project_names?.length ? item.project_names : [];
+  return reportProjectIds(item).map(
+    (id, index) =>
+      currentProjectNames.get(id)
+      || savedNames[index]
+      || (id === item.project_id ? item.project_name : null)
+      || `#${id}`,
+  );
+}
 type SchedulerRecord = {
   enabled: boolean;
   paused: boolean;
@@ -944,6 +962,7 @@ function App({
               t={t}
               locale={locale}
               scans={scansQuery.data || []}
+              projects={projectsQuery.data || []}
               openCar={(item) => navigate("car", item.project_id, item.car_id)}
               cancelScan={cancelScan}
             />
@@ -1820,15 +1839,21 @@ function ReportPrice({ item }: { item: ScanReportItem }) {
 
 function ReportList({
   items,
+  projects,
   t,
   locale,
   openCar,
 }: {
   items: ScanReportItem[];
+  projects: ProjectRecord[];
   t: Translate;
   locale: Locale;
   openCar: (item: ScanReportItem) => void;
 }) {
+  const currentProjectNames = useMemo(
+    () => new Map(projects.map((project) => [project.id, project.name])),
+    [projects],
+  );
   const availableChanges = useMemo(() => {
     const present = new Set(items.map((item) => item.change));
     const known = REPORT_CHANGE_TYPES.filter((change) => present.has(change));
@@ -1837,7 +1862,28 @@ function ReportList({
     );
     return [...known, ...unknown];
   }, [items]);
+  const availableProjects = useMemo(() => {
+    const projects = new Map<number, string>();
+    for (const item of items) {
+      const ids = reportProjectIds(item);
+      const names = reportProjectNames(item, currentProjectNames);
+      ids.forEach((id, index) => {
+        if (!projects.has(id)) {
+          projects.set(
+            id,
+            names[index],
+          );
+        }
+      });
+    }
+    return [...projects].map(([id, name]) => ({ id, name })).sort(
+      (left, right) => left.name.localeCompare(right.name, locale),
+    );
+  }, [items, locale, currentProjectNames]);
   const [excludedChanges, setExcludedChanges] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [excludedProjectIds, setExcludedProjectIds] = useState<Set<number>>(
     () => new Set(),
   );
   const selectedChanges = availableChanges.filter(
@@ -1846,11 +1892,23 @@ function ReportList({
   const effectiveSelectedChanges = selectedChanges.length
     ? new Set(selectedChanges)
     : new Set(availableChanges);
-  const sorted = items.filter((item) => effectiveSelectedChanges.has(item.change)).sort(
-    (left, right) =>
-      reportPriority(left) - reportPriority(right) ||
-      new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime(),
-  );
+  const selectedProjectIds = availableProjects
+    .filter((project) => !excludedProjectIds.has(project.id))
+    .map((project) => project.id);
+  const effectiveSelectedProjectIds = selectedProjectIds.length
+    ? new Set(selectedProjectIds)
+    : new Set(availableProjects.map((project) => project.id));
+  const sorted = items
+    .filter((item) => {
+      const projectIds = reportProjectIds(item);
+      return effectiveSelectedChanges.has(item.change)
+        && projectIds.some((id) => effectiveSelectedProjectIds.has(id));
+    })
+    .sort(
+      (left, right) =>
+        reportPriority(left) - reportPriority(right) ||
+        new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime(),
+    );
   const toggleChange = (change: string) => {
     setExcludedChanges((current) => {
       const next = new Set(current);
@@ -1869,6 +1927,25 @@ function ReportList({
   const hasFilteredChanges = availableChanges.some((change) =>
     excludedChanges.has(change),
   );
+  const toggleProject = (projectId: number) => {
+    setExcludedProjectIds((current) => {
+      const next = new Set(current);
+      if (next.has(projectId)) {
+        next.delete(projectId);
+      } else {
+        const selectedCount = availableProjects.filter(
+          (project) => !current.has(project.id),
+        ).length;
+        if (selectedCount === 1) return current;
+        next.add(projectId);
+      }
+      return next;
+    });
+  };
+  const hasFilteredProjects = availableProjects.some((project) =>
+    excludedProjectIds.has(project.id),
+  );
+  const activeFilterGroups = Number(hasFilteredProjects) + Number(hasFilteredChanges);
 
   return (
     <div className="report-list-shell">
@@ -1878,9 +1955,24 @@ function ReportList({
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M4 6h16M7 12h10M10 18h4" />
             </svg>
-            {hasFilteredChanges ? <i>{effectiveSelectedChanges.size}</i> : null}
+            {activeFilterGroups ? <i>{activeFilterGroups}</i> : null}
           </summary>
           <div className="report-filter-menu">
+            <strong>{t("projects")}</strong>
+            {availableProjects.map((project) => {
+              const checked = effectiveSelectedProjectIds.has(project.id);
+              return (
+                <label key={project.id}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={checked && effectiveSelectedProjectIds.size === 1}
+                    onChange={() => toggleProject(project.id)}
+                  />
+                  <span>{project.name}</span>
+                </label>
+              );
+            })}
             <strong>{t("reportStatuses")}</strong>
             {availableChanges.map((change) => {
               const checked = effectiveSelectedChanges.has(change);
@@ -1898,8 +1990,14 @@ function ReportList({
                 </label>
               );
             })}
-            {hasFilteredChanges ? (
-              <button type="button" onClick={() => setExcludedChanges(new Set())}>
+            {activeFilterGroups ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setExcludedProjectIds(new Set());
+                  setExcludedChanges(new Set());
+                }}
+              >
                 {t("resetFilters")}
               </button>
             ) : null}
@@ -1907,6 +2005,7 @@ function ReportList({
         </details>
       </div>
       <div className="report-list">
+        {!sorted.length ? <div className="empty-state">{t("noChangedCars")}</div> : null}
         {sorted.map((item) => (
           <article
             className={item.favorite ? "report-favorite" : undefined}
@@ -1916,9 +2015,12 @@ function ReportList({
               <span className="report-car-title">
                 <strong>{item.title || `Encar ${item.encar_id}`}</strong>
                 <small>
-                  {item.project_names && item.project_names.length > 1
-                    ? `${t("foundInProjects")}: ${item.project_names.join(", ")}`
-                    : `${t("foundInProject")}: ${item.project_name || `#${item.project_id}`}`}
+                  {(() => {
+                    const projectNames = reportProjectNames(item, currentProjectNames);
+                    return projectNames.length > 1
+                      ? `${t("foundInProjects")}: ${projectNames.join(", ")}`
+                      : `${t("foundInProject")}: ${projectNames[0]}`;
+                  })()}
                   {item.encar_ids && item.encar_ids.length > 1
                     ? ` · ${t("encarListings")}: ${item.encar_ids.join(", ")}`
                     : null}
@@ -2326,6 +2428,7 @@ function Projects({
           ) : (
             <ReportList
               items={displayedReport.payload.report}
+              projects={projects}
               t={t}
               locale={locale}
               openCar={openReportCar}
@@ -3248,12 +3351,14 @@ function Car({
 function ScanReportSection({
   scan,
   initiallyOpen,
+  projects,
   t,
   locale,
   openCar,
 }: {
   scan: ScanRecord;
   initiallyOpen: boolean;
+  projects: ProjectRecord[];
   t: Translate;
   locale: Locale;
   openCar: (item: ScanReportItem) => void;
@@ -3299,6 +3404,7 @@ function ScanReportSection({
           {open && (
             <ReportList
               items={report}
+              projects={projects}
               t={t}
               locale={locale}
               openCar={openCar}
@@ -3314,12 +3420,14 @@ function Scans({
   t,
   locale,
   scans,
+  projects,
   openCar,
   cancelScan,
 }: {
   t: Translate;
   locale: Locale;
   scans: ScanRecord[];
+  projects: ProjectRecord[];
   openCar: (item: ScanReportItem) => void;
   cancelScan: (scanId: number) => void;
 }) {
@@ -3364,6 +3472,7 @@ function Scans({
             <ScanReportSection
               scan={scan}
               initiallyOpen={scan.id === latestReportId}
+              projects={projects}
               t={t}
               locale={locale}
               openCar={openCar}

@@ -401,7 +401,13 @@ Implemented locally after the first `v0.1.0` publication:
   not rendered;
 - the new-project form explains that the first run is intentionally more
   thorough than later runs.
+- scan reports can be filtered by one or more saved project identities and by
+  statuses at the same time; project choices come from the report itself, so a
+  deleted project's saved name remains available, and one reset clears both
+  filters.
+- renamed active projects use their current name in reports and report filters;
+  a deleted project's last saved name remains the fallback.
 
-Still required in M11: project filtering in scan history, structured rotating
-logs and the redacted one-click support report, documentation screenshots and
-the independent nontechnical walkthrough.
+Still required in M11: structured rotating logs and the redacted one-click
+support report, documentation screenshots and the independent nontechnical
+walkthrough.
