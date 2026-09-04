@@ -234,6 +234,7 @@ test("desktop updater uses the checked public key and signed CI artifacts", asyn
   assert.match(macWorkflow, /--features updater-signature-verifier/);
   assert.match(macWorkflow, /Tampered updater unexpectedly passed signature verification/);
   assert.match(windowsWorkflow, /Tampered updater unexpectedly passed signature verification/);
+  assert.match(windowsWorkflow, /Tampered updater unexpectedly passed signature verification[\s\S]*\$LASTEXITCODE = 0/);
   assert.match(cargo, /path = "tools\/verify_updater_signature\.rs"/);
   assert.match(cargo, /required-features = \["updater-signature-verifier"\]/);
   assert.doesNotMatch(cargo, /path = "src\/bin\/verify_updater_signature\.rs"/);

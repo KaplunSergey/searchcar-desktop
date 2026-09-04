@@ -215,6 +215,9 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             throw "Tampered updater unexpectedly passed signature verification"
           }
+          # The failed verification above is expected. Do not leak its native
+          # exit code into the otherwise successful PowerShell step.
+          $LASTEXITCODE = 0
           Remove-Item -LiteralPath $tamperedInstaller -Force
           $artifactHash = (Get-FileHash $artifactInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
           "$artifactHash  SearchCar-Desktop-Windows-x64-setup.exe" | Set-Content `
