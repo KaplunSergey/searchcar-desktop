@@ -2072,6 +2072,7 @@ function failureText(code: string, t: Translate) {
   if (code === "INCOMPLETE_SEARCH") return t("errorIncompleteSearch");
   if (code === "INCOMPLETE_PAGINATION") return t("errorIncompletePagination");
   if (code === "PRICE_NOT_CONFIRMED") return t("errorPriceNotConfirmed");
+  if (code === "PLAYWRIGHT_RUNTIME_UNAVAILABLE") return t("errorPlaywrightRuntime");
   if (code === "NOT_FOUND") return t("errorNotFound");
   return t("errorRead");
 }

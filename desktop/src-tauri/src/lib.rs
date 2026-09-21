@@ -54,6 +54,7 @@ struct TrayStatus {
 
 const LEASE_MESSAGE_PREFIX: &str = "SEARCHCAR-LICENSE-LEASE-V1\n";
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const SUPPORT_REPORT_PREFIX: &str = "searchcar-support-";
 
@@ -806,7 +807,11 @@ fn start_update_check(app: &tauri::AppHandle, interactive: bool) {
 
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        let result = match app_handle.updater() {
+        let result = match app_handle
+            .updater_builder()
+            .timeout(UPDATE_CHECK_TIMEOUT)
+            .build()
+        {
             Ok(updater) => updater.check().await.map_err(|error| error.to_string()),
             Err(error) => Err(error.to_string()),
         };
@@ -1090,8 +1095,9 @@ pub fn run() {
 
                 start_update_check(&app_handle, false);
                 let update_request_handle = app_handle.clone();
+                let update_request_terminated = Arc::clone(&sidecar_terminated);
                 thread::spawn(move || loop {
-                    if !health_is_ready(port) {
+                    if update_request_terminated.load(Ordering::SeqCst) {
                         break;
                     }
                     if consume_update_check_request(&update_request_handle) {
@@ -1101,17 +1107,19 @@ pub fn run() {
                 });
 
                 let periodic_update_handle = app_handle.clone();
+                let periodic_update_terminated = Arc::clone(&sidecar_terminated);
                 thread::spawn(move || loop {
                     thread::sleep(UPDATE_CHECK_INTERVAL);
-                    if !health_is_ready(port) {
+                    if periodic_update_terminated.load(Ordering::SeqCst) {
                         break;
                     }
                     start_update_check(&periodic_update_handle, false);
                 });
 
                 let status_handle = app_handle.clone();
+                let status_terminated = Arc::clone(&sidecar_terminated);
                 thread::spawn(move || loop {
-                    if !health_is_ready(port) {
+                    if status_terminated.load(Ordering::SeqCst) {
                         break;
                     }
                     if let Some(status) = scheduler_status(&status_handle) {

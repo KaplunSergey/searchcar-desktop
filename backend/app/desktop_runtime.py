@@ -25,6 +25,40 @@ desktop_correlation_id: ContextVar[str] = ContextVar(
 )
 
 
+class PlaywrightRuntimeError(RuntimeError):
+    """A recoverable local runtime issue, not an Encar parsing failure."""
+
+    code = "PLAYWRIGHT_RUNTIME_UNAVAILABLE"
+
+
+class DesktopPlaywrightSession:
+    """Translate a driver startup crash into a useful scan failure."""
+
+    def __init__(self) -> None:
+        self._session = None
+
+    def __enter__(self):
+        from playwright.sync_api import sync_playwright
+
+        self._session = sync_playwright()
+        try:
+            return self._session.__enter__()
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Playwright driver failed to start")
+            raise PlaywrightRuntimeError(
+                "Playwright driver could not start; restart SearchCar and try again"
+            ) from exc
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self._session is not None:
+            return self._session.__exit__(exc_type, exc_value, traceback)
+        return False
+
+
+def desktop_playwright() -> DesktopPlaywrightSession:
+    return DesktopPlaywrightSession()
+
+
 class DesktopUpdateCheckRelay:
     """Pass one user-requested update check from localhost UI to Tauri."""
 
@@ -281,12 +315,12 @@ def configure_playwright_environment(browser_dir: Path) -> Path:
 
 
 def configure_playwright_driver(driver_dir: Path) -> Path:
-    """Use a resource-bundled Node executable instead of the onefile copy.
+    """Use a resource-bundled Playwright driver instead of the onefile copy.
 
-    Nuitka extracts package data into a temporary directory.  macOS can deny
-    execution of Playwright's extracted Node child when the sidecar was
-    launched by an application bundle, even though the same file is readable.
-    Keeping Node as a separately signed Tauri resource avoids that boundary.
+    The Python Playwright package normally locates both Node and ``cli.js``
+    beside itself.  A Nuitka onefile sidecar puts that package in a temporary
+    extraction directory, which macOS may purge while SearchCar is open.  Keep
+    the complete driver in the signed Tauri resources and override both paths.
     """
 
     driver_dir = driver_dir.expanduser().resolve()
@@ -342,6 +376,55 @@ def configure_playwright_driver(driver_dir: Path) -> Path:
                 digest.update(chunk)
         if not hmac.compare_digest(digest.hexdigest(), expected_sha256.lower()):
             raise ValueError("playwright_driver_manifest_checksum_mismatch")
+    cli_value = manifest.get("driver_cli")
+    if not isinstance(cli_value, str) or not cli_value:
+        raise ValueError("playwright_driver_manifest_cli_missing")
+    cli_relative = PurePosixPath(cli_value)
+    cli_windows_relative = PureWindowsPath(cli_value)
+    if (
+        "\\" in cli_value
+        or cli_relative.is_absolute()
+        or cli_windows_relative.is_absolute()
+        or cli_windows_relative.drive
+        or any(part in {"", ".", ".."} for part in cli_relative.parts)
+    ):
+        raise ValueError("playwright_driver_manifest_cli_path_unsafe")
+    cli = driver_dir.joinpath(*cli_relative.parts).resolve()
+    try:
+        cli.relative_to(driver_dir)
+    except ValueError as exc:
+        raise ValueError("playwright_driver_manifest_cli_path_unsafe") from exc
+    if not cli.is_file():
+        raise FileNotFoundError(f"playwright_driver_cli_not_found: {cli}")
+    expected_cli_bytes = manifest.get("driver_cli_bytes")
+    if expected_cli_bytes is not None and (
+        not isinstance(expected_cli_bytes, int)
+        or expected_cli_bytes < 1
+        or cli.stat().st_size != expected_cli_bytes
+    ):
+        raise ValueError("playwright_driver_manifest_cli_size_mismatch")
+    expected_cli_sha256 = manifest.get("driver_cli_sha256")
+    if expected_cli_sha256 is not None:
+        if not isinstance(expected_cli_sha256, str) or len(expected_cli_sha256) != 64:
+            raise ValueError("playwright_driver_manifest_cli_checksum_invalid")
+        digest = hashlib.sha256()
+        with cli.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        if not hmac.compare_digest(digest.hexdigest(), expected_cli_sha256.lower()):
+            raise ValueError("playwright_driver_manifest_cli_checksum_mismatch")
+
+    # Playwright has no public setting for its JavaScript entrypoint. Its
+    # transport imports this helper by value, so patch both locations before
+    # the first `sync_playwright()` call. This stays local to the sidecar and
+    # avoids any dependency on Nuitka's temporary extraction tree.
+    from playwright._impl import _driver, _transport
+
+    def bundled_driver_executable() -> tuple[str, str]:
+        return str(executable), str(cli)
+
+    _driver.compute_driver_executable = bundled_driver_executable
+    _transport.compute_driver_executable = bundled_driver_executable
     os.environ["PLAYWRIGHT_NODEJS_PATH"] = str(executable)
     return driver_dir
 
@@ -904,10 +987,8 @@ def check_browser(
         configure_playwright_driver(playwright_driver_dir)
     output_path = output_path.expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    from playwright.sync_api import sync_playwright
-
     executable_path = bundled_headless_chromium(browser_dir)
-    with sync_playwright() as playwright:
+    with desktop_playwright() as playwright:
         browser = playwright.chromium.launch(
             headless=True,
             executable_path=str(executable_path),

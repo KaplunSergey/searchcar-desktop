@@ -55,9 +55,10 @@ Stage the platform-native Playwright driver before smoke tests or bundling:
 ```
 
 The resulting `desktop/runtime/playwright-driver` directory contains the
-platform Node executable and a size/checksum manifest. Tauri passes this path
-to the backend, which validates it and sets `PLAYWRIGHT_NODEJS_PATH` before
-Playwright starts.
+platform Node executable, the full JavaScript driver package and a
+size/checksum manifest. Tauri passes this path to the backend, which validates
+it and starts Playwright from this signed resource instead of Nuitka's
+temporary onefile directory.
 
 Build and test standalone first:
 

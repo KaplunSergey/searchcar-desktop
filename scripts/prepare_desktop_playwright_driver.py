@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage Playwright's Node runtime as a separately executable app resource."""
+"""Stage Playwright's complete Node driver as a separately executable resource."""
 
 from __future__ import annotations
 
@@ -33,18 +33,30 @@ def prepare(driver_dir: Path) -> dict[str, object]:
     source_dir = Path(inspect.getfile(playwright)).resolve().parent / "driver"
     executable_name = "node.exe" if sys.platform == "win32" else "node"
     source = source_dir / executable_name
+    source_package = source_dir / "package"
+    source_cli = source_package / "cli.js"
     if not source.is_file():
         raise FileNotFoundError(f"playwright Node executable not found: {source}")
+    if not source_cli.is_file():
+        raise FileNotFoundError(f"playwright driver CLI not found: {source_cli}")
 
     driver_dir.mkdir(parents=True, exist_ok=True)
     destination = driver_dir / executable_name
+    destination_package = driver_dir / "package"
+    if destination_package.exists():
+        shutil.rmtree(destination_package)
     shutil.copy2(source, destination)
     destination.chmod(destination.stat().st_mode | 0o111)
+    shutil.copytree(source_package, destination_package)
+    destination_cli = destination_package / "cli.js"
     manifest = {
         "playwright_version": version("playwright"),
         "node_executable": executable_name,
         "node_executable_bytes": destination.stat().st_size,
         "node_executable_sha256": sha256_file(destination),
+        "driver_cli": "package/cli.js",
+        "driver_cli_bytes": destination_cli.stat().st_size,
+        "driver_cli_sha256": sha256_file(destination_cli),
     }
     (driver_dir / MANIFEST_NAME).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",

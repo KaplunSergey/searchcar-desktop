@@ -181,10 +181,15 @@ test("desktop updater uses the checked public key and signed CI artifacts", asyn
   assert.match(publicKey, /^[A-Za-z0-9+/=]+$/u);
   assert.match(shell, /tauri_plugin_updater::\{Update, UpdaterExt\}/);
   assert.match(shell, /fn start_update_check/);
+  assert.match(shell, /UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs\(30\)/);
+  assert.match(shell, /updater_builder\(\)[\s\S]*\.timeout\(UPDATE_CHECK_TIMEOUT\)/);
   assert.match(shell, /fn consume_update_check_request/);
   assert.match(runtime, /class DesktopUpdateCheckRelay/);
   assert.match(runtime, /"\/desktop\/update-check\/consume"/);
   assert.match(shell, /UPDATE_CHECK_INTERVAL/);
+  assert.match(shell, /update_request_terminated\.load\(Ordering::SeqCst\)/);
+  assert.match(shell, /periodic_update_terminated\.load\(Ordering::SeqCst\)/);
+  assert.doesNotMatch(shell, /thread::spawn\(move \|\| loop \{\s*if !health_is_ready\(port\)/);
   assert.match(shell, /\.download\(/);
   assert.match(shell, /prepare_update_install/);
   assert.match(shell, /set_update_status/);
@@ -202,6 +207,7 @@ test("desktop updater uses the checked public key and signed CI artifacts", asyn
   assert.match(macWorkflow, /TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/);
   assert.match(macWorkflow, /pnpm exec tauri signer sign "\$updater"/);
   assert.match(macWorkflow, /test -s "\$updater\.sig"/);
+  assert.match(macWorkflow, /playwright-driver\/package\/cli\.js/);
   assert.match(macWorkflow, /--bin verify_updater_signature/);
   assert.match(macWorkflow, /cd work\/macos-artifact/);
   assert.match(windowsWorkflow, /TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/);
@@ -279,6 +285,8 @@ test("local desktop launchers keep macOS and Windows builds reproducible", async
   assert.match(windowsSmoke, /Stop-CompiledSidecarTree/);
   assert.match(windowsSmoke, /-WindowStyle Hidden/);
   assert.match(sidecarBuild, /--onefile-cache-mode=cached/);
+  assert.match(sidecarBuild, /if mode == "onefile":/);
+  assert.doesNotMatch(sidecarBuild, /mode == "onefile" and platform\.system\(\) == "Windows"/);
   assert.match(sidecarBuild, /--onefile-no-compression/);
   assert.match(sidecarBuild, /--windows-console-mode=hide/);
   assert.match(sidecarBuild, /command\.remove\("--remove-output"\)/);

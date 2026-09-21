@@ -9,6 +9,7 @@ from uuid import uuid4
 from sqlalchemy import select
 
 from .database import SessionLocal, engine, settings
+from .desktop_runtime import desktop_playwright
 from .external_links import validated_external_url
 from .job_queue import claim_next_job
 from .models import (
@@ -563,9 +564,7 @@ def process_job(job_id: int) -> None:
             from .desktop_license import require_search_entitlement
 
             require_search_entitlement("encar")
-            from playwright.sync_api import sync_playwright
-
-            with sync_playwright() as playwright:
+            with desktop_playwright() as playwright:
                 executable_path = os.environ.get("SEARCHCAR_CHROMIUM_EXECUTABLE")
                 browser = playwright.chromium.launch(
                     headless=settings.playwright_headless,

@@ -133,17 +133,12 @@ def build(mode: str) -> dict[str, object]:
         str(ENTRYPOINT),
     ]
     onefile_policy: dict[str, str | bool] = {}
-    if mode == "onefile" and platform.system() == "Windows":
-        # The default Nuitka onefile policy extracts into a new temporary
-        # directory and deletes it after every invocation. SearchCar's smoke
-        # test invokes the sidecar more than once, and Defender can make each
-        # fresh extraction take several minutes. A versioned cache lets Nuitka
-        # validate and reuse the extracted files. Disabling the inner payload
-        # compression makes the unavoidable first extraction I/O-bound; NSIS
-        # still compresses the final installer. The payload fingerprint is
-        # essential: pilot builds can keep the same product version while the
-        # backend changes, and Windows cannot overwrite a previous cache while
-        # an installed or orphaned sidecar still has DLLs open there.
+    if mode == "onefile":
+        # The default Nuitka onefile policy extracts into a disposable
+        # temporary directory. macOS can purge that directory while SearchCar
+        # is still open, leaving Playwright without its Python package data.
+        # A versioned cache makes the payload durable for the sidecar's whole
+        # lifetime and safely separates pilot builds with the same version.
         cache_fingerprint = sidecar_source_fingerprint()
         cache_spec = (
             "{CACHE_DIR}/SearchCar/searchcar-core/"
@@ -151,28 +146,28 @@ def build(mode: str) -> dict[str, object]:
             + "-"
             + cache_fingerprint
         )
-        # Retain Nuitka's Windows build/dist directories so a packaging-only
-        # follow-up can reuse the compiled C objects. CI starts clean anyway;
-        # this primarily avoids repeated full local recompilations.
         command.remove("--remove-output")
         command[3:3] = [
             "--onefile-cache-mode=cached",
             f"--onefile-tempdir-spec={cache_spec}",
-            "--onefile-no-compression",
-            # When Tauri starts the production sidecar from a GUI process,
-            # Nuitka's default `force` mode creates a second empty console.
-            # `hide` preserves stdout/stderr when a developer or smoke test
-            # launches it from an existing terminal, but creates no visible
-            # console for an installed desktop application.
-            "--windows-console-mode=hide",
         ]
         onefile_policy = {
             "onefile_cache_mode": "cached",
             "onefile_cache_spec": cache_spec,
             "onefile_cache_fingerprint": cache_fingerprint,
-            "onefile_compression": False,
-            "windows_console_mode": "hide",
         }
+        if platform.system() == "Windows":
+            # Disabling inner compression makes Windows' first extraction
+            # I/O-bound; NSIS still compresses the final installer. Keep the
+            # production sidecar console hidden when Tauri launches it.
+            command[3:3] = [
+                "--onefile-no-compression",
+                "--windows-console-mode=hide",
+            ]
+            onefile_policy.update(
+                onefile_compression=False,
+                windows_console_mode="hide",
+            )
     environment = os.environ.copy()
     environment["NUITKA_CACHE_DIR"] = str(WORK_ROOT / "cache")
     run_nuitka(command, environment)

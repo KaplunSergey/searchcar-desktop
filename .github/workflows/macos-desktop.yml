@@ -143,6 +143,7 @@ jobs:
           test -n "$app"
           test -x "$app/Contents/MacOS/searchcar-core"
           test -x "$app/Contents/Resources/playwright-driver/node"
+          test -f "$app/Contents/Resources/playwright-driver/package/cli.js"
           test -f "$app/Contents/Resources/browsers/searchcar-browser-manifest.json"
           test -f "$app/Contents/Resources/desktop-ui/index.html"
           codesign --force --deep --sign - "$app"

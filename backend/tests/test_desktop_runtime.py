@@ -14,6 +14,7 @@ import app.database as database_module
 from app.database import Base, create_database_engine
 from app.desktop_runtime import (
     DesktopInstanceLock,
+    PlaywrightRuntimeError,
     DesktopUpdateCheckRelay,
     DesktopUpdateStateRelay,
     bundled_headless_chromium,
@@ -29,6 +30,31 @@ from app.maintenance import finish_update_install, maintenance_active
 from app.models import ScanRun, User
 
 
+def _write_playwright_driver(driver_dir: Path) -> tuple[Path, Path]:
+    driver_dir.mkdir(parents=True, exist_ok=True)
+    executable = driver_dir / "node"
+    executable.write_bytes(b"signed external node")
+    cli = driver_dir / "package" / "cli.js"
+    cli.parent.mkdir()
+    cli.write_text("console.log('driver')\n", encoding="utf-8")
+    (driver_dir / "searchcar-playwright-driver-manifest.json").write_text(
+        json.dumps(
+            {
+                "node_executable": "node",
+                "node_executable_bytes": executable.stat().st_size,
+                "node_executable_sha256": hashlib.sha256(
+                    executable.read_bytes()
+                ).hexdigest(),
+                "driver_cli": "package/cli.js",
+                "driver_cli_bytes": cli.stat().st_size,
+                "driver_cli_sha256": hashlib.sha256(cli.read_bytes()).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return executable, cli
+
+
 def test_desktop_update_check_relay_collapses_requests_and_consumes_once() -> None:
     relay = DesktopUpdateCheckRelay()
 
@@ -37,6 +63,25 @@ def test_desktop_update_check_relay_collapses_requests_and_consumes_once() -> No
     relay.request()
     assert relay.consume() is True
     assert relay.consume() is False
+
+
+def test_playwright_startup_error_is_reported_without_an_attribute_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenSession:
+        def __enter__(self):
+            raise RuntimeError("Connection closed while reading from the driver")
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: BrokenSession())
+    from app.desktop_runtime import desktop_playwright
+
+    with pytest.raises(PlaywrightRuntimeError, match="restart SearchCar") as error:
+        with desktop_playwright():
+            pass
+    assert error.value.code == "PLAYWRIGHT_RUNTIME_UNAVAILABLE"
 
 
 def test_desktop_update_state_relay_validates_public_snapshot() -> None:
@@ -239,21 +284,7 @@ def test_desktop_environment_configures_external_playwright_driver(
     tmp_path: Path,
 ) -> None:
     driver_dir = tmp_path / "playwright-driver"
-    driver_dir.mkdir()
-    executable = driver_dir / "node"
-    executable.write_bytes(b"signed external node")
-    (driver_dir / "searchcar-playwright-driver-manifest.json").write_text(
-        json.dumps(
-            {
-                "node_executable": "node",
-                "node_executable_bytes": executable.stat().st_size,
-                "node_executable_sha256": hashlib.sha256(
-                    executable.read_bytes()
-                ).hexdigest(),
-            }
-        ),
-        encoding="utf-8",
-    )
+    executable, cli = _write_playwright_driver(driver_dir)
 
     paths = configure_desktop_environment(
         tmp_path / "SearchCar",
@@ -263,6 +294,12 @@ def test_desktop_environment_configures_external_playwright_driver(
 
     assert paths["playwright_driver"] == driver_dir.resolve()
     assert os.environ["PLAYWRIGHT_NODEJS_PATH"] == str(executable.resolve())
+    from playwright._impl import _transport
+
+    assert _transport.compute_driver_executable() == (
+        str(executable.resolve()),
+        str(cli.resolve()),
+    )
 
 
 def test_desktop_environment_discovers_driver_next_to_browser(
@@ -278,13 +315,7 @@ def test_desktop_environment_discovers_driver_next_to_browser(
         encoding="utf-8",
     )
     driver_dir = browser_dir.parent / "playwright-driver"
-    driver_dir.mkdir()
-    node = driver_dir / "node"
-    node.write_bytes(b"external node")
-    (driver_dir / "searchcar-playwright-driver-manifest.json").write_text(
-        json.dumps({"node_executable": "node"}),
-        encoding="utf-8",
-    )
+    node, _cli = _write_playwright_driver(driver_dir)
 
     paths = configure_desktop_environment(
         tmp_path / "SearchCar",
@@ -311,30 +342,25 @@ def test_playwright_driver_manifest_rejects_path_traversal(tmp_path: Path) -> No
 
 
 def test_playwright_driver_manifest_verifies_checksum(tmp_path: Path) -> None:
-    executable = tmp_path / "node"
-    executable.write_bytes(b"trusted node")
-    (tmp_path / "searchcar-playwright-driver-manifest.json").write_text(
-        json.dumps(
-            {
-                "node_executable": "node",
-                "node_executable_bytes": executable.stat().st_size,
-                "node_executable_sha256": hashlib.sha256(
-                    executable.read_bytes()
-                ).hexdigest(),
-            }
-        ),
-        encoding="utf-8",
-    )
+    executable, _cli = _write_playwright_driver(tmp_path)
 
     assert configure_playwright_driver(tmp_path) == tmp_path.resolve()
 
-    executable.write_bytes(b"changed node")
+    executable.write_bytes(b"forged external node")
     try:
         configure_playwright_driver(tmp_path)
     except ValueError as error:
         assert "manifest_checksum_mismatch" in str(error)
     else:
         raise AssertionError("modified Playwright driver was accepted")
+
+
+def test_playwright_driver_manifest_rejects_missing_cli(tmp_path: Path) -> None:
+    _executable, cli = _write_playwright_driver(tmp_path)
+    cli.unlink()
+
+    with pytest.raises(FileNotFoundError, match="playwright_driver_cli_not_found"):
+        configure_playwright_driver(tmp_path)
 
 
 def test_missing_bundled_browser_directory_is_rejected(tmp_path: Path) -> None:
