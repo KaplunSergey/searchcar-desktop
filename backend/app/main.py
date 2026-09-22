@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
+import json
 import logging
 import os
+from queue import Empty
 import shutil
 import webbrowser
 from pathlib import Path
@@ -8,7 +10,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import and_, delete as sa_delete, func, or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -88,6 +90,7 @@ from .schemas import (
 )
 from .services import merge_reliable_detail
 from .reporting import dedupe_report
+from .live_updates import live_updates
 
 logger = logging.getLogger(__name__)
 
@@ -1974,6 +1977,31 @@ def scans(
             .limit(100)
         )
     ]
+
+
+@app.get("/api/events")
+def live_events(current: User = Depends(require_user)):
+    """Push a lightweight invalidation after a committed scan update."""
+
+    subscriber = live_updates.subscribe(current.id)
+
+    def stream():
+        try:
+            yield ": connected\n\n"
+            while True:
+                try:
+                    event = subscriber.get(timeout=20)
+                    yield f"event: scan\ndata: {json.dumps(event)}\n\n"
+                except Empty:
+                    yield ": keep-alive\n\n"
+        finally:
+            live_updates.unsubscribe(subscriber)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/scans/{scan_id}")

@@ -591,7 +591,7 @@ function App({
   const scansQuery = useQuery<ScanRecord[]>({
     queryKey: ["scans"],
     queryFn: () => request("/scans"),
-    refetchInterval: 2000,
+    refetchInterval: 30_000,
   });
   const schedulerQuery = useQuery<SchedulerRecord>({
     queryKey: ["scheduler"],
@@ -635,6 +635,25 @@ function App({
   const activeScans = (scansQuery.data || []).filter((scan) =>
     ["QUEUED", "RUNNING", "CANCEL_REQUESTED"].includes(scan.status),
   );
+
+  useEffect(() => {
+    const events = new EventSource(`${api}/events`, { withCredentials: true });
+    let refreshTimer: number | undefined;
+    const refresh = () => {
+      if (refreshTimer !== undefined) return;
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = undefined;
+        void client.invalidateQueries({ queryKey: ["scans"] });
+        void client.invalidateQueries({ queryKey: ["projects"] });
+      }, 100);
+    };
+    events.addEventListener("scan", refresh);
+    return () => {
+      events.removeEventListener("scan", refresh);
+      events.close();
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+    };
+  }, [client]);
 
   useEffect(() => {
     window.history.replaceState(
@@ -2178,7 +2197,7 @@ function Projects({
   const completedProjectCount = Object.keys(
     current?.payload?.project_statuses || {},
   ).length;
-  const displayedReport = current && completedProjectCount ? current : latestReport;
+  const displayedReport = current || latestReport;
   const displayingLiveReport = displayedReport?.id === current?.id;
   const newListingsCount =
     displayedReport?.payload?.summary?.new
@@ -2417,7 +2436,9 @@ function Projects({
               <p>
                 {displayedReport.payload?.summary?.changed || displayedReport.payload?.report?.length || 0} {t("changes")} ·{" "}
                 {displayingLiveReport
-                  ? `${t("completedProjects")}: ${completedProjectCount}`
+                  ? displayedReport.payload?.report?.length
+                    ? `${t("completedProjects")}: ${completedProjectCount}`
+                    : t("searching")
                   : formatDate(displayedReport.created_at, locale)}
               </p>
             </div>
@@ -2433,7 +2454,10 @@ function Projects({
             </p>
           )}
           {!displayedReport.payload?.report?.length ? (
-            <div className="report-empty"><strong>{t("noChangedCars")}</strong><span>{t("allListingsUnchanged")}</span></div>
+            <div className="report-empty">
+              <strong>{displayingLiveReport ? t("searching") : t("noChangedCars")}</strong>
+              <span>{displayingLiveReport ? t("liveResultsPending") : t("allListingsUnchanged")}</span>
+            </div>
           ) : (
             <ReportList
               items={displayedReport.payload.report}

@@ -51,7 +51,9 @@ test("ships required product surfaces and localization",async()=>{
   assert.match(page,/currentUser\.preferred_locale \|\| "ru"/);
   assert.match(page,/request<AuthUser>\("\/auth\/profile"/);
   assert.match(page,/newListingsCount > 0/);
-  assert.match(page,/const displayedReport = current && completedProjectCount \? current : latestReport/);
+  assert.match(page,/new EventSource\(`\$\{api\}\/events`, \{ withCredentials: true \}\)/);
+  assert.match(page,/refetchInterval: 30_000/);
+  assert.match(page,/const displayedReport = current \|\| latestReport/);
   assert.match(page,/currentUpdateReport/);
   assert.match(page,/didAutoOpen/);
   assert.match(page,/search_page_mode: project\?\.search_page_mode \|\| "ALL_PAGES"/);

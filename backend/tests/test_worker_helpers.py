@@ -14,6 +14,7 @@ from app.worker import (
     _finish_cancelled_job,
     _material_changes,
     _publish_project_results,
+    _publish_live_results,
     _previous_state,
     _project_scan_modes,
     _raise_if_cancelled,
@@ -524,3 +525,31 @@ def test_completed_project_publishes_a_live_report_before_the_scan_finishes():
         "failed": 1,
     }
     assert job.payload["failures"] == failure_details
+
+
+def test_changed_car_is_published_while_its_project_is_still_running():
+    job = SimpleNamespace(
+        payload={
+            "project_ids": [4],
+            "current_project_id": 4,
+            "pagination": {"4": {"current_page": 1}},
+        },
+    )
+    report = [{"project_id": 4, "car_id": 1, "change": "NEW"}]
+
+    _publish_live_results(
+        job,
+        {},
+        report,
+        [],
+        [],
+        {},
+        current_project_id=4,
+    )
+
+    assert job.payload["current_project_id"] == 4
+    assert job.payload["project_statuses"] == {}
+    assert job.payload["report"] == report
+    assert job.payload["summary"]["new"] == 1
+    assert job.payload["failures"] == []
+    assert job.payload["pagination"] == {"4": {"current_page": 1}}

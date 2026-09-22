@@ -12,6 +12,7 @@ from .database import SessionLocal, engine, settings
 from .desktop_runtime import desktop_playwright
 from .external_links import validated_external_url
 from .job_queue import claim_next_job
+from .live_updates import publish_scan_update
 from .models import (
     Car,
     CarImage,
@@ -202,20 +203,22 @@ def _finish_cancelled_job(
     db.commit()
 
 
-def _publish_project_results(
+def _publish_live_results(
     job: ScanRun,
     payload: dict,
     report: list[dict],
     failures: list[str],
     failure_details: list[dict],
     project_statuses: dict[str, str],
+    *,
+    current_project_id: int | None,
 ) -> None:
-    """Persist the completed-project portion so the UI can render it mid-scan."""
+    """Persist committed report rows while a project is still running."""
 
     partial_report = _dedupe_report(report)
     job.payload = {
         **(job.payload or payload),
-        "current_project_id": None,
+        "current_project_id": current_project_id,
         "project_statuses": project_statuses,
         "report": partial_report,
         "failures": list(failure_details),
@@ -229,6 +232,27 @@ def _publish_project_results(
             "failed": len(failures),
         },
     }
+
+
+def _publish_project_results(
+    job: ScanRun,
+    payload: dict,
+    report: list[dict],
+    failures: list[str],
+    failure_details: list[dict],
+    project_statuses: dict[str, str],
+) -> None:
+    """Persist the completed-project portion so the UI can render it mid-scan."""
+
+    _publish_live_results(
+        job,
+        payload,
+        report,
+        failures,
+        failure_details,
+        project_statuses,
+        current_project_id=None,
+    )
 
 
 def _material_changes(old: dict, new: dict) -> list[dict]:
@@ -527,6 +551,7 @@ def process_job(job_id: int) -> None:
                 "cancellation_reason": "ACCOUNT_INACTIVE",
             }
             db.commit()
+            publish_scan_update(job.owner_id, job.id)
             return
         timestamp = datetime.now(timezone.utc)
         if job.status == "QUEUED":
@@ -537,6 +562,7 @@ def process_job(job_id: int) -> None:
         job.started_at = job.started_at or timestamp
         job.heartbeat_at = timestamp
         db.commit()
+        publish_scan_update(job.owner_id, job.id)
         payload = job.payload or {}
         project_ids = list(dict.fromkeys(payload.get("project_ids") or []))
         car_ids = list(dict.fromkeys(payload.get("car_ids") or []))
@@ -600,11 +626,16 @@ def process_job(job_id: int) -> None:
                     )
                     project_run.status = "RUNNING"
                     initial_full_scan = _requires_initial_full_scan(db, project.id)
+                    project_statuses = dict(
+                        (job.payload or {}).get("project_statuses") or {}
+                    )
                     job.payload = {
                         **(job.payload or payload),
                         "current_project_id": project.id,
+                        "project_statuses": project_statuses,
                     }
                     db.commit()
+                    publish_scan_update(job.owner_id, job.id)
                     try:
                         scan_mode, page_mode = _project_scan_modes(
                             project,
@@ -642,6 +673,7 @@ def process_job(job_id: int) -> None:
                                 * 100
                             )
                             db.commit()
+                            publish_scan_update(job.owner_id, job.id)
 
                         collection = collect_search_pages(
                             page,
@@ -696,6 +728,7 @@ def process_job(job_id: int) -> None:
                                 list_changed=bool(known and _list_changed(known, list_data)),
                                 incomplete=incomplete,
                             ):
+                                report_item = None
                                 try:
                                     # Browser I/O must not hold a SQLite write
                                     # or read transaction open.
@@ -746,7 +779,17 @@ def process_job(job_id: int) -> None:
                                         / total_units
                                         * 100
                                     )
+                                    _publish_live_results(
+                                        job,
+                                        payload,
+                                        report,
+                                        failures,
+                                        failure_details,
+                                        project_statuses,
+                                        current_project_id=project.id,
+                                    )
                                     db.commit()
+                                    publish_scan_update(job.owner_id, job.id)
                                     continue
                                 if detail.get("sold"):
                                     confirmed_sold.add(car.canonical_encar_id)
@@ -765,6 +808,7 @@ def process_job(job_id: int) -> None:
                                     after_snapshot_id=after_snapshot_id,
                                 ):
                                     report.append(item)
+                                    report_item = item
                                 _remember_observation(
                                     db,
                                     current_relation,
@@ -772,6 +816,7 @@ def process_job(job_id: int) -> None:
                                     after_snapshot_id,
                                 )
                             else:
+                                report_item = None
                                 car = known
                                 mark_found_without_detail(db, project, car)
                                 current_relation = db.get(
@@ -789,6 +834,7 @@ def process_job(job_id: int) -> None:
                                     after_snapshot_id=after_snapshot_id,
                                 ):
                                     report.append(item)
+                                    report_item = item
                                 _remember_observation(
                                     db,
                                     current_relation,
@@ -807,11 +853,24 @@ def process_job(job_id: int) -> None:
                                 / total_units
                                 * 100
                             )
+                            if report_item:
+                                _publish_live_results(
+                                    job,
+                                    payload,
+                                    report,
+                                    failures,
+                                    failure_details,
+                                    project_statuses,
+                                    current_project_id=project.id,
+                                )
                             db.commit()
+                            if report_item:
+                                publish_scan_update(job.owner_id, job.id)
                             _raise_if_cancelled(db, job)
                         for missing_car in _missing_cars(
                             db, project, search_found_ids
                         ):
+                            report_item = None
                             try:
                                 _raise_if_cancelled(db, job)
                                 missing_relation = db.get(
@@ -873,13 +932,26 @@ def process_job(job_id: int) -> None:
                                     after_snapshot_id=after_snapshot_id,
                                 ):
                                     report.append(item)
+                                    report_item = item
                                 _remember_observation(
                                     db,
                                     refreshed_relation,
                                     refreshed_car,
                                     after_snapshot_id,
                                 )
+                                if report_item:
+                                    _publish_live_results(
+                                        job,
+                                        payload,
+                                        report,
+                                        failures,
+                                        failure_details,
+                                        project_statuses,
+                                        current_project_id=project.id,
+                                    )
                                 db.commit()
+                                if report_item:
+                                    publish_scan_update(job.owner_id, job.id)
                                 _raise_if_cancelled(db, job)
                             except ScanCancelled:
                                 raise
@@ -898,8 +970,20 @@ def process_job(job_id: int) -> None:
                                     )
                                 )
                                 db.rollback()
+                                _publish_live_results(
+                                    job,
+                                    payload,
+                                    report,
+                                    failures,
+                                    failure_details,
+                                    project_statuses,
+                                    current_project_id=project.id,
+                                )
+                                db.commit()
+                                publish_scan_update(job.owner_id, job.id)
                         _raise_if_cancelled(db, job)
                         if _should_apply_search_absence(page_mode):
+                            absence_changed = False
                             for missing_car, search_change in mark_absent(
                                 db,
                                 project,
@@ -930,6 +1014,19 @@ def process_job(job_id: int) -> None:
                                         "updated_at": datetime.now(timezone.utc).isoformat(),
                                     }
                                 )
+                                absence_changed = True
+                            if absence_changed:
+                                _publish_live_results(
+                                    job,
+                                    payload,
+                                    report,
+                                    failures,
+                                    failure_details,
+                                    project_statuses,
+                                    current_project_id=project.id,
+                                )
+                                db.commit()
+                                publish_scan_update(job.owner_id, job.id)
                         project.updated_at = datetime.now(timezone.utc)
                         project_run.status = "SUCCEEDED"
                         successes += 1
@@ -969,6 +1066,7 @@ def process_job(job_id: int) -> None:
                     completed += 1
                     job.progress = round(completed / total_units * 100)
                     db.commit()
+                    publish_scan_update(job.owner_id, job.id)
                     _raise_if_cancelled(db, job)
                     if stop_for_captcha:
                         for pending in db.scalars(
@@ -1118,7 +1216,17 @@ def process_job(job_id: int) -> None:
                                 db.rollback()
                     completed += 1
                     job.progress = round(completed / total_units * 100)
+                    _publish_live_results(
+                        job,
+                        payload,
+                        report,
+                        failures,
+                        failure_details,
+                        dict((job.payload or {}).get("project_statuses") or {}),
+                        current_project_id=None,
+                    )
                     db.commit()
+                    publish_scan_update(job.owner_id, job.id)
                     _raise_if_cancelled(db, job)
                 context.close()
                 browser.close()
@@ -1150,6 +1258,7 @@ def process_job(job_id: int) -> None:
                 job.finished_at,
             )
             db.commit()
+            publish_scan_update(job.owner_id, job.id)
         except ScanCancelled:
             _finish_cancelled_job(
                 db,
@@ -1159,6 +1268,7 @@ def process_job(job_id: int) -> None:
                 failures,
                 failure_details,
             )
+            publish_scan_update(job.owner_id, job.id)
         except Exception as exc:
             report = _dedupe_report(report)
             job.status = "FAILED"
@@ -1188,6 +1298,7 @@ def process_job(job_id: int) -> None:
                 job.finished_at,
             )
             db.commit()
+            publish_scan_update(job.owner_id, job.id)
 
 
 def enqueue_scheduled(*, now: datetime | None = None) -> None:
