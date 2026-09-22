@@ -128,11 +128,29 @@ def _scheduler_completion_checkpoint(connection: Connection) -> None:
     )
 
 
+def _project_price_filters(connection: Connection) -> None:
+    _add_column_if_missing(
+        connection, "projects", "price_filter_mode", "VARCHAR(16) NOT NULL DEFAULT 'LINK'"
+    )
+    _add_column_if_missing(connection, "projects", "price_min_krw", "BIGINT")
+    _add_column_if_missing(connection, "projects", "price_max_krw", "BIGINT")
+    _add_column_if_missing(
+        connection, "projects", "price_filter_revision", "INTEGER NOT NULL DEFAULT 1"
+    )
+    _add_column_if_missing(
+        connection,
+        "projects",
+        "price_filter_baseline_revision",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+
+
 MIGRATIONS = (
     SQLiteMigration(1, "current_web_schema_baseline", _baseline),
     SQLiteMigration(2, "durable_single_worker_scan_queue", _durable_scan_queue),
     SQLiteMigration(3, "desktop_scheduler_controls", _desktop_scheduler_controls),
     SQLiteMigration(4, "scheduler_completion_checkpoint", _scheduler_completion_checkpoint),
+    SQLiteMigration(5, "project_price_filters", _project_price_filters),
 )
 
 

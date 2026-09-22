@@ -68,9 +68,9 @@ def add_user(db: Session, username: str = "owner") -> User:
 def test_sqlite_migrations_are_versioned_and_idempotent(tmp_path: Path) -> None:
     engine = sqlite_engine(tmp_path)
 
-    assert migrate_sqlite(engine) == 4
-    assert migrate_sqlite(engine) == 4
-    assert sqlite_schema_version(engine) == 4
+    assert migrate_sqlite(engine) == 5
+    assert migrate_sqlite(engine) == 5
+    assert sqlite_schema_version(engine) == 5
 
     with engine.connect() as connection:
         columns = {
@@ -136,7 +136,7 @@ def test_pre_migration_desktop_database_is_adopted(tmp_path: Path) -> None:
             )
         )
 
-    assert migrate_sqlite(engine) == 4
+    assert migrate_sqlite(engine) == 5
     with engine.connect() as connection:
         row = connection.execute(
             text(

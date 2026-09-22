@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.scanner import TimeoutScanError
+from app.scanner import TimeoutScanError, extract_price_filter
 from app.schemas import ProjectIn
 from app.services import merge_reliable_detail
 from app.worker import (
@@ -16,6 +16,8 @@ from app.worker import (
     _publish_project_results,
     _publish_live_results,
     _previous_state,
+    _effective_search_url,
+    _price_filter_needs_baseline,
     _project_scan_modes,
     _raise_if_cancelled,
     _read_verified_detail,
@@ -34,6 +36,60 @@ def test_initial_project_scan_is_accurate_and_reads_all_pages():
 
     assert _project_scan_modes(project, True) == ("ACCURATE", "ALL_PAGES")
     assert _project_scan_modes(project, False) == ("FAST", "FIRST_PAGE")
+    assert _project_scan_modes(project, False, True) == ("ACCURATE", "ALL_PAGES")
+
+
+def test_custom_price_range_is_applied_once_to_project_search_url():
+    import json
+    from urllib.parse import quote
+
+    search_url = (
+        "https://www.encar.com/dc/dc_carsearchlist.do?carType=kor#!"
+        + quote(
+            json.dumps(
+                {
+                    "action": "(And.Year.range(202400..).)",
+                    "toggle": {"4": 0},
+                    "page": 1,
+                },
+                separators=(",", ":"),
+            ),
+            safe="",
+        )
+    )
+
+    project = SimpleNamespace(
+        search_url=search_url,
+        price_filter_mode="CUSTOM",
+        price_min_krw=10_000_000,
+        price_max_krw=30_000_000,
+        price_filter_revision=2,
+        price_filter_baseline_revision=1,
+    )
+
+    assert extract_price_filter(_effective_search_url(project)) == (
+        10_000_000,
+        30_000_000,
+    )
+    assert _price_filter_needs_baseline(project)
+
+
+def test_project_price_filter_validation_requires_usable_custom_range():
+    with pytest.raises(ValueError, match="custom_price_range_requires_a_bound"):
+        ProjectIn(
+            name="Tucson",
+            search_url="https://fem.encar.com/fc/fc_carsearchlist.html",
+            price_filter_mode="CUSTOM",
+        )
+
+    with pytest.raises(ValueError, match="invalid_price_range"):
+        ProjectIn(
+            name="Tucson",
+            search_url="https://fem.encar.com/fc/fc_carsearchlist.html",
+            price_filter_mode="CUSTOM",
+            price_min_krw=30_000_000,
+            price_max_krw=10_000_000,
+        )
 
 
 def test_new_project_defaults_to_all_pages():

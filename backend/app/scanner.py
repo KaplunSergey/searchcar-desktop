@@ -91,6 +91,17 @@ class PriceConfirmationError(ScanError):
     code = "PRICE_NOT_CONFIRMED"
 
 
+class PriceFilterUrlError(ScanError):
+    code = "PRICE_FILTER_URL"
+
+
+ENCAR_PRICE_UNIT_KRW = 10_000
+ENCAR_MAX_PRICE_KRW = 100_000_000
+_PRICE_RANGE_RE = re.compile(
+    r"(?:\._\.|_\.)Price\.range\((?P<minimum>[\d,]*)\.\.(?P<maximum>[\d,]*)\)"
+)
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -215,6 +226,92 @@ def _fragment_state(url: str) -> dict | None:
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
     return state if isinstance(state, dict) else None
+
+
+def _validate_price_bound(value: int | None) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise PriceFilterUrlError("Encar price must be an integer amount in KRW")
+    if not 0 <= value <= ENCAR_MAX_PRICE_KRW:
+        raise PriceFilterUrlError("Encar price is outside the supported range")
+    if value % ENCAR_PRICE_UNIT_KRW:
+        raise PriceFilterUrlError("Encar price must use steps of 10,000 KRW")
+    return value
+
+
+def extract_price_filter(url: str) -> tuple[int | None, int | None]:
+    """Return the Encar price range in full KRW amounts."""
+    state = _fragment_state(url)
+    action = state.get("action") if state else None
+    if not isinstance(action, str):
+        raise PriceFilterUrlError("Encar search URL does not expose filter state")
+    matches = list(_PRICE_RANGE_RE.finditer(action))
+    if not matches:
+        return None, None
+    if len(matches) != 1:
+        raise PriceFilterUrlError("Encar search URL contains multiple price filters")
+    match = matches[0]
+
+    def parse_bound(name: str) -> int | None:
+        raw = match.group(name).replace(",", "")
+        return int(raw) * ENCAR_PRICE_UNIT_KRW if raw else None
+
+    minimum, maximum = parse_bound("minimum"), parse_bound("maximum")
+    _validate_price_bound(minimum)
+    _validate_price_bound(maximum)
+    if minimum is not None and maximum is not None and minimum > maximum:
+        raise PriceFilterUrlError("Encar price range is invalid")
+    return minimum, maximum
+
+
+def apply_price_filter(
+    url: str,
+    minimum_krw: int | None,
+    maximum_krw: int | None,
+) -> str:
+    """Add, replace, or remove only the price condition in an Encar search URL."""
+    minimum_krw = _validate_price_bound(minimum_krw)
+    maximum_krw = _validate_price_bound(maximum_krw)
+    if (
+        minimum_krw is not None
+        and maximum_krw is not None
+        and minimum_krw > maximum_krw
+    ):
+        raise PriceFilterUrlError("Encar price range is invalid")
+    state = _fragment_state(url)
+    action = state.get("action") if state else None
+    if not isinstance(action, str):
+        raise PriceFilterUrlError("Encar search URL does not expose filter state")
+    if len(_PRICE_RANGE_RE.findall(action)) > 1:
+        raise PriceFilterUrlError("Encar search URL contains multiple price filters")
+    action = _PRICE_RANGE_RE.sub("", action)
+    toggles = state.get("toggle")
+    toggles = dict(toggles) if isinstance(toggles, dict) else {}
+    if minimum_krw is None and maximum_krw is None:
+        toggles["4"] = 0
+    else:
+        if action.endswith(".)"):
+            action_prefix = action[:-2]
+            separator = "._."
+        elif action.endswith(")"):
+            # Foreign-car links can end in nested filter groups, for example
+            # ``...(C.Manufacturer.Audi._.ModelGroup.A3.)))``.  The price
+            # condition belongs in the outer ``And`` group.
+            action_prefix = action[:-1]
+            separator = "_."
+        else:
+            raise PriceFilterUrlError("Encar search URL has an unsupported action")
+        minimum = "" if minimum_krw is None else f"{minimum_krw // ENCAR_PRICE_UNIT_KRW:,}"
+        maximum = "" if maximum_krw is None else f"{maximum_krw // ENCAR_PRICE_UNIT_KRW:,}"
+        action = f"{action_prefix}{separator}Price.range({minimum}..{maximum}).)"
+        toggles["4"] = 1
+    state = {**state, "action": action, "toggle": toggles, "page": 1, "cursor": None}
+    parts = urlsplit(url)
+    fragment = "!" + quote(
+        json.dumps(state, ensure_ascii=False, separators=(",", ":")), safe=""
+    )
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, fragment))
 
 
 def search_page_number(url: str) -> int | None:

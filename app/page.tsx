@@ -78,6 +78,9 @@ type ProjectRecord = {
   telegram_url?: string | null;
   scan_mode: "FAST" | "ACCURATE";
   search_page_mode: "FIRST_PAGE" | "ALL_PAGES";
+  price_filter_mode: "LINK" | "CUSTOM" | "NONE";
+  price_min_krw?: number | null;
+  price_max_krw?: number | null;
   auto_update: boolean;
   cars: number;
   updated_at: string;
@@ -323,6 +326,9 @@ type ProjectForm = {
   telegram_url: string;
   scan_mode: "FAST" | "ACCURATE";
   search_page_mode: "FIRST_PAGE" | "ALL_PAGES";
+  price_filter_mode: "LINK" | "CUSTOM" | "NONE";
+  price_min_krw: number | null;
+  price_max_krw: number | null;
   auto_update: boolean;
 };
 
@@ -502,6 +508,21 @@ function formatDate(value: string | null | undefined, locale: Locale) {
 function formatMoney(value: unknown) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? `₩ ${number.toLocaleString("ru-RU")}` : "—";
+}
+
+const PROJECT_PRICE_MAX_KRW = 100_000_000;
+const PROJECT_PRICE_SLIDER_STEP_KRW = 1_000_000;
+
+function formatProjectPrice(value: number | null | undefined) {
+  return value === null || value === undefined
+    ? "—"
+    : `₩ ${value.toLocaleString("ru-RU")}`;
+}
+
+function projectPriceSummary(project: ProjectRecord, t: Translate) {
+  if (project.price_filter_mode === "NONE") return t("priceFilterNone");
+  if (project.price_filter_mode === "LINK") return t("priceFilterLink");
+  return `${t("priceFilterCustom")}: ${formatProjectPrice(project.price_min_krw)} – ${formatProjectPrice(project.price_max_krw)}`;
 }
 
 function formatCountdown(value: string | null | undefined, locale: Locale) {
@@ -756,7 +777,9 @@ function App({
           ? locale === "uk"
             ? "Досягнуто ліміт проєктів для вашого облікового запису"
             : "Достигнут лимит проектов для вашей учётной записи"
-          : t("projectConflict"),
+          : error instanceof ApiError && error.message.includes("price_")
+            ? t("priceRangeInvalid")
+            : t("projectConflict"),
       ),
   });
 
@@ -2342,6 +2365,7 @@ function Projects({
               />
               <button className="project-name" onClick={() => open(project)}>
                 <b>{project.name}</b>
+                <small>{projectPriceSummary(project, t)}</small>
               </button>
               <div className="count">
                 <span>{t("carsCountLabel")}:</span>
@@ -4251,8 +4275,41 @@ function ProjectModal({
     telegram_url: project?.telegram_url || "",
     scan_mode: project?.scan_mode || "FAST",
     search_page_mode: project?.search_page_mode || "ALL_PAGES",
+    price_filter_mode: project?.price_filter_mode || "LINK",
+    price_min_krw: project?.price_min_krw ?? null,
+    price_max_krw: project?.price_max_krw ?? null,
     auto_update: project?.auto_update ?? true,
   });
+  const priceRangeInvalid =
+    form.price_filter_mode === "CUSTOM" &&
+    ((form.price_min_krw === null && form.price_max_krw === null) ||
+      [form.price_min_krw, form.price_max_krw].some(
+        (value) => value !== null && (!Number.isInteger(value) || value % 10_000 !== 0),
+      ) ||
+      (form.price_min_krw !== null &&
+        form.price_max_krw !== null &&
+        form.price_min_krw > form.price_max_krw));
+  const setPriceMode = (mode: ProjectForm["price_filter_mode"]) => {
+    if (mode === "CUSTOM" && form.price_min_krw === null && form.price_max_krw === null) {
+      setForm({
+        ...form,
+        price_filter_mode: mode,
+        price_min_krw: 0,
+        price_max_krw: PROJECT_PRICE_MAX_KRW,
+      });
+      return;
+    }
+    setForm({
+      ...form,
+      price_filter_mode: mode,
+      price_min_krw: mode === "CUSTOM" ? form.price_min_krw : null,
+      price_max_krw: mode === "CUSTOM" ? form.price_max_krw : null,
+    });
+  };
+  const setPriceBound = (key: "price_min_krw" | "price_max_krw", raw: string) => {
+    const value = raw.trim() === "" ? null : Math.min(PROJECT_PRICE_MAX_KRW, Math.max(0, Number(raw)));
+    setForm({ ...form, [key]: Number.isFinite(value) ? value : null });
+  };
   const submit = (event: FormEvent) => {
     event.preventDefault();
     save(form);
@@ -4282,6 +4339,84 @@ function ProjectModal({
             onChange={(event) => setForm({ ...form, search_url: event.target.value })}
           />
         </label>
+        <label>
+          {t("priceFilter")}
+          <select
+            value={form.price_filter_mode}
+            onChange={(event) => setPriceMode(event.target.value as ProjectForm["price_filter_mode"])}
+          >
+            <option value="LINK">{t("priceFilterLink")}</option>
+            <option value="CUSTOM">{t("priceFilterCustom")}</option>
+            <option value="NONE">{t("priceFilterNone")}</option>
+          </select>
+          <small className="mode-help">{t("priceFilterHelp")}</small>
+        </label>
+        {form.price_filter_mode === "CUSTOM" ? (
+          <div className="project-price-range">
+            <div className="project-price-fields">
+              <label>
+                {t("priceFrom")}
+                <input
+                  type="number"
+                  min="0"
+                  max={PROJECT_PRICE_MAX_KRW}
+                  step="10000"
+                  inputMode="numeric"
+                  value={form.price_min_krw ?? ""}
+                  onChange={(event) => setPriceBound("price_min_krw", event.target.value)}
+                />
+              </label>
+              <label>
+                {t("priceTo")}
+                <input
+                  type="number"
+                  min="0"
+                  max={PROJECT_PRICE_MAX_KRW}
+                  step="10000"
+                  inputMode="numeric"
+                  value={form.price_max_krw ?? ""}
+                  onChange={(event) => setPriceBound("price_max_krw", event.target.value)}
+                />
+              </label>
+            </div>
+            <div className="project-price-sliders">
+              <input
+                aria-label={t("priceFrom")}
+                type="range"
+                min="0"
+                max={PROJECT_PRICE_MAX_KRW}
+                step={PROJECT_PRICE_SLIDER_STEP_KRW}
+                value={form.price_min_krw ?? 0}
+                onChange={(event) => {
+                  const value = Number(event.target.value);
+                  setForm({
+                    ...form,
+                    price_min_krw: value,
+                    price_max_krw: Math.max(value, form.price_max_krw ?? value),
+                  });
+                }}
+              />
+              <input
+                aria-label={t("priceTo")}
+                type="range"
+                min="0"
+                max={PROJECT_PRICE_MAX_KRW}
+                step={PROJECT_PRICE_SLIDER_STEP_KRW}
+                value={form.price_max_krw ?? PROJECT_PRICE_MAX_KRW}
+                onChange={(event) => {
+                  const value = Number(event.target.value);
+                  setForm({
+                    ...form,
+                    price_min_krw: Math.min(value, form.price_min_krw ?? value),
+                    price_max_krw: value,
+                  });
+                }}
+              />
+            </div>
+            <small>{formatProjectPrice(form.price_min_krw)} – {formatProjectPrice(form.price_max_krw)} · KRW</small>
+            {priceRangeInvalid ? <small className="price-range-error">{t("priceRangeInvalid")}</small> : null}
+          </div>
+        ) : null}
         <label>
           {t("telegramChannelUrl")}
           <input
@@ -4339,7 +4474,7 @@ function ProjectModal({
         </label>
         <div className="modal-actions">
           <Button onClick={close}>{t("cancel")}</Button>
-          <Button kind="primary" type="submit" disabled={busy}>
+          <Button kind="primary" type="submit" disabled={busy || priceRangeInvalid}>
             {t("saveChanges")}
           </Button>
         </div>

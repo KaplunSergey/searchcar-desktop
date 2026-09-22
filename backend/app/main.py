@@ -86,6 +86,7 @@ from .schemas import (
     DesktopLicenseTransferClaimIn,
     DesktopLicenseTrialIn,
     ExternalUrlIn,
+    validate_price_filter,
     RegistrationIn,
 )
 from .services import merge_reliable_detail
@@ -789,6 +790,9 @@ def project_out(project: Project, db: Session) -> dict:
         "telegram_url": project.telegram_url,
         "scan_mode": project.scan_mode,
         "search_page_mode": project.search_page_mode,
+        "price_filter_mode": project.price_filter_mode,
+        "price_min_krw": project.price_min_krw,
+        "price_max_krw": project.price_max_krw,
         "auto_update": project.auto_update,
         "cars": cars,
         "created_at": project.created_at,
@@ -978,6 +982,9 @@ def create_project(
         telegram_url=body.telegram_url,
         scan_mode=body.scan_mode,
         search_page_mode=body.search_page_mode,
+        price_filter_mode=body.price_filter_mode,
+        price_min_krw=body.price_min_krw,
+        price_max_krw=body.price_max_krw,
         auto_update=body.auto_update,
     )
     db.add(project)
@@ -1016,6 +1023,27 @@ def patch_project(
 ) -> dict:
     project = owned_project(project_id, current, db)
     changes = body.model_dump(exclude_unset=True)
+    next_price_mode = changes.get("price_filter_mode", project.price_filter_mode)
+    next_price_minimum = changes.get("price_min_krw", project.price_min_krw)
+    next_price_maximum = changes.get("price_max_krw", project.price_max_krw)
+    try:
+        validate_price_filter(next_price_mode, next_price_minimum, next_price_maximum)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    changes_search_conditions = any(
+        key in changes
+        for key in {
+            "search_url",
+            "price_filter_mode",
+            "price_min_krw",
+            "price_max_krw",
+        }
+    ) and (
+        next_price_mode != project.price_filter_mode
+        or next_price_minimum != project.price_min_krw
+        or next_price_maximum != project.price_max_krw
+        or changes.get("search_url", project.search_url) != project.search_url
+    )
     for key, value in changes.items():
         setattr(
             project,
@@ -1024,6 +1052,8 @@ def patch_project(
         )
     if body.name:
         project.name_key = body.name.strip().casefold()
+    if changes_search_conditions:
+        project.price_filter_revision += 1
     project.updated_at = datetime.now(timezone.utc)
     try:
         db.commit()

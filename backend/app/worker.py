@@ -30,6 +30,7 @@ from .parser import fingerprint_listing, material_changes, should_read_detail
 from .scanner import (
     PriceConfirmationError,
     ScanError,
+    apply_price_filter,
     collect_search_pages,
     parse_list_row,
     read_detail,
@@ -347,8 +348,33 @@ def _requires_initial_full_scan(db, project_id: int) -> bool:
     ) is None
 
 
-def _project_scan_modes(project: Project, initial_full_scan: bool) -> tuple[str, str]:
-    if initial_full_scan:
+def _price_filter_needs_baseline(project: Project) -> bool:
+    return int(getattr(project, "price_filter_revision", 1) or 1) != int(
+        getattr(project, "price_filter_baseline_revision", 0) or 0
+    )
+
+
+def _effective_search_url(project: Project) -> str:
+    mode = getattr(project, "price_filter_mode", "LINK")
+    if mode == "LINK":
+        return project.search_url
+    if mode == "NONE":
+        return apply_price_filter(project.search_url, None, None)
+    if mode == "CUSTOM":
+        return apply_price_filter(
+            project.search_url,
+            getattr(project, "price_min_krw", None),
+            getattr(project, "price_max_krw", None),
+        )
+    raise ValueError(f"Unsupported project price filter mode: {mode}")
+
+
+def _project_scan_modes(
+    project: Project,
+    initial_full_scan: bool,
+    price_filter_needs_baseline: bool = False,
+) -> tuple[str, str]:
+    if initial_full_scan or price_filter_needs_baseline:
         return "ACCURATE", "ALL_PAGES"
     return project.scan_mode, getattr(project, "search_page_mode", "ALL_PAGES")
 
@@ -626,6 +652,12 @@ def process_job(job_id: int) -> None:
                     )
                     project_run.status = "RUNNING"
                     initial_full_scan = _requires_initial_full_scan(db, project.id)
+                    price_filter_needs_baseline = _price_filter_needs_baseline(
+                        project
+                    )
+                    price_filter_revision = int(
+                        getattr(project, "price_filter_revision", 1) or 1
+                    )
                     project_statuses = dict(
                         (job.payload or {}).get("project_statuses") or {}
                     )
@@ -640,7 +672,9 @@ def process_job(job_id: int) -> None:
                         scan_mode, page_mode = _project_scan_modes(
                             project,
                             initial_full_scan,
+                            price_filter_needs_baseline,
                         )
+                        effective_search_url = _effective_search_url(project)
 
                         def update_page_progress(info: dict) -> None:
                             pagination = dict(
@@ -677,7 +711,7 @@ def process_job(job_id: int) -> None:
 
                         collection = collect_search_pages(
                             page,
-                            project.search_url,
+                            effective_search_url,
                             project.name,
                             all_pages=page_mode == "ALL_PAGES",
                             checkpoint=lambda: _raise_if_cancelled(db, job),
@@ -867,9 +901,12 @@ def process_job(job_id: int) -> None:
                             if report_item:
                                 publish_scan_update(job.owner_id, job.id)
                             _raise_if_cancelled(db, job)
-                        for missing_car in _missing_cars(
-                            db, project, search_found_ids
-                        ):
+                        missing_cars = (
+                            []
+                            if price_filter_needs_baseline
+                            else _missing_cars(db, project, search_found_ids)
+                        )
+                        for missing_car in missing_cars:
                             report_item = None
                             try:
                                 _raise_if_cancelled(db, job)
@@ -982,7 +1019,10 @@ def process_job(job_id: int) -> None:
                                 db.commit()
                                 publish_scan_update(job.owner_id, job.id)
                         _raise_if_cancelled(db, job)
-                        if _should_apply_search_absence(page_mode):
+                        if (
+                            not price_filter_needs_baseline
+                            and _should_apply_search_absence(page_mode)
+                        ):
                             absence_changed = False
                             for missing_car, search_change in mark_absent(
                                 db,
@@ -1027,6 +1067,12 @@ def process_job(job_id: int) -> None:
                                 )
                                 db.commit()
                                 publish_scan_update(job.owner_id, job.id)
+                        if page_mode == "ALL_PAGES" and db.scalar(
+                            select(Project.price_filter_revision).where(
+                                Project.id == project.id
+                            )
+                        ) == price_filter_revision:
+                            project.price_filter_baseline_revision = price_filter_revision
                         project.updated_at = datetime.now(timezone.utc)
                         project_run.status = "SUCCEEDED"
                         successes += 1

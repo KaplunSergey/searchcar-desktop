@@ -1,5 +1,28 @@
 from typing import Literal
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
+
+PRICE_FILTER_MODES = ("LINK", "CUSTOM", "NONE")
+MAX_PROJECT_PRICE_KRW = 100_000_000
+
+
+def validate_price_filter(
+    mode: str,
+    minimum: int | None,
+    maximum: int | None,
+) -> None:
+    if mode not in PRICE_FILTER_MODES:
+        raise ValueError("unsupported_price_filter_mode")
+    if mode != "CUSTOM":
+        if minimum is not None or maximum is not None:
+            raise ValueError("price_bounds_require_custom_mode")
+        return
+    if minimum is None and maximum is None:
+        raise ValueError("custom_price_range_requires_a_bound")
+    if minimum is not None and maximum is not None and minimum > maximum:
+        raise ValueError("invalid_price_range")
+    for value in (minimum, maximum):
+        if value is not None and value % 10_000:
+            raise ValueError("price_must_use_10000_krw_steps")
 
 class LoginIn(BaseModel):
     username:str=Field(min_length=1,max_length=64)
@@ -35,7 +58,18 @@ class ProjectIn(BaseModel):
     telegram_url: str|None=None
     scan_mode: Literal["FAST","ACCURATE"]="FAST"
     search_page_mode: Literal["FIRST_PAGE","ALL_PAGES"]="ALL_PAGES"
+    price_filter_mode: Literal["LINK", "CUSTOM", "NONE"]="LINK"
+    price_min_krw: int|None=Field(default=None,ge=0,le=MAX_PROJECT_PRICE_KRW)
+    price_max_krw: int|None=Field(default=None,ge=0,le=MAX_PROJECT_PRICE_KRW)
     auto_update: bool=True
+    @model_validator(mode="after")
+    def price_filter_is_valid(self):
+        validate_price_filter(
+            self.price_filter_mode,
+            self.price_min_krw,
+            self.price_max_krw,
+        )
+        return self
     @field_validator("search_url")
     @classmethod
     def encar_url(cls,v):
@@ -58,7 +92,11 @@ class ProjectIn(BaseModel):
             raise ValueError("unsupported_telegram_domain")
         return value
 class ProjectPatch(BaseModel):
-    name:str|None=None; search_url:str|None=None; telegram_url:str|None=None; scan_mode:Literal["FAST","ACCURATE"]|None=None; search_page_mode:Literal["FIRST_PAGE","ALL_PAGES"]|None=None; auto_update:bool|None=None
+    name:str|None=None; search_url:str|None=None; telegram_url:str|None=None; scan_mode:Literal["FAST","ACCURATE"]|None=None; search_page_mode:Literal["FIRST_PAGE","ALL_PAGES"]|None=None; price_filter_mode:Literal["LINK", "CUSTOM", "NONE"]|None=None; price_min_krw:int|None=Field(default=None,ge=0,le=MAX_PROJECT_PRICE_KRW); price_max_krw:int|None=Field(default=None,ge=0,le=MAX_PROJECT_PRICE_KRW); auto_update:bool|None=None
+    @field_validator("search_url")
+    @classmethod
+    def encar_url(cls,v):
+        return ProjectIn.encar_url(v)
     @field_validator("telegram_url")
     @classmethod
     def telegram_channel_url(cls,v):
