@@ -55,6 +55,10 @@ test("ships required product surfaces and localization",async()=>{
   assert.match(page,/refetchInterval: 30_000/);
   assert.match(page,/const displayedReport = current \|\| latestReport/);
   assert.match(page,/currentUpdateReport/);
+  assert.match(page,/className="projects-collapsible-content"/);
+  assert.match(page,/className="projects-scan-spinner"/);
+  assert.match(page,/aria-expanded=\{!projectsCollapsed\}/);
+  assert.match(details,/\.projects-panel\.collapsed \.projects-collapsible-content\{grid-template-rows:0fr/);
   assert.match(page,/didAutoOpen/);
   assert.match(page,/search_page_mode: project\?\.search_page_mode \|\| "ALL_PAGES"/);
   assert.match(page,/className="failure-listing-link"/);

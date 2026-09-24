@@ -2215,6 +2215,7 @@ function Projects({
     return window.localStorage.getItem("encar-projects-view") === "grid";
   });
   const [sort, setSort] = useState<"updated" | "name">("updated");
+  const [projectsCollapsed, setProjectsCollapsed] = useState(false);
   const [carSearch, setCarSearch] = useState("");
   useEffect(() => {
     window.localStorage.setItem("encar-projects-view", grid ? "grid" : "list");
@@ -2244,6 +2245,10 @@ function Projects({
   const completedProjectCount = Object.keys(
     current?.payload?.project_statuses || {},
   ).length;
+  const scanningProjectTotal = current?.payload?.project_ids?.length || 0;
+  const scanningProjectNumber = current
+    ? Math.min(scanningProjectTotal, completedProjectCount + 1)
+    : 0;
   const displayedReport = current || latestReport;
   const displayingLiveReport = displayedReport?.id === current?.id;
   const newListingsCount =
@@ -2331,31 +2336,67 @@ function Projects({
           )
         ) : null}
       </section>
-      <div className="toolbar">
-        <strong>
-          {t("allProjects")} · {projects.length}
-        </strong>
-        <button className={!grid ? "chosen" : ""} onClick={() => setGrid(false)}>
-          ☷
-        </button>
-        <button className={grid ? "chosen" : ""} onClick={() => setGrid(true)}>
-          ▦
-        </button>
-        <select value={sort} onChange={(event) => setSort(event.target.value as "updated" | "name")}>
-          <option value="updated">{t("recentlyUpdated")}</option>
-          <option value="name">{t("name")}</option>
-        </select>
-      </div>
-      {loading && <div className="panel empty-state">{t("loadingProjects")}</div>}
-      {error && <div className="error-strip">{t("backendUnavailable")}</div>}
-      {!loading && !error && !projects.length && (
-        <div className="panel empty-state">
-          <b>{t("noProjects")}</b>
-          <span>{t("createOrImport")}</span>
+      <section className={`panel projects-panel ${projectsCollapsed ? "collapsed" : ""}`}>
+        <div className="projects-panel-header">
+          <strong className="projects-panel-title">
+            {projectsCollapsed && current && scanningProjectTotal ? (
+              <>
+                <span className="projects-scan-spinner" aria-hidden="true" />
+                {t("updatingProject")} {scanningProjectNumber} {t("of")} {scanningProjectTotal}
+              </>
+            ) : projectsCollapsed ? (
+              <>{t("projects")}: {projects.length}</>
+            ) : (
+              <>{t("projects")} · {projects.length}</>
+            )}
+          </strong>
+          <div className="projects-toolbar-controls" aria-hidden={projectsCollapsed}>
+            <button
+              type="button"
+              className={!grid ? "chosen" : ""}
+              aria-label={t("listView")}
+              onClick={() => setGrid(false)}
+            >
+              ☷
+            </button>
+            <button
+              type="button"
+              className={grid ? "chosen" : ""}
+              aria-label={t("gridView")}
+              onClick={() => setGrid(true)}
+            >
+              ▦
+            </button>
+            <select value={sort} onChange={(event) => setSort(event.target.value as "updated" | "name")}>
+              <option value="updated">{t("recentlyUpdated")}</option>
+              <option value="name">{t("name")}</option>
+            </select>
+          </div>
+          <button
+            type="button"
+            className="projects-collapse-toggle"
+            aria-expanded={!projectsCollapsed}
+            aria-controls="projects-collapsible-content"
+            aria-label={t(projectsCollapsed ? "expandProjects" : "collapseProjects")}
+            onClick={() => setProjectsCollapsed((value) => !value)}
+          >
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="m6 9 6 6 6-6" />
+            </svg>
+          </button>
         </div>
-      )}
-      <div className={grid ? "project-grid" : "project-list"}>
-        {sorted.map((project) => {
+        <div id="projects-collapsible-content" className="projects-collapsible-content">
+          <div className="projects-collapsible-inner">
+            {loading && <div className="empty-state">{t("loadingProjects")}</div>}
+            {error && <div className="error-strip">{t("backendUnavailable")}</div>}
+            {!loading && !error && !projects.length && (
+              <div className="empty-state">
+                <b>{t("noProjects")}</b>
+                <span>{t("createOrImport")}</span>
+              </div>
+            )}
+            <div className={grid ? "project-grid" : "project-list"}>
+              {sorted.map((project) => {
           const activeScan = activeScans.find((scan) =>
             scan.payload?.project_ids?.includes(project.id),
           );
@@ -2459,10 +2500,13 @@ function Projects({
                   </svg>
                 </button>
               </div>
-            </article>
-          );
-        })}
-      </div>
+                </article>
+              );
+            })}
+          </div>
+        </div>
+        </div>
+      </section>
       {current && (
         <section className="panel progress-panel live-progress">
           <div>
