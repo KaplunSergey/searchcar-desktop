@@ -326,7 +326,7 @@ type ProjectForm = {
   telegram_url: string;
   scan_mode: "FAST" | "ACCURATE";
   search_page_mode: "FIRST_PAGE" | "ALL_PAGES";
-  price_filter_mode: "LINK" | "CUSTOM" | "NONE";
+  price_filter_mode: "LINK" | "CUSTOM";
   price_min_krw: number | null;
   price_max_krw: number | null;
   auto_update: boolean;
@@ -520,9 +520,9 @@ function formatProjectPrice(value: number | null | undefined) {
 }
 
 function projectPriceSummary(project: ProjectRecord, t: Translate) {
-  if (project.price_filter_mode === "NONE") return t("priceFilterNone");
-  if (project.price_filter_mode === "LINK") return t("priceFilterLink");
-  return `${t("priceFilterCustom")}: ${formatProjectPrice(project.price_min_krw)} – ${formatProjectPrice(project.price_max_krw)}`;
+  return project.price_filter_mode === "CUSTOM"
+    ? `${t("priceFilterCustom")}: ${formatProjectPrice(project.price_min_krw)} – ${formatProjectPrice(project.price_max_krw)}`
+    : t("priceFilterLink");
 }
 
 function formatCountdown(value: string | null | undefined, locale: Locale) {
@@ -2195,9 +2195,15 @@ function Projects({
   openReportCar: (item: ScanReportItem) => void;
   openFavorites: () => void;
 }) {
-  const [grid, setGrid] = useState(false);
+  const [grid, setGrid] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem("encar-projects-view") === "grid";
+  });
   const [sort, setSort] = useState<"updated" | "name">("updated");
   const [carSearch, setCarSearch] = useState("");
+  useEffect(() => {
+    window.localStorage.setItem("encar-projects-view", grid ? "grid" : "list");
+  }, [grid]);
   const lookupMutation = useMutation({
     mutationFn: (value: string) =>
       request<CarLookupResult>(`/car-lookup?q=${encodeURIComponent(value.trim())}`),
@@ -2371,20 +2377,23 @@ function Projects({
                 <span>{t("carsCountLabel")}:</span>
                 <b>{project.cars}</b>
               </div>
-              <span
-                className={`badge project-mode-badge ${
-                  project.scan_mode === "FAST" ? "blue" : "outline"
-                }`}
-              >
-                <span>{t(project.scan_mode === "FAST" ? "fast" : "accurate")}</span>
-                <small>
+              <div className="project-search-badges">
+                <span
+                  className={`badge project-mode-badge ${
+                    project.scan_mode === "FAST" ? "blue" : "outline"
+                  }`}
+                >
+                  <span aria-hidden="true">{project.scan_mode === "FAST" ? "ϟ" : "◎"}</span>
+                  {t(project.scan_mode === "FAST" ? "fast" : "accurate")}
+                </span>
+                <span className="badge project-page-badge">
                   {t(
                     project.search_page_mode === "ALL_PAGES"
                       ? "allPagesShort"
                       : "firstPageShort",
                   )}
-                </small>
-              </span>
+                </span>
+              </div>
               <span className={`status ${status.toLowerCase()}`}>
                 <i />
                 {t(scanStatusKey(status))}
@@ -2403,7 +2412,9 @@ function Projects({
                   title={t("edit")}
                   onClick={() => edit(project)}
                 >
-                  ✎
+                  <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24">
+                    <path d="M4 20h4l11-11-4-4L4 16v4ZM13.5 6.5l4 4" />
+                  </svg>
                 </button>
                 <button
                   className="icon-button"
@@ -2414,7 +2425,10 @@ function Projects({
                     notify(t("searchLinkCopied"));
                   }}
                 >
-                  ⧉
+                  <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24">
+                    <rect x="8" y="8" width="11" height="11" rx="1.5" />
+                    <path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-10A1.5 1.5 0 0 0 3 5.5v10A1.5 1.5 0 0 0 4.5 17H8" />
+                  </svg>
                 </button>
                 <button
                   className="icon-button danger-icon"
@@ -2422,7 +2436,9 @@ function Projects({
                   title={t("delete")}
                   onClick={() => remove(project)}
                 >
-                  ×
+                  <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24">
+                    <path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" />
+                  </svg>
                 </button>
               </div>
             </article>
@@ -2536,11 +2552,26 @@ function CarListRow({
       </button>
       <button className="car-name" onClick={() => openCar(car)}>
         <b>{car.title || `${t("car")} ${car.encar_id}`}</b>
-        <small>
-          {String(details.year_month || "—")} · {details.mileage_km
-            ? `${Number(details.mileage_km).toLocaleString()} km`
-            : "—"}
-          {showProject && car.project_name ? ` · ${car.project_name}` : ""}
+        <small className="car-meta">
+          <span>
+            <svg aria-hidden="true" focusable="false" viewBox="0 0 20 20">
+              <rect x="3" y="4.5" width="14" height="12" rx="2" />
+              <path d="M6.5 2.8v3.5M13.5 2.8v3.5M3 8h14" />
+            </svg>
+            {String(details.year_month || "—")}
+          </span>
+          <span>
+            <svg aria-hidden="true" focusable="false" viewBox="0 0 20 20">
+              <path d="M3.5 15.5a6.5 6.5 0 0 1 13 0M10 11l3.2-2.4" />
+              <circle cx="10" cy="15.5" r="1" />
+            </svg>
+            {details.mileage_km
+              ? `${Number(details.mileage_km).toLocaleString()} km`
+              : "—"}
+          </span>
+          {showProject && car.project_name ? (
+            <span className="car-project-meta">{car.project_name}</span>
+          ) : null}
         </small>
       </button>
       <div className="price">
@@ -4275,7 +4306,7 @@ function ProjectModal({
     telegram_url: project?.telegram_url || "",
     scan_mode: project?.scan_mode || "FAST",
     search_page_mode: project?.search_page_mode || "ALL_PAGES",
-    price_filter_mode: project?.price_filter_mode || "LINK",
+    price_filter_mode: project?.price_filter_mode === "CUSTOM" ? "CUSTOM" : "LINK",
     price_min_krw: project?.price_min_krw ?? null,
     price_max_krw: project?.price_max_krw ?? null,
     auto_update: project?.auto_update ?? true,
@@ -4347,7 +4378,6 @@ function ProjectModal({
           >
             <option value="LINK">{t("priceFilterLink")}</option>
             <option value="CUSTOM">{t("priceFilterCustom")}</option>
-            <option value="NONE">{t("priceFilterNone")}</option>
           </select>
           <small className="mode-help">{t("priceFilterHelp")}</small>
         </label>

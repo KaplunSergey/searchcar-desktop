@@ -470,8 +470,14 @@ def _collect_search_page(
     if _has_captcha(body_text):
         raise CaptchaError("Encar CAPTCHA detected")
 
-    anchors = page.locator("a").evaluate_all(
+    anchors = page.locator(
+        '#rySch_result [data-role="list_container"] a[href]'
+    ).evaluate_all(
         """els => els.map(a => {
+          const style = window.getComputedStyle(a);
+          const rect = a.getBoundingClientRect();
+          if (style.display === 'none' || style.visibility === 'hidden' ||
+              rect.width === 0 || rect.height === 0) return null;
           const closest = a.closest('li') || a.closest('tr') ||
             a.closest('[class*=list]') || a.closest('[class*=item]') ||
             a.closest('[class*=card]') || a.parentElement;
@@ -481,7 +487,7 @@ def _collect_search_page(
             closestText: closest ? (closest.innerText || '') : '',
             outerHTML: a.outerHTML || ''
           };
-        })"""
+        }).filter(Boolean)"""
     )
     found: dict[str, dict] = {}
     for anchor in anchors:

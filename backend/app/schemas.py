@@ -1,7 +1,7 @@
 from typing import Literal
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
-PRICE_FILTER_MODES = ("LINK", "CUSTOM", "NONE")
+PRICE_FILTER_MODES = ("LINK", "CUSTOM")
 MAX_PROJECT_PRICE_KRW = 100_000_000
 
 
@@ -58,7 +58,7 @@ class ProjectIn(BaseModel):
     telegram_url: str|None=None
     scan_mode: Literal["FAST","ACCURATE"]="FAST"
     search_page_mode: Literal["FIRST_PAGE","ALL_PAGES"]="ALL_PAGES"
-    price_filter_mode: Literal["LINK", "CUSTOM", "NONE"]="LINK"
+    price_filter_mode: Literal["LINK", "CUSTOM"]="LINK"
     price_min_krw: int|None=Field(default=None,ge=0,le=MAX_PROJECT_PRICE_KRW)
     price_max_krw: int|None=Field(default=None,ge=0,le=MAX_PROJECT_PRICE_KRW)
     auto_update: bool=True
@@ -92,7 +92,7 @@ class ProjectIn(BaseModel):
             raise ValueError("unsupported_telegram_domain")
         return value
 class ProjectPatch(BaseModel):
-    name:str|None=None; search_url:str|None=None; telegram_url:str|None=None; scan_mode:Literal["FAST","ACCURATE"]|None=None; search_page_mode:Literal["FIRST_PAGE","ALL_PAGES"]|None=None; price_filter_mode:Literal["LINK", "CUSTOM", "NONE"]|None=None; price_min_krw:int|None=Field(default=None,ge=0,le=MAX_PROJECT_PRICE_KRW); price_max_krw:int|None=Field(default=None,ge=0,le=MAX_PROJECT_PRICE_KRW); auto_update:bool|None=None
+    name:str|None=None; search_url:str|None=None; telegram_url:str|None=None; scan_mode:Literal["FAST","ACCURATE"]|None=None; search_page_mode:Literal["FIRST_PAGE","ALL_PAGES"]|None=None; price_filter_mode:Literal["LINK", "CUSTOM"]|None=None; price_min_krw:int|None=Field(default=None,ge=0,le=MAX_PROJECT_PRICE_KRW); price_max_krw:int|None=Field(default=None,ge=0,le=MAX_PROJECT_PRICE_KRW); auto_update:bool|None=None
     @field_validator("search_url")
     @classmethod
     def encar_url(cls,v):

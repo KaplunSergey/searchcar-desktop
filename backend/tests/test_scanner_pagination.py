@@ -71,6 +71,47 @@ class CaptchaPage(FakePage):
         return self.Body()
 
 
+class SearchResultsPage(FakePage):
+    url = modern_search_url()
+
+    class Locator:
+        def __init__(self, selector: str):
+            self.selector = selector
+
+        def inner_text(self, **_kwargs):
+            assert self.selector == "body"
+            return "총 1대"
+
+        def evaluate_all(self, _script):
+            if self.selector == "a":
+                return [
+                    {
+                        "href": "https://fem.encar.com/cars/detail/41000001",
+                        "text": "Audi A5",
+                        "closestText": "Audi A5",
+                    },
+                    {
+                        "href": "https://fem.encar.com/cars/detail/42000002",
+                        "text": "Recently viewed Tucson",
+                        "closestText": "Recently viewed Tucson",
+                    },
+                ]
+            if self.selector == '#rySch_result [data-role="list_container"] a[href]':
+                return [
+                    {
+                        "href": "https://fem.encar.com/cars/detail/41000001",
+                        "text": "Audi A5",
+                        "closestText": "Audi A5",
+                    }
+                ]
+            if self.selector == "a, button":
+                return []
+            raise AssertionError(f"Unexpected selector: {self.selector}")
+
+    def locator(self, selector):
+        return self.Locator(selector)
+
+
 def test_search_page_url_preserves_filters_and_resets_cursor():
     original = modern_search_url()
     changed = search_url_for_page(original, 3)
@@ -288,3 +329,12 @@ def test_captcha_search_page_is_reported_before_any_listing_is_read(monkeypatch)
 
     with pytest.raises(CaptchaError, match="CAPTCHA"):
         _collect_search_page(CaptchaPage(), modern_search_url())
+
+
+def test_search_collection_ignores_car_links_outside_result_containers(monkeypatch):
+    monkeypatch.setattr(scanner, "_open_page", lambda *_args: None)
+    monkeypatch.setattr(scanner, "_wait_for_search_results", lambda *_args: None)
+
+    result = _collect_search_page(SearchResultsPage(), modern_search_url())
+
+    assert list(result.rows) == ["41000001"]

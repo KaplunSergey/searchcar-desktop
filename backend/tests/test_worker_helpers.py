@@ -91,6 +91,13 @@ def test_project_price_filter_validation_requires_usable_custom_range():
             price_max_krw=10_000_000,
         )
 
+    with pytest.raises(ValueError):
+        ProjectIn(
+            name="Tucson",
+            search_url="https://fem.encar.com/fc/fc_carsearchlist.html",
+            price_filter_mode="NONE",
+        )
+
 
 def test_new_project_defaults_to_all_pages():
     project = ProjectIn(

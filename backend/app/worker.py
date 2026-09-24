@@ -356,17 +356,15 @@ def _price_filter_needs_baseline(project: Project) -> bool:
 
 def _effective_search_url(project: Project) -> str:
     mode = getattr(project, "price_filter_mode", "LINK")
-    if mode == "LINK":
-        return project.search_url
-    if mode == "NONE":
-        return apply_price_filter(project.search_url, None, None)
     if mode == "CUSTOM":
         return apply_price_filter(
             project.search_url,
             getattr(project, "price_min_krw", None),
             getattr(project, "price_max_krw", None),
         )
-    raise ValueError(f"Unsupported project price filter mode: {mode}")
+    # Old desktop databases may still contain the removed NONE mode.
+    # Treat it as LINK so existing projects continue to scan safely.
+    return project.search_url
 
 
 def _project_scan_modes(
