@@ -68,9 +68,9 @@ def add_user(db: Session, username: str = "owner") -> User:
 def test_sqlite_migrations_are_versioned_and_idempotent(tmp_path: Path) -> None:
     engine = sqlite_engine(tmp_path)
 
-    assert migrate_sqlite(engine) == 5
-    assert migrate_sqlite(engine) == 5
-    assert sqlite_schema_version(engine) == 5
+    assert migrate_sqlite(engine) == 6
+    assert migrate_sqlite(engine) == 6
+    assert sqlite_schema_version(engine) == 6
 
     with engine.connect() as connection:
         columns = {
@@ -88,7 +88,12 @@ def test_sqlite_migrations_are_versioned_and_idempotent(tmp_path: Path) -> None:
             column["name"]
             for column in inspect(connection).get_columns("scheduler_settings")
         }
-        assert {"paused", "catch_up_enabled", "last_completed_run_at"} <= scheduler_columns
+        assert {
+            "paused",
+            "catch_up_enabled",
+            "last_completed_run_at",
+            "performance_mode",
+        } <= scheduler_columns
         assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
         assert connection.execute(text("PRAGMA integrity_check")).scalar_one() == "ok"
 
@@ -136,7 +141,7 @@ def test_pre_migration_desktop_database_is_adopted(tmp_path: Path) -> None:
             )
         )
 
-    assert migrate_sqlite(engine) == 5
+    assert migrate_sqlite(engine) == 6
     with engine.connect() as connection:
         row = connection.execute(
             text(

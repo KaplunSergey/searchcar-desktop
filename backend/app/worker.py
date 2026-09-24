@@ -1,5 +1,6 @@
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,6 +11,7 @@ from sqlalchemy import select
 
 from .database import SessionLocal, engine, settings
 from .desktop_runtime import desktop_playwright
+from .detail_workers import DetailTask, DetailWorkerPool
 from .external_links import validated_external_url
 from .job_queue import claim_next_job
 from .live_updates import publish_scan_update
@@ -309,6 +311,7 @@ def _should_refresh_missing_car(
     return (
         getattr(relation, "tracking_enabled", True)
         and not car.excluded
+        and getattr(car, "status", None) != "SOLD"
         and car.canonical_encar_id not in found_ids
     )
 
@@ -377,6 +380,15 @@ def _project_scan_modes(
     return project.scan_mode, getattr(project, "search_page_mode", "ALL_PAGES")
 
 
+def _detail_worker_count(db, owner_id: int) -> int:
+    """Keep existing installations conservative until accelerated mode is chosen."""
+
+    setting = db.scalar(
+        select(SchedulerSetting).where(SchedulerSetting.user_id == owner_id)
+    )
+    return 2 if getattr(setting, "performance_mode", "ECO") == "FAST" else 1
+
+
 def _list_changed(car: Car, list_data: dict) -> bool:
     details = car.details or {}
     return any(
@@ -396,6 +408,14 @@ class PreviousState:
     details: dict
     search_status: str | None
     snapshot_id: int | None = None
+
+
+@dataclass(frozen=True)
+class ProjectDetailContext:
+    source_id: str
+    known_car_id: int | None
+    previous: PreviousState | None
+    mark_search_found: bool = True
 
 
 def _previous_state(
@@ -466,14 +486,21 @@ def _remember_observation(
     relation.last_observed_at = datetime.now(timezone.utc)
 
 
-def _read_verified_detail(page, row: dict, storage: Path, known: Car | None) -> dict:
+def _read_verified_detail(
+    page,
+    row: dict,
+    storage: Path,
+    known_price: int | Car | None,
+) -> dict:
+    """Read a detail and confirm a price change without sharing ORM state."""
+
+    known_price = getattr(known_price, "current_price", known_price)
     detail = read_detail(page, row, storage)
     new_price = detail.get("price_krw")
     if (
-        known
-        and known.current_price
+        known_price
         and new_price
-        and new_price != known.current_price
+        and new_price != known_price
         and not detail.get("sold")
     ):
         confirmation = read_detail(page, row, storage)
@@ -486,6 +513,32 @@ def _read_verified_detail(page, row: dict, storage: Path, known: Car | None) -> 
             )
         detail = confirmation
     return detail
+
+
+@contextmanager
+def _encar_detail_reader(storage: Path):
+    """Create one Playwright browser owned by one detail-worker thread."""
+
+    with desktop_playwright() as playwright:
+        executable_path = os.environ.get("SEARCHCAR_CHROMIUM_EXECUTABLE")
+        browser = playwright.chromium.launch(
+            headless=settings.playwright_headless,
+            executable_path=executable_path or None,
+        )
+        context = browser.new_context(
+            viewport={"width": 1440, "height": 1200}, locale="ko-KR"
+        )
+        page = context.new_page()
+        try:
+            yield lambda row, known_price: _read_verified_detail(
+                page,
+                row,
+                storage,
+                known_price,
+            )
+        finally:
+            context.close()
+            browser.close()
 
 
 def _change_report(
@@ -721,6 +774,33 @@ def process_job(job_id: int) -> None:
                         processed_source_ids: set[str] = set()
                         confirmed_sold: set[str] = set()
                         row_values = list(rows.values())
+                        detail_tasks: list[DetailTask] = []
+                        processed_rows = 0
+
+                        def publish_row_progress() -> None:
+                            job.progress = round(
+                                (
+                                    completed
+                                    + 0.15
+                                    + 0.30
+                                    * processed_rows
+                                    / max(1, len(row_values))
+                                )
+                                / total_units
+                                * 100
+                            )
+                            _publish_live_results(
+                                job,
+                                payload,
+                                report,
+                                failures,
+                                failure_details,
+                                project_statuses,
+                                current_project_id=project.id,
+                            )
+                            db.commit()
+                            publish_scan_update(job.owner_id, job.id)
+
                         for row_index, row in enumerate(row_values):
                             _raise_if_cancelled(db, job)
                             source_id = str(row["source_car_id"])
@@ -740,6 +820,10 @@ def process_job(job_id: int) -> None:
                             )
                             if known_relation and not known_relation.tracking_enabled:
                                 continue
+                            if known:
+                                # Presence in a verified result page is enough to
+                                # exclude this project car from the missing pass.
+                                search_found_ids.add(known.canonical_encar_id)
                             previous = _previous_state(db, known, known_relation)
                             list_data = parse_list_row(row)
                             incomplete = (
@@ -760,53 +844,127 @@ def process_job(job_id: int) -> None:
                                 list_changed=bool(known and _list_changed(known, list_data)),
                                 incomplete=incomplete,
                             ):
-                                report_item = None
-                                try:
-                                    # Browser I/O must not hold a SQLite write
-                                    # or read transaction open.
-                                    db.commit()
-                                    detail = _read_verified_detail(
-                                        page,
-                                        row,
-                                        Path(settings.storage_root),
-                                        known,
+                                detail_tasks.append(
+                                    DetailTask(
+                                        key=f"{project.id}:{source_id}:{row_index}",
+                                        source_key="encar",
+                                        row=dict(row),
+                                        known_price=(
+                                            known.current_price if known else None
+                                        ),
+                                        context=ProjectDetailContext(
+                                            source_id=source_id,
+                                            known_car_id=known.id if known else None,
+                                            previous=previous,
+                                        ),
                                     )
-                                    detail["scan_run_id"] = job.id
-                                    car = upsert_detail(
-                                        db,
-                                        project,
-                                        detail,
-                                        mark_search_found=True,
-                                    )
-                                except TrackingDisabledError:
-                                    db.rollback()
-                                    continue
-                                except ScanError as exc:
-                                    if known and known_relation:
-                                        mark_found_without_detail(db, project, known)
-                                        search_found_ids.add(
-                                            known.canonical_encar_id
+                                )
+                                continue
+
+                            car = known
+                            mark_found_without_detail(db, project, car)
+                            current_relation = db.get(
+                                ProjectCar,
+                                {"project_id": project.id, "car_id": car.id},
+                            )
+                            after_snapshot_id = _latest_snapshot_id(db, car.id)
+                            if item := _change_report(
+                                car,
+                                project,
+                                previous,
+                                search_status=current_relation.search_status,
+                                after_snapshot_id=after_snapshot_id,
+                            ):
+                                report.append(item)
+                            _remember_observation(
+                                db,
+                                current_relation,
+                                car,
+                                after_snapshot_id,
+                            )
+                            search_found_ids.add(car.canonical_encar_id)
+                            processed_rows += 1
+                            publish_row_progress()
+                            _raise_if_cancelled(db, job)
+
+                        missing_cars = (
+                            []
+                            if price_filter_needs_baseline
+                            else _missing_cars(db, project, search_found_ids)
+                        )
+                        for missing_index, missing_car in enumerate(missing_cars):
+                            missing_relation = db.get(
+                                ProjectCar,
+                                {
+                                    "project_id": project.id,
+                                    "car_id": missing_car.id,
+                                },
+                            )
+                            detail_tasks.append(
+                                DetailTask(
+                                    key=f"{project.id}:missing:{missing_car.id}:{missing_index}",
+                                    source_key="encar",
+                                    row={
+                                        "url": missing_car.url
+                                        or (
+                                            "https://fem.encar.com/cars/detail/"
+                                            f"{missing_car.canonical_encar_id}"
+                                        ),
+                                        "source_car_id": missing_car.canonical_encar_id,
+                                        "source": project.name,
+                                        "list_text": "",
+                                    },
+                                    known_price=missing_car.current_price,
+                                    context=ProjectDetailContext(
+                                        source_id=missing_car.canonical_encar_id,
+                                        known_car_id=missing_car.id,
+                                        previous=_previous_state(
+                                            db, missing_car, missing_relation
+                                        ),
+                                        mark_search_found=False,
+                                    ),
+                                )
+                            )
+
+                        if detail_tasks:
+                            # The list browser is intentionally closed before
+                            # starting detail workers: the source budget is two
+                            # active Chromium browsers, not two plus an idle one.
+                            db.commit()
+                            context.close()
+                            browser.close()
+                            try:
+                                detail_workers_count = _detail_worker_count(
+                                    db, job.owner_id
+                                )
+                                detail_total = processed_rows + len(detail_tasks)
+
+                                def publish_detail_progress() -> None:
+                                    detail_progress = dict(
+                                        (job.payload or {}).get(
+                                            "detail_progress"
                                         )
-                                    failure = _failure_detail(
-                                        exc=exc,
-                                        scope="SEARCH_CAR",
-                                        project=project,
-                                        car=known,
-                                        url=row.get("url"),
+                                        or {}
                                     )
-                                    failure["encar_id"] = source_id
-                                    failures.append(
-                                        f"{project.name}:{source_id}:"
-                                        f"{exc.code}: {exc}"
-                                    )
-                                    failure_details.append(failure)
+                                    detail_progress[str(project.id)] = {
+                                        "completed": processed_rows,
+                                        "total": detail_total,
+                                        "checking": min(
+                                            detail_workers_count,
+                                            detail_total - processed_rows,
+                                        ),
+                                    }
+                                    job.payload = {
+                                        **(job.payload or payload),
+                                        "detail_progress": detail_progress,
+                                    }
                                     job.progress = round(
                                         (
                                             completed
                                             + 0.15
-                                            + 0.85
-                                            * (row_index + 1)
-                                            / max(1, len(row_values))
+                                            + 0.80
+                                            * processed_rows
+                                            / max(1, detail_total)
                                         )
                                         / total_units
                                         * 100
@@ -822,200 +980,151 @@ def process_job(job_id: int) -> None:
                                     )
                                     db.commit()
                                     publish_scan_update(job.owner_id, job.id)
-                                    continue
-                                if detail.get("sold"):
-                                    confirmed_sold.add(car.canonical_encar_id)
-                                current_relation = db.get(
-                                    ProjectCar,
-                                    {"project_id": project.id, "car_id": car.id},
-                                )
-                                after_snapshot_id = _latest_snapshot_id(
-                                    db, car.id
-                                )
-                                if item := _change_report(
-                                    car,
-                                    project,
-                                    previous,
-                                    search_status=current_relation.search_status,
-                                    after_snapshot_id=after_snapshot_id,
-                                ):
-                                    report.append(item)
-                                    report_item = item
-                                _remember_observation(
-                                    db,
-                                    current_relation,
-                                    car,
-                                    after_snapshot_id,
-                                )
-                            else:
-                                report_item = None
-                                car = known
-                                mark_found_without_detail(db, project, car)
-                                current_relation = db.get(
-                                    ProjectCar,
-                                    {"project_id": project.id, "car_id": car.id},
-                                )
-                                after_snapshot_id = _latest_snapshot_id(
-                                    db, car.id
-                                )
-                                if item := _change_report(
-                                    car,
-                                    project,
-                                    previous,
-                                    search_status=current_relation.search_status,
-                                    after_snapshot_id=after_snapshot_id,
-                                ):
-                                    report.append(item)
-                                    report_item = item
-                                _remember_observation(
-                                    db,
-                                    current_relation,
-                                    car,
-                                    after_snapshot_id,
-                                )
-                            search_found_ids.add(car.canonical_encar_id)
-                            job.progress = round(
-                                (
-                                    completed
-                                    + 0.15
-                                    + 0.85
-                                    * (row_index + 1)
-                                    / max(1, len(row_values))
-                                )
-                                / total_units
-                                * 100
-                            )
-                            if report_item:
-                                _publish_live_results(
-                                    job,
-                                    payload,
-                                    report,
-                                    failures,
-                                    failure_details,
-                                    project_statuses,
-                                    current_project_id=project.id,
-                                )
-                            db.commit()
-                            if report_item:
-                                publish_scan_update(job.owner_id, job.id)
-                            _raise_if_cancelled(db, job)
-                        missing_cars = (
-                            []
-                            if price_filter_needs_baseline
-                            else _missing_cars(db, project, search_found_ids)
-                        )
-                        for missing_car in missing_cars:
-                            report_item = None
-                            try:
-                                _raise_if_cancelled(db, job)
-                                missing_relation = db.get(
-                                    ProjectCar,
-                                    {
-                                        "project_id": project.id,
-                                        "car_id": missing_car.id,
-                                    },
-                                )
-                                previous = _previous_state(
-                                    db, missing_car, missing_relation
-                                )
-                                missing_row = {
-                                    "url": missing_car.url
-                                    or (
-                                        "https://fem.encar.com/cars/detail/"
-                                        f"{missing_car.canonical_encar_id}"
+
+                                publish_detail_progress()
+                                with DetailWorkerPool(
+                                    lambda: _encar_detail_reader(
+                                        Path(settings.storage_root)
                                     ),
-                                    "source_car_id": missing_car.canonical_encar_id,
-                                    "source": project.name,
-                                    "list_text": "",
-                                }
-                                db.commit()
-                                detail = _read_verified_detail(
-                                    page,
-                                    missing_row,
-                                    Path(settings.storage_root),
-                                    missing_car,
+                                    workers=detail_workers_count,
+                                ) as detail_workers:
+                                    detail_workers.submit_all(detail_tasks)
+                                    for result in detail_workers.results(
+                                        len(detail_tasks)
+                                    ):
+                                        _raise_if_cancelled(db, job)
+                                        task_context = result.task.context
+                                        assert isinstance(
+                                            task_context, ProjectDetailContext
+                                        )
+                                        known = (
+                                            db.get(Car, task_context.known_car_id)
+                                            if task_context.known_car_id is not None
+                                            else None
+                                        )
+                                        known_relation = (
+                                            db.get(
+                                                ProjectCar,
+                                                {
+                                                    "project_id": project.id,
+                                                    "car_id": known.id,
+                                                },
+                                            )
+                                            if known
+                                            else None
+                                        )
+                                        if result.error:
+                                            if (
+                                                task_context.mark_search_found
+                                                and not isinstance(result.error, ScanError)
+                                            ):
+                                                raise result.error
+                                            if (
+                                                task_context.mark_search_found
+                                                and known
+                                                and known_relation
+                                            ):
+                                                mark_found_without_detail(
+                                                    db, project, known
+                                                )
+                                                search_found_ids.add(
+                                                    known.canonical_encar_id
+                                                )
+                                            failure = _failure_detail(
+                                                exc=result.error,
+                                                scope=(
+                                                    "SEARCH_CAR"
+                                                    if task_context.mark_search_found
+                                                    else "MISSING_CAR"
+                                                ),
+                                                project=project,
+                                                car=known,
+                                                url=result.task.row.get("url"),
+                                            )
+                                            failure["encar_id"] = task_context.source_id
+                                            if task_context.mark_search_found:
+                                                failures.append(
+                                                    f"{project.name}:{task_context.source_id}:"
+                                                    f"{failure['code']}: {result.error}"
+                                                )
+                                            else:
+                                                failures.append(
+                                                    f"missing:{task_context.source_id}:"
+                                                    f"{failure['code']}: {result.error}"
+                                                )
+                                            failure_details.append(failure)
+                                            processed_rows += 1
+                                            publish_detail_progress()
+                                            if (
+                                                isinstance(result.error, ScanError)
+                                                and result.error.code == "CAPTCHA"
+                                            ):
+                                                detail_workers.cancel()
+                                                raise result.error
+                                            continue
+
+                                        detail = result.detail
+                                        assert detail is not None
+                                        detail["scan_run_id"] = job.id
+                                        try:
+                                            car = upsert_detail(
+                                                db,
+                                                project,
+                                                detail,
+                                                mark_search_found=(
+                                                    task_context.mark_search_found
+                                                ),
+                                            )
+                                        except TrackingDisabledError:
+                                            db.rollback()
+                                            processed_rows += 1
+                                            publish_detail_progress()
+                                            continue
+                                        if detail.get("sold"):
+                                            confirmed_sold.update(
+                                                {
+                                                    task_context.source_id,
+                                                    car.canonical_encar_id,
+                                                }
+                                            )
+                                        current_relation = db.get(
+                                            ProjectCar,
+                                            {"project_id": project.id, "car_id": car.id},
+                                        )
+                                        after_snapshot_id = _latest_snapshot_id(
+                                            db, car.id
+                                        )
+                                        if item := _change_report(
+                                            car,
+                                            project,
+                                            task_context.previous,
+                                            search_status=current_relation.search_status,
+                                            after_snapshot_id=after_snapshot_id,
+                                        ):
+                                            report.append(item)
+                                        _remember_observation(
+                                            db,
+                                            current_relation,
+                                            car,
+                                            after_snapshot_id,
+                                        )
+                                        if task_context.mark_search_found:
+                                            search_found_ids.add(
+                                                car.canonical_encar_id
+                                            )
+                                        processed_rows += 1
+                                        publish_detail_progress()
+                                        _raise_if_cancelled(db, job)
+                            finally:
+                                browser = playwright.chromium.launch(
+                                    headless=settings.playwright_headless,
+                                    executable_path=executable_path or None,
                                 )
-                                detail["scan_run_id"] = job.id
-                                refreshed_car = upsert_detail(
-                                    db,
-                                    project,
-                                    detail,
-                                    mark_search_found=False,
+                                context = browser.new_context(
+                                    viewport={"width": 1440, "height": 1200},
+                                    locale="ko-KR",
                                 )
-                                if detail.get("sold"):
-                                    confirmed_sold.update(
-                                        {
-                                            missing_car.canonical_encar_id,
-                                            refreshed_car.canonical_encar_id,
-                                        }
-                                    )
-                                refreshed_relation = db.get(
-                                    ProjectCar,
-                                    {
-                                        "project_id": project.id,
-                                        "car_id": refreshed_car.id,
-                                    },
-                                )
-                                after_snapshot_id = _latest_snapshot_id(
-                                    db, refreshed_car.id
-                                )
-                                if item := _change_report(
-                                    refreshed_car,
-                                    project,
-                                    previous,
-                                    search_status=refreshed_relation.search_status,
-                                    after_snapshot_id=after_snapshot_id,
-                                ):
-                                    report.append(item)
-                                    report_item = item
-                                _remember_observation(
-                                    db,
-                                    refreshed_relation,
-                                    refreshed_car,
-                                    after_snapshot_id,
-                                )
-                                if report_item:
-                                    _publish_live_results(
-                                        job,
-                                        payload,
-                                        report,
-                                        failures,
-                                        failure_details,
-                                        project_statuses,
-                                        current_project_id=project.id,
-                                    )
-                                db.commit()
-                                if report_item:
-                                    publish_scan_update(job.owner_id, job.id)
-                                _raise_if_cancelled(db, job)
-                            except ScanCancelled:
-                                raise
-                            except Exception as exc:
-                                failures.append(
-                                    "missing:"
-                                    f"{missing_car.canonical_encar_id}:"
-                                    f"{type(exc).__name__}: {exc}"
-                                )
-                                failure_details.append(
-                                    _failure_detail(
-                                        exc=exc,
-                                        scope="MISSING_CAR",
-                                        project=project,
-                                        car=missing_car,
-                                    )
-                                )
-                                db.rollback()
-                                _publish_live_results(
-                                    job,
-                                    payload,
-                                    report,
-                                    failures,
-                                    failure_details,
-                                    project_statuses,
-                                    current_project_id=project.id,
-                                )
-                                db.commit()
-                                publish_scan_update(job.owner_id, job.id)
+                                page = context.new_page()
                         _raise_if_cancelled(db, job)
                         if (
                             not price_filter_needs_baseline
@@ -1108,7 +1217,7 @@ def process_job(job_id: int) -> None:
                         project_statuses,
                     )
                     completed += 1
-                    job.progress = round(completed / total_units * 100)
+                    job.progress = min(99, round(completed / total_units * 100))
                     db.commit()
                     publish_scan_update(job.owner_id, job.id)
                     _raise_if_cancelled(db, job)
@@ -1259,7 +1368,7 @@ def process_job(job_id: int) -> None:
                                 )
                                 db.rollback()
                     completed += 1
-                    job.progress = round(completed / total_units * 100)
+                    job.progress = min(99, round(completed / total_units * 100))
                     _publish_live_results(
                         job,
                         payload,

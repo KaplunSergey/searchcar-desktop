@@ -10,6 +10,7 @@ from app.worker import (
     ScanCancelled,
     _change_report,
     _dedupe_report,
+    _detail_worker_count,
     _failure_detail,
     _finish_cancelled_job,
     _material_changes,
@@ -24,6 +25,19 @@ from app.worker import (
     _should_apply_search_absence,
     _should_refresh_missing_car,
 )
+
+
+def test_search_performance_mode_selects_a_bounded_detail_worker_count():
+    class FakeDb:
+        def __init__(self, mode):
+            self.mode = mode
+
+        def scalar(self, _statement):
+            return SimpleNamespace(performance_mode=self.mode)
+
+    assert _detail_worker_count(FakeDb("ECO"), 1) == 1
+    assert _detail_worker_count(FakeDb("FAST"), 1) == 2
+    assert _detail_worker_count(FakeDb("UNSUPPORTED"), 1) == 1
 
 
 def test_only_complete_all_page_search_can_mark_listing_absent():
@@ -299,7 +313,7 @@ def test_car_failure_exposes_only_a_valid_external_url():
     assert invalid["url"] is None
 
 
-def test_every_missing_car_is_refreshed_individually():
+def test_missing_sold_car_is_not_refreshed():
     car = SimpleNamespace(canonical_encar_id="42390937", excluded=False)
 
     assert _should_refresh_missing_car(
@@ -313,6 +327,12 @@ def test_every_missing_car_is_refreshed_individually():
     )
 
     car.excluded = True
+    assert not _should_refresh_missing_car(
+        SimpleNamespace(favorite=True), car, set()
+    )
+
+    car.excluded = False
+    car.status = "SOLD"
     assert not _should_refresh_missing_car(
         SimpleNamespace(favorite=True), car, set()
     )

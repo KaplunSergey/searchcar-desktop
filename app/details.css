@@ -120,6 +120,7 @@
 .project-list .status>.running-track{grid-column:1/-1;width:100%;margin:1px 0 0}
 .project-list .status.succeeded,.project-list .status.updated{background:#eafaf0;color:#159447}
 .project-list .status.running,.project-list .status.queued,.project-list .status.cancel_requested,.project-list .status.partial{background:#fff7e8;color:#d97706}
+.project-list .status.cancelled{background:#eef2f7;color:#64748b}
 .project-list .status.failed,.project-list .status.error,.project-list .status.captcha{background:#fff0f1;color:#dc2626}
 .project-list time.project-updated{
   justify-self:stretch;text-align:center;padding:0 8px;
@@ -158,4 +159,23 @@
   .project-list .project-row>.status,
   .project-list .project-row>time,
   .project-list .project-row>.project-actions{display:none}
+}
+
+/* History cards identify the project first; the Korean listing stays secondary. */
+.report-car-main{grid-template-columns:118px minmax(220px,1fr) 190px 145px 28px;min-height:92px;padding:8px 10px}
+.report-car-image{display:grid;place-items:center;width:118px;height:74px;overflow:hidden;border-radius:8px;background:linear-gradient(#10151b 0 65%,#262c32);color:#d7dbe1}
+.report-car-image img{width:100%;height:100%;object-fit:cover}
+.report-car-image>span{font-size:30px;transform:skewX(-12deg)}
+.report-car-title{align-content:center;gap:2px}
+.report-car-title strong{font-size:15px}
+.report-car-title small{margin-top:0}
+.report-car-title .report-car-listing{color:#607595;font-size:12px;font-weight:650}
+.report-car-title .report-car-listing+small{font-size:10px}
+@media(max-width:700px){
+  .report-car-main{grid-template-columns:96px minmax(0,1fr);gap:10px}
+  .report-car-image{width:96px;height:68px}
+  .report-car-main>.change-chip,.report-car-main>.report-price,.report-car-main>.report-open{grid-column:2}
+  .report-car-main>.change-chip{grid-row:2}
+  .report-car-main>.report-price{grid-row:3}
+  .report-car-main>.report-open{position:absolute;right:14px;top:calc(50% - 10px)}
 }

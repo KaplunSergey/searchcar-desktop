@@ -129,6 +129,7 @@ type ScanReportItem = {
   favorite?: boolean;
   encar_id: string;
   title?: string | null;
+  image?: string | null;
   change: string;
   changes?: { field: string; old?: unknown; new?: unknown }[];
   details_unavailable?: boolean;
@@ -184,6 +185,10 @@ type ScanRecord = {
         complete: boolean;
       }
     >;
+    detail_progress?: Record<
+      string,
+      { completed: number; total: number; checking: number }
+    >;
   };
   error?: string | null;
   created_at: string;
@@ -206,6 +211,7 @@ type SchedulerRecord = {
   enabled: boolean;
   paused: boolean;
   interval_minutes: 60 | 180 | 360 | 720 | 1440;
+  performance_mode: "ECO" | "FAST";
   project_ids: number[];
   next_run_at?: string | null;
   last_completed_run_at?: string | null;
@@ -2062,19 +2068,28 @@ function ReportList({
             key={`${item.project_id}-${item.car_id}`}
           >
             <button className="report-car-main" onClick={() => openCar(item)}>
+              <span className="report-car-image">
+                {item.image ? <img src={assetUrl(item.image)} alt="" /> : <span>▰</span>}
+              </span>
               <span className="report-car-title">
-                <strong>{item.title || `Encar ${item.encar_id}`}</strong>
-                <small>
-                  {(() => {
-                    const projectNames = reportProjectNames(item, currentProjectNames);
-                    return projectNames.length > 1
-                      ? `${t("foundInProjects")}: ${projectNames.join(", ")}`
-                      : `${t("foundInProject")}: ${projectNames[0]}`;
-                  })()}
-                  {item.encar_ids && item.encar_ids.length > 1
-                    ? ` · ${t("encarListings")}: ${item.encar_ids.join(", ")}`
-                    : null}
-                </small>
+                {(() => {
+                  const projectNames = reportProjectNames(item, currentProjectNames);
+                  const projectTitle = projectNames.length
+                    ? projectNames.join(", ")
+                    : item.project_name || "—";
+                  const listingIds = item.encar_ids?.length
+                    ? item.encar_ids.join(", ")
+                    : item.encar_id;
+                  return (
+                    <>
+                      <strong>{projectTitle}</strong>
+                      <small className="report-car-listing">
+                        {item.title || `Encar ${item.encar_id}`}
+                      </small>
+                      <small>{t("encarListings")}: {listingIds}</small>
+                    </>
+                  );
+                })()}
               </span>
               <span className={`change-chip ${changeTone(item.change)}`}>
                 {carStatusText(item.change, t)}
@@ -2222,6 +2237,9 @@ function Projects({
   const current = activeScans[0];
   const currentPagination = current?.payload?.pagination?.[
     String(current.payload.current_project_id || "")
+  ];
+  const currentDetailProgress = current?.payload?.detail_progress?.[
+    String(current?.payload?.current_project_id || "")
   ];
   const completedProjectCount = Object.keys(
     current?.payload?.project_statuses || {},
@@ -2459,9 +2477,11 @@ function Projects({
             </Button>
           </div>
           <p>
-            {currentPagination
-              ? `${t("page")} ${currentPagination.current_page} ${t("of")} ${currentPagination.total_pages} · ${t("listingsFound")}: ${currentPagination.found_count}`
-              : t(scanStatusKey(current.status))}
+            {currentDetailProgress
+                ? `${t("listingsChecked")}: ${currentDetailProgress.completed}/${currentDetailProgress.total} · ${t("listingsChecking")}: ${currentDetailProgress.checking}`
+                : currentPagination
+                  ? `${t("page")} ${currentPagination.current_page} ${t("of")} ${currentPagination.total_pages} · ${t("listingsFound")}: ${currentPagination.found_count}`
+                  : t(scanStatusKey(current.status))}
           </p>
           <div className="progress">
             <i style={{ width: `${current.progress}%` }} />
@@ -2773,6 +2793,7 @@ function Project({
   const project = projectQuery.data;
   const cars = carsQuery.data || [];
   const activePagination = activeScan?.payload?.pagination?.[String(projectId || "")];
+  const activeDetailProgress = activeScan?.payload?.detail_progress?.[String(projectId || "")];
   const filtered = cars.filter((car) => {
     if (filter === "all") return true;
     if (filter === "favorite") return car.favorite;
@@ -2875,9 +2896,11 @@ function Project({
             <b>{activeScan.progress}%</b>
           </div>
           <p>
-            {activePagination
-              ? `${t("page")} ${activePagination.current_page} ${t("of")} ${activePagination.total_pages} · ${t("listingsFound")}: ${activePagination.found_count}`
-              : t(scanStatusKey(activeScan.status))}
+            {activeDetailProgress
+                ? `${t("listingsChecked")}: ${activeDetailProgress.completed}/${activeDetailProgress.total} · ${t("listingsChecking")}: ${activeDetailProgress.checking}`
+                : activePagination
+                  ? `${t("page")} ${activePagination.current_page} ${t("of")} ${activePagination.total_pages} · ${t("listingsFound")}: ${activePagination.found_count}`
+                  : t(scanStatusKey(activeScan.status))}
           </p>
           <div className="progress">
             <i style={{ width: `${activeScan.progress}%` }} />
@@ -3620,13 +3643,14 @@ function Settings({
   const [diagnosticHours, setDiagnosticHours] = useState<1 | 24 | 72 | 168>(24);
   const [supportReport, setSupportReport] = useState<DesktopSupportReport | null>(null);
   const [schedulerDraft, setSchedulerDraft] = useState<SchedulerRecord | null>(null);
-  const scheduler = schedulerDraft ??
-    schedulerQuery.data ?? {
-      enabled: false,
-      paused: false,
-      interval_minutes: 180 as const,
-      project_ids: [],
-    };
+  const scheduler: SchedulerRecord = {
+    enabled: false,
+    paused: false,
+    interval_minutes: 180,
+    performance_mode: "ECO",
+    project_ids: [],
+    ...(schedulerDraft ?? schedulerQuery.data),
+  };
   const restorePresentation = desktopDataQuery.data?.restore_result
     ? restoreResultPresentation(desktopDataQuery.data.restore_result, t)
     : null;
@@ -3917,6 +3941,33 @@ function Settings({
             <b>{t("catchUpScans")}</b>
             <small>{t("catchUpScansHelp")}</small>
           </p>
+        </fieldset>
+        <fieldset>
+          <legend>{t("searchPerformance")}</legend>
+          <label>
+            <input
+              type="radio"
+              name="performance-mode"
+              checked={scheduler.performance_mode === "ECO"}
+              onChange={() => setSchedulerDraft({ ...scheduler, performance_mode: "ECO" })}
+            />
+            <span>
+              <b>{t("searchPerformanceEco")}</b>
+              <small>{t("searchPerformanceEcoHelp")}</small>
+            </span>
+          </label>
+          <label>
+            <input
+              type="radio"
+              name="performance-mode"
+              checked={scheduler.performance_mode === "FAST"}
+              onChange={() => setSchedulerDraft({ ...scheduler, performance_mode: "FAST" })}
+            />
+            <span>
+              <b>{t("searchPerformanceFast")}</b>
+              <small>{t("searchPerformanceFastHelp")}</small>
+            </span>
+          </label>
         </fieldset>
         <fieldset>
           <legend>{t("scheduledProjects")}</legend>

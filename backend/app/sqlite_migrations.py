@@ -132,6 +132,15 @@ def _project_price_filters(connection: Connection) -> None:
     _add_column_if_missing(
         connection, "projects", "price_filter_mode", "VARCHAR(16) NOT NULL DEFAULT 'LINK'"
     )
+
+
+def _search_performance_mode(connection: Connection) -> None:
+    _add_column_if_missing(
+        connection,
+        "scheduler_settings",
+        "performance_mode",
+        "VARCHAR(16) NOT NULL DEFAULT 'ECO'",
+    )
     _add_column_if_missing(connection, "projects", "price_min_krw", "BIGINT")
     _add_column_if_missing(connection, "projects", "price_max_krw", "BIGINT")
     _add_column_if_missing(
@@ -151,6 +160,7 @@ MIGRATIONS = (
     SQLiteMigration(3, "desktop_scheduler_controls", _desktop_scheduler_controls),
     SQLiteMigration(4, "scheduler_completion_checkpoint", _scheduler_completion_checkpoint),
     SQLiteMigration(5, "project_price_filters", _project_price_filters),
+    SQLiteMigration(6, "search_performance_mode", _search_performance_mode),
 )
 
 

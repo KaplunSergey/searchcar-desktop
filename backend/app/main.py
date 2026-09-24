@@ -1809,6 +1809,10 @@ def scan_out(run: ScanRun, db: Session) -> dict:
         item.get("project_id") for item in raw_report if item.get("project_id")
     }
     report_car_ids = {item.get("car_id") for item in raw_report if item.get("car_id")}
+    report_images = {
+        car_id: (image_payloads(car_id, db).get("MAIN") or {}).get("url")
+        for car_id in report_car_ids
+    }
     report_registrations = (
         {
             car.id: (car.details or {}).get("registration_number")
@@ -1864,6 +1868,7 @@ def scan_out(run: ScanRun, db: Session) -> dict:
                 or item.get("project_name"),
                 "registration_number": item.get("registration_number")
                 or report_registrations.get(item.get("car_id")),
+                "image": report_images.get(item.get("car_id")),
                 "favorite": (item.get("project_id"), item.get("car_id"))
                 in favorite_pairs,
             },
@@ -2116,6 +2121,7 @@ def scheduler_out(user_id: int, db: Session) -> dict:
             "enabled": False,
             "paused": False,
             "interval_minutes": 180,
+            "performance_mode": "ECO",
             "project_ids": [],
             "next_run_at": None,
             "last_completed_run_at": None,
@@ -2131,6 +2137,7 @@ def scheduler_out(user_id: int, db: Session) -> dict:
         "enabled": setting.enabled and bool(project_ids),
         "paused": setting.paused,
         "interval_minutes": setting.interval_minutes,
+        "performance_mode": getattr(setting, "performance_mode", "ECO"),
         "project_ids": project_ids,
         "next_run_at": setting.next_run_at if project_ids else None,
         "last_completed_run_at": (
@@ -2189,6 +2196,7 @@ def set_scheduler(
     setting.enabled = body.enabled
     setting.paused = body.paused if body.enabled else False
     setting.interval_minutes = body.interval_minutes
+    setting.performance_mode = body.performance_mode
     if not body.enabled:
         setting.next_run_at = None
     elif reanchor:

@@ -107,7 +107,7 @@ class RatingPatch(BaseModel): rating:int|None=Field(default=None,ge=1,le=5)
 class ScanProjectsIn(BaseModel): project_ids:list[int]
 class ScanCarsIn(BaseModel): car_ids:list[int]; project_id:int|None=None
 class SchedulerIn(BaseModel):
-    enabled:bool; paused:bool=False; interval_minutes:Literal[60,180,360,720,1440]; project_ids:list[int]
+    enabled:bool; paused:bool=False; interval_minutes:Literal[60,180,360,720,1440]; project_ids:list[int]; performance_mode:Literal["ECO", "FAST"]="ECO"
 
 class DesktopMigrationIn(BaseModel):
     source_database_url:str=Field(min_length=8,max_length=2048)
