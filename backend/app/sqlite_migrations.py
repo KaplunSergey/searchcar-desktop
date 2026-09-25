@@ -139,7 +139,7 @@ def _search_performance_mode(connection: Connection) -> None:
         connection,
         "scheduler_settings",
         "performance_mode",
-        "VARCHAR(16) NOT NULL DEFAULT 'ECO'",
+        "VARCHAR(16) NOT NULL DEFAULT 'FAST'",
     )
     _add_column_if_missing(connection, "projects", "price_min_krw", "BIGINT")
     _add_column_if_missing(connection, "projects", "price_max_krw", "BIGINT")

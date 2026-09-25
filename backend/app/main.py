@@ -2122,7 +2122,7 @@ def scheduler_out(user_id: int, db: Session) -> dict:
             "enabled": False,
             "paused": False,
             "interval_minutes": 180,
-            "performance_mode": "ECO",
+            "performance_mode": "FAST",
             "project_ids": [],
             "next_run_at": None,
             "last_completed_run_at": None,
@@ -2138,7 +2138,7 @@ def scheduler_out(user_id: int, db: Session) -> dict:
         "enabled": setting.enabled and bool(project_ids),
         "paused": setting.paused,
         "interval_minutes": setting.interval_minutes,
-        "performance_mode": getattr(setting, "performance_mode", "ECO"),
+        "performance_mode": getattr(setting, "performance_mode", "FAST"),
         "project_ids": project_ids,
         "next_run_at": setting.next_run_at if project_ids else None,
         "last_completed_run_at": (

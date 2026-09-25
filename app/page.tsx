@@ -3782,7 +3782,7 @@ function Settings({
     enabled: false,
     paused: false,
     interval_minutes: 180,
-    performance_mode: "ECO",
+    performance_mode: "FAST",
     project_ids: [],
     ...(schedulerDraft ?? schedulerQuery.data),
   };

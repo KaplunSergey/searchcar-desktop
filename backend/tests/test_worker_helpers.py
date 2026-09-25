@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.scanner import TimeoutScanError, extract_price_filter
-from app.schemas import ProjectIn
+from app.schemas import ProjectIn, SchedulerIn
 from app.services import merge_reliable_detail
 from app.worker import (
     PreviousState,
@@ -38,6 +38,14 @@ def test_search_performance_mode_selects_a_bounded_detail_worker_count():
     assert _detail_worker_count(FakeDb("ECO"), 1) == 1
     assert _detail_worker_count(FakeDb("FAST"), 1) == 2
     assert _detail_worker_count(FakeDb("UNSUPPORTED"), 1) == 1
+
+
+def test_new_project_and_scheduler_defaults_are_fast():
+    project = ProjectIn(name="Tucson", search_url="https://fem.encar.com/fc/fc_carsearchlist.html")
+    scheduler = SchedulerIn(enabled=False, interval_minutes=180, project_ids=[])
+
+    assert project.scan_mode == "FAST"
+    assert scheduler.performance_mode == "FAST"
 
 
 def test_only_complete_all_page_search_can_mark_listing_absent():
