@@ -2234,7 +2234,6 @@ function Projects({
     [projects, sort],
   );
   const totalCars = projects.reduce((sum, project) => sum + project.cars, 0);
-  const errors = projects.filter((project) => project.latest_scan?.status === "FAILED").length;
   const current = activeScans[0];
   const currentPagination = current?.payload?.pagination?.[
     String(current.payload.current_project_id || "")
@@ -2245,11 +2244,8 @@ function Projects({
   const completedProjectCount = Object.keys(
     current?.payload?.project_statuses || {},
   ).length;
-  const scanningProjectTotal = current?.payload?.project_ids?.length || 0;
-  const scanningProjectNumber = current
-    ? Math.min(scanningProjectTotal, completedProjectCount + 1)
-    : 0;
   const displayedReport = current || latestReport;
+  const displayedPagination = Object.values(displayedReport?.payload?.pagination || {});
   const displayingLiveReport = displayedReport?.id === current?.id;
   const newListingsCount =
     displayedReport?.payload?.summary?.new
@@ -2264,27 +2260,10 @@ function Projects({
         </div>
         <div>
           <Button onClick={openFavorites}>★ {t("favorites")}</Button>
-          <Button
-            onClick={() => refresh(selected.length ? selected : projects.map((project) => project.id))}
-            disabled={!projects.length}
-          >
-            ↻ {selected.length ? t("refreshSelected") : t("refreshProjects")}
-          </Button>
           <Button kind="primary" onClick={create}>
             ＋ {t("createProject")}
           </Button>
         </div>
-      </div>
-      <div className="stats">
-        <Stat label={t("activeProjects")} value={projects.length} />
-        <Stat label={t("carsRecent")} value={totalCars} note={t("storedLocally")} tone="blue" />
-        <Stat
-          label={t("activeScans")}
-          value={activeScans.length}
-          note={current ? `${current.progress}%` : t("queueEmpty")}
-          tone="orange"
-        />
-        <Stat label={t("attention")} value={errors} note={t("failedScans")} tone="red" />
       </div>
       <section className="panel car-lookup">
         <div>
@@ -2339,16 +2318,7 @@ function Projects({
       <section className={`panel projects-panel ${projectsCollapsed ? "collapsed" : ""}`}>
         <div className="projects-panel-header">
           <strong className="projects-panel-title">
-            {projectsCollapsed && current && scanningProjectTotal ? (
-              <>
-                <span className="projects-scan-spinner" aria-hidden="true" />
-                {t("updatingProject")} {scanningProjectNumber} {t("of")} {scanningProjectTotal}
-              </>
-            ) : projectsCollapsed ? (
-              <>{t("projects")}: {projects.length}</>
-            ) : (
-              <>{t("projects")} · {projects.length}</>
-            )}
+            <>{t("projects")}: {projects.length} · {t("carsCountLabel")}: {totalCars}</>
           </strong>
           <div className="projects-toolbar-controls" aria-hidden={projectsCollapsed}>
             <button
@@ -2372,6 +2342,18 @@ function Projects({
               <option value="name">{t("name")}</option>
             </select>
           </div>
+          <button
+            type="button"
+            className="button projects-refresh-button"
+            onClick={() => refresh(selected.length ? selected : projects.map((project) => project.id))}
+            disabled={!projects.length || Boolean(current)}
+          >
+            ↻ {current
+              ? `${t("updatingProject")}…`
+              : selected.length
+                ? `${t("refreshSelected")} (${selected.length})`
+                : t("refreshProjects")}
+          </button>
           <button
             type="button"
             className="projects-collapse-toggle"
@@ -2552,6 +2534,13 @@ function Projects({
               </span>
             ) : null}
           </div>
+          {!displayingLiveReport && displayedPagination.length ? (
+            <p className="pagination-summary">
+              {t("pagesScanned")}: {displayedPagination.reduce((sum, item) => sum + item.pages_visited, 0)} {t("of")}{" "}
+              {displayedPagination.reduce((sum, item) => sum + item.total_pages, 0)} · {t("listingsFound")}: {" "}
+              {displayedPagination.reduce((sum, item) => sum + item.found_count, 0)}
+            </p>
+          ) : null}
           {!!displayedReport.payload?.invalidated_report_count && (
             <p className="integrity-notice">
               {t("invalidatedHistoryHidden")}: {displayedReport.payload.invalidated_report_count}

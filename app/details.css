@@ -188,7 +188,8 @@
 .projects-toolbar-controls button{flex:0 0 auto;border:1px solid var(--line);background:#fff;color:#8392aa;border-radius:6px;padding:8px 10px}
 .projects-toolbar-controls button.chosen{background:var(--blue);border-color:var(--blue);color:#fff}
 .projects-toolbar-controls select{width:205px;border:1px solid var(--line);border-radius:6px;color:#65748b;padding:8px 12px}
-.projects-collapse-toggle{display:grid;place-items:center;flex:0 0 auto;width:38px;height:38px;margin-left:auto;border:1px solid var(--line);border-radius:7px;background:#fff;color:#60789d}
+.projects-refresh-button{flex:0 0 auto;margin-left:auto;padding:8px 12px;white-space:nowrap}
+.projects-collapse-toggle{display:grid;place-items:center;flex:0 0 auto;width:38px;height:38px;border:1px solid var(--line);border-radius:7px;background:#fff;color:#60789d}
 .projects-collapse-toggle svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;transform:rotate(180deg);transition:transform .3s ease}
 .projects-collapsible-content{display:grid;grid-template-rows:1fr;opacity:1;margin-top:12px;transition:grid-template-rows .34s ease,opacity .22s ease,margin-top .34s ease}
 .projects-collapsible-inner{min-height:0;overflow:hidden}
@@ -197,8 +198,6 @@
 .projects-panel.collapsed .projects-toolbar-controls{max-width:0;opacity:0;transform:translateY(-5px);visibility:hidden;pointer-events:none;transition:max-width .3s ease,opacity .18s ease,transform .3s ease,visibility 0s .3s}
 .projects-panel.collapsed .projects-collapse-toggle svg{transform:rotate(0)}
 .projects-panel.collapsed .projects-collapsible-content{grid-template-rows:0fr;opacity:0;margin-top:0}
-.projects-scan-spinner{width:15px;height:15px;border:2px solid #c8d6eb;border-top-color:var(--blue);border-radius:50%;animation:projects-scan-spin .8s linear infinite}
-@keyframes projects-scan-spin{to{transform:rotate(360deg)}}
 @media(max-width:700px){
   .projects-panel-header{flex-wrap:wrap}
   .projects-toolbar-controls{order:3;width:100%;max-width:100%}
@@ -207,7 +206,6 @@
 }
 @media(prefers-reduced-motion:reduce){
   .projects-panel,.projects-toolbar-controls,.projects-collapse-toggle svg,.projects-collapsible-content{transition:none}
-  .projects-scan-spinner{animation-duration:1.6s}
 }
 
 /* Keep the report filter in the heading instead of a separate row below it. */

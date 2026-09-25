@@ -29,6 +29,14 @@ def test_detection():
     assert classify_accident("무사고 확인\n내차 피해\n없음\n타차 가해\n없음")["summary"]=="NO_PROBLEMS_STATED"
     assert classify_accident("내차 피해\n총 889,520원 (1회)")["summary"]=="INSURANCE_CLAIM"
 def test_price_and_fast(): assert price_change(30_000_000,29_000_000)["type"]=="PRICE_DROP" and should_read_detail("FAST",is_new=True)
+
+
+def test_fast_scan_uses_price_status_reads_without_reloading_full_profile():
+    assert detail_read_kind("FAST", is_new=False, list_price_changed=False) is None
+    assert detail_read_kind("FAST", is_new=False, list_price_changed=True) == "PRICE_STATUS"
+    assert detail_read_kind("FAST", is_new=False, missing_from_search=True) == "PRICE_STATUS"
+    assert detail_read_kind("FAST", is_new=True) == "FULL"
+    assert detail_read_kind("ACCURATE", is_new=False) == "FULL"
 def test_missing(): 
     count,status=apply_missing(True,False,0,"FOUND"); assert (count,status)==(1,"NOT_FOUND_IN_SEARCH")
     count,status=apply_missing(True,False,count,status); assert (count,status)==(2,"NOT_FOUND_IN_SEARCH")

@@ -200,6 +200,26 @@ def _wait_for_detail_content(page, wait_seconds: int = 14) -> str:
     return best
 
 
+def _wait_for_price_status(page, wait_seconds: int = 8) -> str:
+    """Wait only for the fields required by a FAST listing probe."""
+
+    deadline = utcnow().timestamp() + max(wait_seconds, 3)
+    best = ""
+    previous_price = object()
+    while utcnow().timestamp() < deadline:
+        text = page.locator("body").inner_text(timeout=8_000)
+        if len(text) > len(best):
+            best = text
+        if _has_captcha(text) or is_sold_page(text):
+            return text
+        price = parse_detail_price_krw(text)
+        if price is not None and price == previous_price:
+            return text
+        previous_price = price
+        page.wait_for_timeout(450)
+    return best
+
+
 @dataclass(frozen=True)
 class SearchPage:
     rows: dict[str, dict]
@@ -872,3 +892,39 @@ def read_detail(page, item: dict, storage: Path) -> dict:
 
     data["fingerprint"] = fingerprint_listing(data)
     return data
+
+
+def read_price_status(page, item: dict) -> dict:
+    """Read only identity, primary price and availability from a detail page."""
+
+    body_text = ""
+    try:
+        _open_page(page, item["url"])
+        body_text = _wait_for_price_status(page, 8)
+    except ScanError:
+        raise
+    except (PlaywrightTimeout, PlaywrightError) as exc:
+        raise TimeoutScanError(str(exc)) from exc
+    if _has_captcha(body_text):
+        raise CaptchaError("Encar CAPTCHA detected")
+
+    sold = is_sold_page(body_text)
+    price = parse_detail_price_krw(body_text)
+    if not sold and price is None:
+        raise IncompleteDetailError("Encar detail page did not finish loading: price")
+    source_id = str(item["source_car_id"])
+    canonical, displayed_id = resolve_listing_identity(
+        source_id,
+        "\n".join((page.title(), body_text)),
+        sold,
+        resolved_url=page.url,
+    )
+    return {
+        "canonical_car_id": canonical,
+        "source_car_id": source_id,
+        "displayed_car_id": displayed_id,
+        "url": f"https://fem.encar.com/cars/detail/{canonical}",
+        "price_krw": None if sold else price,
+        "checked_at": utcnow().isoformat(),
+        "sold": sold,
+    }

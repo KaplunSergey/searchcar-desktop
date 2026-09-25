@@ -125,6 +125,28 @@ class TrackingDisabledError(RuntimeError):
     pass
 
 
+def upsert_price_status(db, project: Project, status: dict, *, mark_search_found: bool = True) -> Car:
+    """Persist a verified price/availability probe without replacing a full profile."""
+
+    return upsert_detail(
+        db,
+        project,
+        {
+            "canonical_car_id": status["canonical_car_id"],
+            "source_car_id": status.get("source_car_id"),
+            "displayed_car_id": status.get("displayed_car_id"),
+            "url": status.get("url"),
+            "price_krw": None if status.get("sold") else status.get("price_krw"),
+            "price_source": None if status.get("sold") else "DETAIL_PRIMARY",
+            "checked_at": status.get("checked_at"),
+            "parse_quality": "SOLD_PAGE" if status.get("sold") else "PRICE_STATUS",
+            "sold": bool(status.get("sold")),
+            "unavailable": False,
+        },
+        mark_search_found=mark_search_found,
+    )
+
+
 def upsert_detail(
     db,
     project: Project,

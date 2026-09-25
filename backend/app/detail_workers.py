@@ -25,6 +25,7 @@ class DetailTask:
     row: dict[str, Any]
     known_price: int | None
     context: Any = None
+    read_kind: str = "FULL"
 
 
 @dataclass(frozen=True)

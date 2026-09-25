@@ -465,6 +465,33 @@ def test_price_change_requires_two_identical_detail_reads(monkeypatch, tmp_path)
     assert "inconsistent" in str(error.value)
 
 
+def test_fast_price_status_read_never_calls_the_full_detail_reader(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        "app.worker.read_price_status",
+        lambda *_: calls.append("light") or {
+            "canonical_car_id": "40586061",
+            "price_krw": 25_890_000,
+            "sold": False,
+        },
+    )
+    monkeypatch.setattr(
+        "app.worker.read_detail",
+        lambda *_: pytest.fail("full detail reader must not run for FAST price/status"),
+    )
+
+    detail = _read_verified_detail(
+        object(),
+        {"source_car_id": "40586061"},
+        tmp_path,
+        26_890_000,
+        read_kind="PRICE_STATUS",
+    )
+
+    assert detail["price_krw"] == 25_890_000
+    assert calls == ["light", "light"]
+
+
 def test_partial_detail_does_not_erase_reliable_values():
     previous = {
         "body_type": "SEDAN",

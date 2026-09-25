@@ -540,6 +540,24 @@ def should_read_detail(
     return mode == "ACCURATE" or is_new or list_changed or incomplete or manual
 
 
+def detail_read_kind(
+    mode: str,
+    *,
+    is_new: bool = False,
+    list_price_changed: bool = False,
+    list_price_missing: bool = False,
+    missing_from_search: bool = False,
+    manual: bool = False,
+) -> str | None:
+    """Choose the smallest Encar read that can satisfy a scan decision."""
+
+    if mode == "ACCURATE" or is_new or manual:
+        return "FULL"
+    if list_price_changed or list_price_missing or missing_from_search:
+        return "PRICE_STATUS"
+    return None
+
+
 def apply_missing(success: bool, found: bool, count: int, status: str):
     """Advance project-local search state.
 

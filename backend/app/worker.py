@@ -17,7 +17,6 @@ from .job_queue import claim_next_job
 from .live_updates import publish_scan_update
 from .models import (
     Car,
-    CarImage,
     CarSnapshot,
     Project,
     ProjectCar,
@@ -28,7 +27,7 @@ from .models import (
     SchedulerSetting,
     User,
 )
-from .parser import fingerprint_listing, material_changes, should_read_detail
+from .parser import detail_read_kind, fingerprint_listing, material_changes
 from .scanner import (
     PriceConfirmationError,
     ScanError,
@@ -36,12 +35,14 @@ from .scanner import (
     collect_search_pages,
     parse_list_row,
     read_detail,
+    read_price_status,
 )
 from .services import (
     TrackingDisabledError,
     mark_absent,
     mark_found_without_detail,
     upsert_detail,
+    upsert_price_status,
 )
 from .reporting import dedupe_report
 
@@ -389,15 +390,6 @@ def _detail_worker_count(db, owner_id: int) -> int:
     return 2 if getattr(setting, "performance_mode", "ECO") == "FAST" else 1
 
 
-def _list_changed(car: Car, list_data: dict) -> bool:
-    details = car.details or {}
-    return any(
-        value is not None and value != (car.current_price if key == "price_krw" else details.get(key))
-        for key, value in list_data.items()
-        if key != "title"
-    )
-
-
 @dataclass(frozen=True)
 class PreviousState:
     car_id: int
@@ -491,11 +483,18 @@ def _read_verified_detail(
     row: dict,
     storage: Path,
     known_price: int | Car | None,
+    *,
+    read_kind: str = "FULL",
 ) -> dict:
     """Read a detail and confirm a price change without sharing ORM state."""
 
     known_price = getattr(known_price, "current_price", known_price)
-    detail = read_detail(page, row, storage)
+    read_once = (
+        (lambda: read_detail(page, row, storage))
+        if read_kind == "FULL"
+        else (lambda: read_price_status(page, row))
+    )
+    detail = read_once()
     new_price = detail.get("price_krw")
     if (
         known_price
@@ -503,7 +502,7 @@ def _read_verified_detail(
         and new_price != known_price
         and not detail.get("sold")
     ):
-        confirmation = read_detail(page, row, storage)
+        confirmation = read_once()
         if (
             confirmation.get("canonical_car_id") != detail.get("canonical_car_id")
             or confirmation.get("price_krw") != new_price
@@ -535,6 +534,7 @@ def _encar_detail_reader(storage: Path):
                 row,
                 storage,
                 known_price,
+                read_kind=row.get("_searchcar_read_kind", "FULL"),
             )
         finally:
             context.close()
@@ -808,7 +808,7 @@ def process_job(job_id: int) -> None:
                                 continue
                             processed_source_ids.add(source_id)
                             known = _known_car(db, source_id)
-                            if known and known.excluded:
+                            if known and (known.excluded or known.status == "SOLD"):
                                 continue
                             known_relation = (
                                 db.get(
@@ -826,29 +826,31 @@ def process_job(job_id: int) -> None:
                                 search_found_ids.add(known.canonical_encar_id)
                             previous = _previous_state(db, known, known_relation)
                             list_data = parse_list_row(row)
-                            incomplete = (
-                                not known
-                                or not known.details
-                                or not known.current_price
-                                or not (known.details or {}).get("mileage_km")
-                                or not db.scalar(
-                                    select(CarImage.id).where(
-                                        CarImage.car_id == known.id,
-                                        CarImage.kind == "MAIN",
-                                    )
-                                )
-                            )
-                            if should_read_detail(
+                            read_kind = detail_read_kind(
                                 scan_mode,
                                 is_new=known is None,
-                                list_changed=bool(known and _list_changed(known, list_data)),
-                                incomplete=incomplete,
-                            ):
+                                list_price_changed=bool(
+                                    known
+                                    and list_data.get("price_krw") is not None
+                                    and list_data["price_krw"] != known.current_price
+                                ),
+                                list_price_missing=bool(
+                                    known
+                                    and (
+                                        list_data.get("price_krw") is None
+                                        or known.current_price is None
+                                    )
+                                ),
+                            )
+                            if read_kind:
                                 detail_tasks.append(
                                     DetailTask(
                                         key=f"{project.id}:{source_id}:{row_index}",
                                         source_key="encar",
-                                        row=dict(row),
+                                        row={
+                                            **row,
+                                            "_searchcar_read_kind": read_kind,
+                                        },
                                         known_price=(
                                             known.current_price if known else None
                                         ),
@@ -857,6 +859,7 @@ def process_job(job_id: int) -> None:
                                             known_car_id=known.id if known else None,
                                             previous=previous,
                                         ),
+                                        read_kind=read_kind,
                                     )
                                 )
                                 continue
@@ -913,6 +916,7 @@ def process_job(job_id: int) -> None:
                                         "source_car_id": missing_car.canonical_encar_id,
                                         "source": project.name,
                                         "list_text": "",
+                                        "_searchcar_read_kind": "PRICE_STATUS",
                                     },
                                     known_price=missing_car.current_price,
                                     context=ProjectDetailContext(
@@ -923,6 +927,7 @@ def process_job(job_id: int) -> None:
                                         ),
                                         mark_search_found=False,
                                     ),
+                                    read_kind="PRICE_STATUS",
                                 )
                             )
 
@@ -1067,13 +1072,24 @@ def process_job(job_id: int) -> None:
                                         assert detail is not None
                                         detail["scan_run_id"] = job.id
                                         try:
-                                            car = upsert_detail(
+                                            car = (
+                                                upsert_price_status(
+                                                    db,
+                                                    project,
+                                                    detail,
+                                                    mark_search_found=(
+                                                        task_context.mark_search_found
+                                                    ),
+                                                )
+                                                if result.task.read_kind == "PRICE_STATUS"
+                                                else upsert_detail(
                                                 db,
                                                 project,
                                                 detail,
                                                 mark_search_found=(
                                                     task_context.mark_search_found
                                                 ),
+                                                )
                                             )
                                         except TrackingDisabledError:
                                             db.rollback()

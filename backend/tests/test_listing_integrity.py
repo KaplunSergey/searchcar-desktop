@@ -5,7 +5,12 @@ from sqlalchemy.orm import Session
 from app.database import Base
 from app.models import Car, CarAlias, PriceHistory, Project, ProjectCar, User
 from app.scanner import resolve_listing_identity
-from app.services import TrackingDisabledError, mark_absent, upsert_detail
+from app.services import (
+    TrackingDisabledError,
+    mark_absent,
+    upsert_detail,
+    upsert_price_status,
+)
 
 
 @pytest.fixture()
@@ -234,6 +239,37 @@ def test_search_price_and_cross_listing_update_are_rejected(db):
             },
         )
     assert list(db.scalars(select(CarAlias))) == []
+
+
+def test_fast_price_status_update_preserves_the_full_listing_profile(db):
+    project, car, _ = tracked_car(db)
+    car.details = {
+        **car.details,
+        "title": "Audi A5 45 TFSI",
+        "mileage_km": 42_000,
+        "options": {"sunroof": True},
+        "main_image_path": "cars/41093659/main-image.jpg",
+    }
+    db.commit()
+
+    updated = upsert_price_status(
+        db,
+        project,
+        {
+            "canonical_car_id": "41093659",
+            "source_car_id": "41093659",
+            "price_krw": 23_900_000,
+            "sold": False,
+            "checked_at": "2026-09-24T10:00:00+00:00",
+        },
+    )
+
+    assert updated.current_price == 23_900_000
+    assert updated.details["title"] == "Audi A5 45 TFSI"
+    assert updated.details["mileage_km"] == 42_000
+    assert updated.details["options"] == {"sunroof": True}
+    assert updated.details["main_image_path"] == "cars/41093659/main-image.jpg"
+    assert db.scalar(select(PriceHistory.payload))["price_krw"] == 23_900_000
 
 
 def test_removed_relation_cannot_be_revived_by_late_page_result(db):
