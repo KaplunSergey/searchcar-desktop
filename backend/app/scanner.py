@@ -29,6 +29,7 @@ from .parser import (
     parse_price_krw,
     parse_rental_terms,
     parse_condition,
+    parse_encar_embedded_specs,
     parse_vehicle_fields,
     parse_year_month,
 )
@@ -824,6 +825,10 @@ def read_detail(page, item: dict, storage: Path) -> dict:
     accident = classify_accident(condition_text)
     condition, condition_summary = parse_condition(condition_text)
     vehicle = parse_vehicle_fields(structured_text, title)
+    try:
+        embedded_specs = parse_encar_embedded_specs(page.content(), source_id) if not sold else {}
+    except PlaywrightError:
+        embedded_specs = {}
     options = parse_options(options_text)
     data = {
         "canonical_car_id": canonical,
@@ -853,14 +858,17 @@ def read_detail(page, item: dict, storage: Path) -> dict:
                 "\n".join((item.get("list_text") or "", body_text))
             )
         ),
-        "fuel": detect_fuel(structured_text),
+        "fuel_name_ko": embedded_specs.get("fuel_name_ko"),
+        "seat_count": embedded_specs.get("seat_count"),
+        "fuel": detect_fuel(embedded_specs.get("fuel_name_ko") or structured_text),
         "drivetrain": detect_drivetrain(structured_text),
-        "transmission": vehicle["transmission"],
-        "engine_displacement_cc": vehicle["engine_displacement_cc"],
-        "body_type": vehicle["body_type"],
-        "exterior_color": vehicle["exterior_color"],
+        "transmission": embedded_specs.get("transmission") or vehicle["transmission"],
+        "engine_displacement_cc": embedded_specs.get("engine_displacement_cc") or vehicle["engine_displacement_cc"],
+        "body_type": embedded_specs.get("body_type") or vehicle["body_type"],
+        "exterior_color": embedded_specs.get("exterior_color") or vehicle["exterior_color"],
         "interior_color": vehicle["interior_color"],
         "options": options,
+        "option_codes": embedded_specs.get("option_codes"),
         "accident": accident,
         "condition": condition,
         "condition_summary": condition_summary,

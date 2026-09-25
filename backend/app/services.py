@@ -81,13 +81,16 @@ def merge_reliable_detail(previous: dict, current: dict) -> dict:
         "vin",
         "mileage_km",
         "fuel",
+        "fuel_name_ko",
         "drivetrain",
         "transmission",
         "engine_displacement_cc",
+        "seat_count",
         "body_type",
         "exterior_color",
         "interior_color",
         "new_car_price_percent",
+        "option_codes",
     )
     missing_values = (None, "", "UNVERIFIED")
     for field in stable_fields:

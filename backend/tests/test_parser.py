@@ -27,6 +27,46 @@ def test_parsers():
     assert detect_fuel("연료\n가솔린\n전기 시트") == "GASOLINE"
 
 
+def test_encar_embedded_vehicle_specs_are_bound_to_listing_id():
+    payload = {
+        "cars": {
+            "isRefresh": False,
+            "detailFlags": {},
+            "base": {
+                "vehicleId": 42688672,
+                "category": {"manufacturerName": "현대", "modelName": "쏘나타 디 엣지(DN8)"},
+                "spec": {
+                    "fuelName": "가솔린", "transmissionName": "오토",
+                    "colorName": "은회색", "seatCount": 5, "displacement": 1598,
+                    "bodyName": "중형차",
+                },
+                "options": {"standard": ["001", "058", "001"], "choice": ["057"], "tuning": []},
+            },
+        },
+    }
+    import json
+    html = f'<script>window.__STATE__={json.dumps(payload, ensure_ascii=False)}</script>'
+    expected = {
+        "body_type": "중형차",
+        "fuel_name_ko": "가솔린", "transmission": "오토",
+        "exterior_color": "은회색", "seat_count": 5,
+        "engine_displacement_cc": 1598,
+        "option_codes": ["001", "057", "058"],
+    }
+    assert parse_encar_embedded_specs(html, "42688672") == expected
+    assert parse_encar_embedded_specs(html, "42688673") == {}
+    assert parse_encar_embedded_specs('<script>"cars":{broken}</script>', "42688672") == {}
+
+
+def test_new_vehicle_specs_backfill_without_faking_a_change():
+    previous = {"fuel": "GASOLINE"}
+    enriched = {**previous, "fuel_name_ko": "가솔린", "seat_count": 5, "option_codes": ["058"]}
+    assert material_changes(previous, enriched) == []
+    assert material_changes(enriched, {**enriched, "seat_count": 7}) == [
+        {"field": "seat_count", "old": 5, "new": 7}
+    ]
+
+
 def test_rental_offer_parses_list_and_detail_terms():
     list_text = """현대 쏘나타 디 엣지(DN8) 1.6 터보 S
 26/07식 · 1km · 가솔린 · 서울

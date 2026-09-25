@@ -343,6 +343,54 @@ def parse_vehicle_fields(text: str, page_title: str = "") -> dict:
     }
 
 
+def parse_encar_embedded_specs(html: str, expected_car_id: str) -> dict:
+    """Read vehicle facts from Encar's page state, not unrelated recommendations."""
+    match = re.search(r'"cars"\s*:\s*(?=\{)', html or "")
+    if not match:
+        return {}
+    try:
+        cars, _ = json.JSONDecoder().raw_decode(html[match.end():])
+        base = cars["base"]
+        if str(base.get("vehicleId")) != str(expected_car_id):
+            return {}
+        spec = base["spec"]
+        if not isinstance(spec, dict):
+            return {}
+    except (KeyError, TypeError, ValueError):
+        return {}
+
+    fields = {
+        "body_type": spec.get("bodyName"),
+        "fuel_name_ko": spec.get("fuelName"),
+        "transmission": spec.get("transmissionName"),
+        "exterior_color": spec.get("colorName"),
+    }
+    result = {
+        key: value.strip()
+        for key, value in fields.items()
+        if isinstance(value, str) and value.strip()
+    }
+    for key, source, maximum in (
+        ("seat_count", "seatCount", 30),
+        ("engine_displacement_cc", "displacement", 20_000),
+    ):
+        value = spec.get(source)
+        if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= maximum:
+            result[key] = value
+    options = base.get("options") or {}
+    if isinstance(options, dict):
+        codes = set()
+        for group in ("standard", "choice", "tuning", "etc"):
+            values = options.get(group)
+            if isinstance(values, list):
+                codes.update(
+                    code for code in values
+                    if isinstance(code, str) and re.fullmatch(r"\d{3}", code)
+                )
+        result["option_codes"] = sorted(codes)
+    return result
+
+
 def _evidence(text: str, terms: tuple[str, ...], limit: int = 12) -> list[str]:
     result: list[str] = []
     lines = clean_lines(text)
@@ -536,12 +584,15 @@ TRACKED_DETAIL_FIELDS = (
     "year_month",
     "mileage_km",
     "fuel",
+    "fuel_name_ko",
     "drivetrain",
     "transmission",
     "engine_displacement_cc",
+    "seat_count",
     "body_type",
     "exterior_color",
     "interior_color",
+    "option_codes",
     "registration_number",
     "condition_summary",
     "new_car_price_percent",
@@ -555,6 +606,11 @@ TRACKED_DETAIL_FIELDS = (
     "lease_term_months",
 )
 
+NEW_SPEC_FIELDS = {
+    "fuel_name_ko", "seat_count", "option_codes", "body_type",
+    "engine_displacement_cc", "exterior_color",
+}
+
 
 def material_changes(old: dict, new: dict) -> list[dict]:
     old = {**old, "offer_type": old.get("offer_type") or "SALE"}
@@ -563,6 +619,7 @@ def material_changes(old: dict, new: dict) -> list[dict]:
         {"field": key, "old": old.get(key), "new": new.get(key)}
         for key in TRACKED_DETAIL_FIELDS
         if old.get(key) != new.get(key)
+        and not (key in NEW_SPEC_FIELDS and old.get(key) is None)
     ]
     old_options = old.get("options") or {}
     new_options = new.get("options") or {}
@@ -617,7 +674,8 @@ def accident_signature(accident: dict | None) -> dict:
 def fingerprint_listing(item: dict[str, Any]):
     keys = (
         "canonical_car_id", "title", "year_month", "mileage_km", "price_krw",
-        "fuel", "drivetrain", "transmission", "options", "condition",
+        "fuel", "fuel_name_ko", "drivetrain", "transmission", "engine_displacement_cc",
+        "seat_count", "body_type", "exterior_color", "options", "option_codes", "condition",
         "offer_type", "rental_monthly_payment_krw", "rental_term_months",
         "rental_acquisition_price_krw", "vehicle_price_krw",
         "lease_monthly_payment_krw", "lease_term_months",

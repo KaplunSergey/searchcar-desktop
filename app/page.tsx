@@ -19,6 +19,7 @@ import {
 import { FormEvent, PointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { dict, type Key, type Locale } from "./translations";
 import { filterReportItems, reportProjectIds } from "./report-filter";
+import { formatSeatCount, translateOptionCode, translateVehicleSpec } from "./vehicle-dictionary";
 import { APP_VERSION } from "./version";
 
 type View =
@@ -1874,10 +1875,12 @@ function changeFieldLabel(field: string, locale: Locale) {
     year_month: ["Дата производства", "Дата виробництва"],
     mileage_km: ["Пробег", "Пробіг"],
     fuel: ["Топливо", "Пальне"],
+    fuel_name_ko: ["Топливо", "Пальне"],
     drivetrain: ["Привод", "Привід"],
     transmission: ["Коробка передач", "Коробка передач"],
     engine_displacement_cc: ["Объём двигателя", "Обʼєм двигуна"],
-    body_type: ["Тип кузова", "Тип кузова"],
+    seat_count: ["Количество мест", "Кількість місць"],
+    body_type: ["Тип автомобиля", "Тип автомобіля"],
     exterior_color: ["Цвет кузова", "Колір кузова"],
     interior_color: ["Цвет салона", "Колір салону"],
     registration_number: ["Регистрационный номер", "Реєстраційний номер"],
@@ -1885,6 +1888,7 @@ function changeFieldLabel(field: string, locale: Locale) {
     new_car_price_percent: ["Стоимость относительно новой", "Вартість відносно нового"],
     condition: ["Данные состояния", "Дані стану"],
     options: ["Опции", "Опції"],
+    option_codes: ["Опции", "Опції"],
     under_contract: ["Статус цены", "Статус ціни"],
     offer_type: ["Тип предложения", "Тип пропозиції"],
     rental_monthly_payment_krw: ["Ежемесячный платёж", "Щомісячний платіж"],
@@ -1899,6 +1903,12 @@ function changeFieldLabel(field: string, locale: Locale) {
 
 function changeValue(value: unknown, field: string, locale: Locale) {
   if (value === null || value === undefined || value === "") return "—";
+  if (field === "fuel" || field === "fuel_name_ko") return translateVehicleSpec("fuel", value, locale) || "—";
+  if (field === "transmission") return translateVehicleSpec("transmission", value, locale) || "—";
+  if (field === "body_type") return translateVehicleSpec("type", value, locale) || "—";
+  if (field === "exterior_color") return translateVehicleSpec("color", value, locale) || "—";
+  if (field === "seat_count") return formatSeatCount(value, locale) || "—";
+  if (field === "option_codes" && Array.isArray(value)) return value.map((code) => translateOptionCode(String(code), locale)).join(", ") || "—";
   if (field === "price" || field.endsWith("_price_krw") || field.endsWith("_payment_krw")) {
     return formatKnownMoney(value);
   }
@@ -3278,18 +3288,24 @@ function Car({
     [l("Дата производства", "Дата виробництва"), details.production_date || details.year_month],
     [l("Дата регистрации", "Дата реєстрації"), details.registration_date],
     [l("Пробег", "Пробіг"), details.mileage_km ? `${Number(details.mileage_km).toLocaleString(locale === "uk" ? "uk-UA" : "ru-RU")} km` : null],
-    [l("Топливо", "Пальне"), vehicleValue(details.fuel)],
+    [l("Топливо", "Пальне"), translateVehicleSpec("fuel", details.fuel_name_ko || details.fuel, locale)],
     [l("Привод", "Привід"), vehicleValue(details.drivetrain)],
-    [l("Коробка передач", "Коробка передач"), vehicleValue(details.transmission)],
-    [l("Объём двигателя", "Обʼєм двигуна"), details.engine_displacement_cc ? `${details.engine_displacement_cc} см³` : null],
-    [l("Тип кузова", "Тип кузова"), details.body_type],
-    [l("Цвет кузова", "Колір кузова"), details.exterior_color],
-    [l("Цвет салона", "Колір салону"), details.interior_color],
+    [l("Коробка передач", "Коробка передач"), translateVehicleSpec("transmission", details.transmission, locale)],
+    [l("Объём двигателя", "Обʼєм двигуна"), details.engine_displacement_cc ? `${Number(details.engine_displacement_cc).toLocaleString(locale === "uk" ? "uk-UA" : "ru-RU")} см³` : null],
+    [l("Тип автомобиля", "Тип автомобіля"), translateVehicleSpec("type", details.body_type, locale)],
+    [l("Количество мест", "Кількість місць"), formatSeatCount(details.seat_count, locale)],
+    [l("Цвет кузова", "Колір кузова"), translateVehicleSpec("color", details.exterior_color, locale)],
+    [l("Цвет салона", "Колір салону"), translateVehicleSpec("color", details.interior_color, locale)],
     ["VIN", details.vin],
     [l("Регистрационный номер", "Реєстраційний номер"), details.registration_number],
     ["Encar ID", car.encar_id],
   ];
-  const optionEntries = Object.entries((details.options || {}) as Record<string, unknown>);
+  const optionCodes = Array.isArray(details.option_codes)
+    ? details.option_codes.filter((code): code is string => typeof code === "string")
+    : [];
+  const optionEntries = optionCodes.length
+    ? optionCodes.map((code) => [code, true] as const)
+    : Object.entries((details.options || {}) as Record<string, unknown>);
   const optionLabels: Record<string, string> = {
     sunroof: l("Люк", "Люк"),
     led_headlights: l("LED-фары", "LED-фари"),
@@ -3504,7 +3520,7 @@ function Car({
           <div className="option-grid">
             {optionEntries.map(([key, value]) => (
               <span className={value ? "available" : "muted"} key={key}>
-                {value === true ? "✓" : value === false ? "—" : String(value)} {optionLabels[key] || key.replaceAll("_", " ")}
+                {value === true ? "✓" : value === false ? "—" : String(value)} {optionCodes.length ? translateOptionCode(key, locale) : optionLabels[key] || key.replaceAll("_", " ")}
               </span>
             ))}
           </div>
