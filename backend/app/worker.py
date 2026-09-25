@@ -560,6 +560,8 @@ def _change_report(
         ):
             return None
         old_price = previous.price
+        previous_offer_type = (previous.details or {}).get("offer_type") or "SALE"
+        current_offer_type = (car.details or {}).get("offer_type") or "SALE"
         if car.status == "SOLD":
             if previous.status == "SOLD":
                 return None
@@ -567,6 +569,9 @@ def _change_report(
             changes = [
                 {"field": "status", "old": previous.status, "new": "SOLD"}
             ]
+        elif previous_offer_type != current_offer_type:
+            change = "MATERIAL_UPDATE"
+            changes = _material_changes(previous.details, car.details or {})
         elif old_price != car.current_price:
             change = "PRICE_DROP" if (old_price or 0) > (car.current_price or 0) else "PRICE_INCREASE"
             changes = [{"field": "price", "old": old_price, "new": car.current_price}]
@@ -607,6 +612,9 @@ def _change_report(
         "changes": changes,
         "old_price": old_price,
         "price": car.current_price,
+        "offer_type": (car.details or {}).get("offer_type") or "SALE",
+        "rental_term_months": (car.details or {}).get("rental_term_months"),
+        "lease_term_months": (car.details or {}).get("lease_term_months"),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 

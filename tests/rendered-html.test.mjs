@@ -126,6 +126,31 @@ test("scan history uses expandable run cards and keeps report filters beside cha
   assert.match(styles,/\.report-filter-toolbar\.with-heading\{/);
   assert.match(translations,/changesTitle: "Изменения"/);
 });
+test("rental listings label monthly payments and rental terms",async()=>{
+  const [page,translations]=await Promise.all([
+    readFile(new URL("app/page.tsx",root),"utf8"),
+    readFile(new URL("app/translations.ts",root),"utf8"),
+  ]);
+  assert.match(page,/offer_type/);
+  assert.match(page,/rental_monthly_payment_krw/);
+  assert.match(page,/rental_term_months/);
+  assert.match(page,/rental_acquisition_price_krw/);
+  assert.match(page,/vehicle_price_krw/);
+  assert.match(translations,/monthlyPayment:/);
+  assert.match(translations,/perMonth:/);
+  assert.match(translations,/rentalOffer:/);
+});
+test("lease listings keep a distinct offer type and monthly payment",async()=>{
+  const [page,scanner,translations]=await Promise.all([
+    readFile(new URL("app/page.tsx",root),"utf8"),
+    readFile(new URL("backend/app/scanner.py",root),"utf8"),
+    readFile(new URL("app/translations.ts",root),"utf8"),
+  ]);
+  assert.match(page,/lease_monthly_payment_krw/);
+  assert.match(page,/lease_term_months/);
+  assert.match(scanner,/DETAIL_LEASE_MONTHLY/);
+  assert.match(translations,/leaseOffer:/);
+});
 test("desktop onboarding and notifications are clear inside a small app window",async()=>{
   const [page,styles]=await Promise.all([
     readFile(new URL("app/page.tsx",root),"utf8"),

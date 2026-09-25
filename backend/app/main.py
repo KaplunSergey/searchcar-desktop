@@ -1546,6 +1546,7 @@ def price_history_out(car_id: int, db: Session) -> list[dict]:
     return [
         {
             "price": point.payload.get("price_krw"),
+            "offer_type": point.payload.get("offer_type") or "SALE",
             "at": point.payload.get("checked_at") or point.created_at,
         }
         for point in db.scalars(

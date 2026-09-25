@@ -135,6 +135,9 @@ type ScanReportItem = {
   details_unavailable?: boolean;
   old_price?: number | null;
   price?: number | null;
+  offer_type?: string | null;
+  rental_term_months?: number | null;
+  lease_term_months?: number | null;
   updated_at: string;
 };
 const REPORT_CHANGE_TYPES = [
@@ -514,6 +517,30 @@ function formatDate(value: string | null | undefined, locale: Locale) {
 function formatMoney(value: unknown) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? `₩ ${number.toLocaleString("ru-RU")}` : "—";
+}
+
+function formatKnownMoney(value: unknown) {
+  const number = Number(value);
+  return Number.isFinite(number) && value !== null && value !== undefined
+    ? `₩ ${number.toLocaleString("ru-RU")}`
+    : "—";
+}
+
+function isMonthlyOffer(details: Record<string, unknown>) {
+  return details.offer_type === "RENT" || details.offer_type === "LEASE";
+}
+
+function monthlyOfferLabel(details: Record<string, unknown>, t: Translate) {
+  return t(details.offer_type === "LEASE" ? "leaseOffer" : "rentalOffer");
+}
+
+function monthlyOfferTerm(details: Record<string, unknown>) {
+  return details.rental_term_months ?? details.lease_term_months;
+}
+
+function formatOfferPrice(value: unknown, rental: boolean, t: Translate) {
+  const price = formatMoney(value);
+  return rental && price !== "—" ? `${price} ${t("perMonth")}` : price;
 }
 
 const PROJECT_PRICE_MAX_KRW = 100_000_000;
@@ -1859,13 +1886,33 @@ function changeFieldLabel(field: string, locale: Locale) {
     condition: ["Данные состояния", "Дані стану"],
     options: ["Опции", "Опції"],
     under_contract: ["Статус цены", "Статус ціни"],
+    offer_type: ["Тип предложения", "Тип пропозиції"],
+    rental_monthly_payment_krw: ["Ежемесячный платёж", "Щомісячний платіж"],
+    rental_term_months: ["Срок аренды", "Строк оренди"],
+    rental_acquisition_price_krw: ["Сумма выкупа", "Сума викупу"],
+    vehicle_price_krw: ["Цена автомобиля", "Ціна автомобіля"],
+    lease_monthly_payment_krw: ["Ежемесячный платёж по лизингу", "Щомісячний платіж за лізинг"],
+    lease_term_months: ["Срок лизинга", "Строк лізингу"],
   };
   return labels[field]?.[locale === "uk" ? 1 : 0] || field;
 }
 
 function changeValue(value: unknown, field: string, locale: Locale) {
   if (value === null || value === undefined || value === "") return "—";
-  if (field === "price") return formatMoney(value);
+  if (field === "price" || field.endsWith("_price_krw") || field.endsWith("_payment_krw")) {
+    return formatKnownMoney(value);
+  }
+  if (field === "offer_type") {
+    return value === "RENT"
+      ? locale === "uk" ? "Оренда" : "Аренда"
+      : locale === "uk" ? "Продаж" : "Продажа";
+  }
+  if (field === "rental_term_months") {
+    return `${value} ${locale === "uk" ? "міс." : "мес."}`;
+  }
+  if (field === "lease_term_months") {
+    return `${value} ${locale === "uk" ? "міс." : "мес."}`;
+  }
   if (field === "under_contract") {
     return value
       ? locale === "uk" ? "За контрактом" : "По контракту"
@@ -1876,13 +1923,16 @@ function changeValue(value: unknown, field: string, locale: Locale) {
   return String(value);
 }
 
-function ReportPrice({ item }: { item: ScanReportItem }) {
+function ReportPrice({ item, t }: { item: ScanReportItem; t: Translate }) {
   const percent = item.old_price && item.price
     ? ((item.price - item.old_price) / item.old_price) * 100
     : 0;
   return (
     <span className="report-price">
-      <b>{formatMoney(item.price)}</b>
+      <b>{formatOfferPrice(item.price, item.offer_type === "RENT" || item.offer_type === "LEASE", t)}</b>
+      {(item.offer_type === "RENT" || item.offer_type === "LEASE") && (item.rental_term_months || item.lease_term_months) ? (
+        <small>{item.rental_term_months || item.lease_term_months} {t("monthsShort")}</small>
+      ) : null}
       {item.change === "PRICE_DROP" && percent < 0 ? (
         <small className="down">↓ {Math.abs(percent).toLocaleString("ru-RU", { maximumFractionDigits: 2 })}%</small>
       ) : item.change === "PRICE_INCREASE" && percent > 0 ? (
@@ -2097,7 +2147,7 @@ function ReportList({
               <span className={`change-chip ${changeTone(item.change)}`}>
                 {carStatusText(item.change, t)}
               </span>
-              <ReportPrice item={item} />
+              <ReportPrice item={item} t={t} />
               <span className="report-open">→</span>
             </button>
             {item.change === "MATERIAL_UPDATE" || item.changes?.length ? (
@@ -2586,6 +2636,8 @@ function CarListRow({
   showProject?: boolean;
 }) {
   const details = car.details || {};
+  const monthlyOffer = isMonthlyOffer(details);
+  const offerTerm = monthlyOfferTerm(details);
   const condition = carCondition(details.condition_summary, t);
   const stateClasses = [
     "car-row",
@@ -2631,7 +2683,10 @@ function CarListRow({
         </small>
       </button>
       <div className="price">
-        <b>{car.price ? `₩ ${car.price.toLocaleString()}` : "—"}</b>
+        <b>{formatOfferPrice(car.price, monthlyOffer, t)}</b>
+        {monthlyOffer && offerTerm ? (
+          <small>{String(offerTerm)} {t("monthsShort")}</small>
+        ) : null}
         <PriceMovement change={car.price_change} t={t} />
         {details.new_car_price_percent ? (
           <span className="new-price-ratio">
@@ -2640,6 +2695,7 @@ function CarListRow({
         ) : null}
       </div>
       <div className="tags">
+        {monthlyOffer ? <span className="rental-offer">{monthlyOfferLabel(details, t)}</span> : null}
         <span className={`car-status ${car.status.toLowerCase()}`}>{carStatusText(car.status, t)}</span>
         <span className={`condition-chip ${condition.tone}`}>{condition.label}</span>
         {!car.viewed && <span className="unviewed">{t("notViewed")}</span>}
@@ -3026,7 +3082,7 @@ function Car({
     queryKey: ["car", carId, projectId],
     queryFn: () => request(`/cars/${carId}${projectId ? `?project_id=${projectId}` : ""}`),
   });
-  const historyQuery = useQuery<{ price: number; at: string }[]>({
+  const historyQuery = useQuery<{ price: number; offer_type?: string; at: string }[]>({
     queryKey: ["price-history", carId],
     queryFn: () => request(`/cars/${carId}/price-history`),
   });
@@ -3131,7 +3187,11 @@ function Car({
   if (!car) return <div className="panel empty-state">{t("loadingCars")}</div>;
   const l = (ru: string, uk: string) => locale === "uk" ? uk : ru;
   const details = car.details || {};
-  const history = historyQuery.data || [];
+  const monthlyOffer = isMonthlyOffer(details);
+  const offerTerm = monthlyOfferTerm(details);
+  const history = (historyQuery.data || []).filter(
+    (point) => (point.offer_type || "SALE") === (monthlyOffer ? details.offer_type : "SALE"),
+  );
   const chart = history.map((point) => ({
     date: new Intl.DateTimeFormat(locale === "uk" ? "uk-UA" : "ru-RU", {
       day: "2-digit",
@@ -3203,6 +3263,14 @@ function Car({
     return String(value);
   };
   const specRows = [
+    ...(monthlyOffer ? [
+      [t("offerType"), monthlyOfferLabel(details, t)],
+      [details.offer_type === "LEASE" ? t("leaseTerm") : t("rentalTerm"), offerTerm ? `${offerTerm} ${t("monthsShort")}` : null],
+      ...(details.offer_type === "RENT" ? [
+        [t("rentalAcquisitionPrice"), details.rental_acquisition_price_krw !== null && details.rental_acquisition_price_krw !== undefined ? formatKnownMoney(details.rental_acquisition_price_krw) : null],
+        [t("vehiclePrice"), details.vehicle_price_krw ? formatKnownMoney(details.vehicle_price_krw) : null],
+      ] : []),
+    ] : []),
     [l("Комплектация", "Комплектація"), details.trim],
     [l("Дата первого обнаружения", "Дата першого виявлення"), formatDate(car.first_seen_at, locale)],
     [l("Последнее обновление", "Останнє оновлення"), formatDate(car.updated_at || String(details.checked_at || ""), locale)],
@@ -3297,8 +3365,9 @@ function Car({
           {mainImage ? <img src={mainImage} alt={car.title || "Encar vehicle"} /> : <span>{l("Фото появится после обновления", "Фото зʼявиться після оновлення")}</span>}
         </button>
         <div className="vehicle-main">
-          <small>{t("currentPrice")}</small>
-          <div className="big-price">{formatMoney(car.price)}</div>
+          <small>{t(monthlyOffer ? "monthlyPayment" : "currentPrice")}</small>
+          <div className="big-price">{formatOfferPrice(car.price, monthlyOffer, t)}</div>
+          {monthlyOffer ? <span className="rental-offer detail-rental-offer">{monthlyOfferLabel(details, t)}</span> : null}
           {details.under_contract ? (
             <span className="contract-chip">{t("underContract")}</span>
           ) : null}

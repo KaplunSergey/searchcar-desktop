@@ -137,7 +137,14 @@ def upsert_price_status(db, project: Project, status: dict, *, mark_search_found
             "displayed_car_id": status.get("displayed_car_id"),
             "url": status.get("url"),
             "price_krw": None if status.get("sold") else status.get("price_krw"),
-            "price_source": None if status.get("sold") else "DETAIL_PRIMARY",
+            "price_source": None if status.get("sold") else status.get("price_source", "DETAIL_PRIMARY"),
+            "offer_type": status.get("offer_type", "SALE"),
+            "rental_monthly_payment_krw": status.get("rental_monthly_payment_krw"),
+            "rental_term_months": status.get("rental_term_months"),
+            "rental_acquisition_price_krw": status.get("rental_acquisition_price_krw"),
+            "vehicle_price_krw": status.get("vehicle_price_krw"),
+            "lease_monthly_payment_krw": status.get("lease_monthly_payment_krw"),
+            "lease_term_months": status.get("lease_term_months"),
             "checked_at": status.get("checked_at"),
             "parse_quality": "SOLD_PAGE" if status.get("sold") else "PRICE_STATUS",
             "sold": bool(status.get("sold")),
@@ -189,16 +196,23 @@ def upsert_detail(
 
     authoritative_price = (
         detail.get("price_krw")
-        if detail.get("price_source") == "DETAIL_PRIMARY"
+        if detail.get("price_source") in {
+            "DETAIL_PRIMARY",
+            "DETAIL_RENTAL_MONTHLY",
+            "DETAIL_LEASE_MONTHLY",
+        }
         else None
     )
+    old_offer_type = old_details.get("offer_type") or "SALE"
+    new_offer_type = detail.get("offer_type") or "SALE"
+    offer_type_changed = bool(old_details and old_offer_type != new_offer_type)
     provenance = {
         "source_car_id": source_id,
         "price_source": detail.get("price_source"),
         "scan_run_id": detail.get("scan_run_id"),
         "checked_at": detail.get("checked_at"),
     }
-    change = price_change(old_price, authoritative_price)
+    change = None if offer_type_changed else price_change(old_price, authoritative_price)
     sold_transition = bool(detail.get("sold") and car.status != "SOLD")
     if authoritative_price and authoritative_price != old_price:
         db.add(
@@ -207,7 +221,8 @@ def upsert_detail(
                 kind="PRICE",
                 payload={
                     "price_krw": authoritative_price,
-                    "price_source": "DETAIL_PRIMARY",
+                    "price_source": detail.get("price_source"),
+                    "offer_type": new_offer_type,
                     "source_car_id": source_id,
                     "scan_run_id": detail.get("scan_run_id"),
                     "checked_at": detail.get("checked_at"),
@@ -283,7 +298,8 @@ def upsert_detail(
 
     car.url = detail.get("url") or car.url
     car.title = detail.get("title") or car.title
-    car.current_price = authoritative_price or car.current_price
+    if authoritative_price is not None:
+        car.current_price = authoritative_price
     car.fingerprint = detail.get("fingerprint")
     car.details = detail
     car.updated_at = now()

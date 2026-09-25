@@ -70,6 +70,105 @@ def parse_detail_price_krw(text: str):
     return None
 
 
+def _labelled_manwon(text: str, label: str):
+    match = re.search(
+        rf"{re.escape(label)}\s*([0-9][0-9,]*)\s*만원",
+        text or "",
+    )
+    return int(match.group(1).replace(",", "")) * 10_000 if match else None
+
+
+def parse_rental_terms(text: str):
+    """Parse Encar rental pricing without treating it as a sale price."""
+
+    value = text or ""
+    payments = list(re.finditer(
+        r"월\s*([0-9][0-9,]*)\s*만원(?:\s*/\s*(\d{1,3})\s*개월)?",
+        value,
+    ))
+    term_matches = list(
+        re.finditer(r"월\s*렌트료\s*\(\s*(\d{1,3})\s*개월\s*\)", value)
+    )
+    payment = next(
+        (
+            candidate
+            for candidate in payments
+            if (
+                candidate.group(2)
+                and "렌트" in value[max(0, candidate.start() - 180) : candidate.end() + 180]
+            )
+            or any(abs(term.start() - candidate.end()) <= 300 for term in term_matches)
+        ),
+        None,
+    )
+    if payment is None:
+        return None
+    term = payment.group(2)
+    if not term:
+        term_match = next(
+            (match for match in term_matches if abs(match.start() - payment.end()) <= 300),
+            None,
+        )
+        term = term_match.group(1) if term_match else None
+    return {
+        "offer_type": "RENT",
+        "rental_monthly_payment_krw": int(payment.group(1).replace(",", "")) * 10_000,
+        "rental_term_months": int(term) if term else None,
+        "rental_acquisition_price_krw": _labelled_manwon(value, "인수금"),
+        "vehicle_price_krw": _labelled_manwon(value, "차량가격"),
+    }
+
+
+def parse_lease_terms(text: str):
+    """Parse Encar lease payments from its visible and embedded page state."""
+
+    value = text or ""
+    payments = list(re.finditer(
+        r"월\s*([0-9][0-9,]*)\s*만원(?:\s*/\s*(\d{1,3})\s*개월)?",
+        value,
+    ))
+    term_matches = list(
+        re.finditer(r"월\s*리스료\s*\(\s*(\d{1,3})\s*개월\s*\)", value)
+    )
+    payment = next(
+        (
+            candidate
+            for candidate in payments
+            if (
+                candidate.group(2)
+                and "리스" in value[max(0, candidate.start() - 180) : candidate.end() + 180]
+            )
+            or any(abs(term.start() - candidate.end()) <= 300 for term in term_matches)
+        ),
+        None,
+    )
+    if payment:
+        term_match = next(
+            (match for match in term_matches if abs(match.start() - payment.end()) <= 300),
+            None,
+        )
+        return {
+            "offer_type": "LEASE",
+            "lease_monthly_payment_krw": int(payment.group(1).replace(",", "")) * 10_000,
+            "lease_term_months": int(payment.group(2) or term_match.group(1)) if (payment.group(2) or term_match) else None,
+        }
+
+    if not re.search(r'"leaseRentType"\s*:\s*"LEASE"', value):
+        return None
+    info = re.search(r'"leaseRentInfo"\s*:\s*\{(?P<value>[^}]{0,500})\}', value)
+    if not info:
+        return None
+    monthly = re.search(r'"monthlyFee"\s*:\s*(\d+)', info.group("value"))
+    term = re.search(r'"residualMonth"\s*:\s*(\d+)', info.group("value"))
+    if not monthly:
+        return None
+    return {
+        "offer_type": "LEASE",
+        "lease_monthly_payment_krw": int(monthly.group(1)) * 10_000,
+        "lease_term_months": int(term.group(1)) if term else None,
+    }
+
+
 def parse_new_car_price_percent(text: str):
     match = re.search(r"신차\s*대비\s*(\d{1,3})\s*%", text or "")
     if not match:
@@ -447,10 +546,19 @@ TRACKED_DETAIL_FIELDS = (
     "condition_summary",
     "new_car_price_percent",
     "under_contract",
+    "offer_type",
+    "rental_monthly_payment_krw",
+    "rental_term_months",
+    "rental_acquisition_price_krw",
+    "vehicle_price_krw",
+    "lease_monthly_payment_krw",
+    "lease_term_months",
 )
 
 
 def material_changes(old: dict, new: dict) -> list[dict]:
+    old = {**old, "offer_type": old.get("offer_type") or "SALE"}
+    new = {**new, "offer_type": new.get("offer_type") or "SALE"}
     changes = [
         {"field": key, "old": old.get(key), "new": new.get(key)}
         for key in TRACKED_DETAIL_FIELDS
@@ -510,8 +618,12 @@ def fingerprint_listing(item: dict[str, Any]):
     keys = (
         "canonical_car_id", "title", "year_month", "mileage_km", "price_krw",
         "fuel", "drivetrain", "transmission", "options", "condition",
+        "offer_type", "rental_monthly_payment_krw", "rental_term_months",
+        "rental_acquisition_price_krw", "vehicle_price_krw",
+        "lease_monthly_payment_krw", "lease_term_months",
     )
     comparable = {key: item.get(key) for key in keys}
+    comparable["offer_type"] = item.get("offer_type") or "SALE"
     comparable["condition"] = condition_signature(item.get("condition"))
     return hashlib.sha256(
         json.dumps(

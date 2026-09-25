@@ -5,6 +5,7 @@ from app.scanner import (
     IdentityMismatchError,
     is_sold_page,
     listing_sections,
+    parse_list_row,
     resolve_listing_identity,
 )
 def test_ids(): assert extract_car_id("/cars/detail/38920017")=="38920017" and extract_real_encar_id("등록번호 39001111")=="39001111"
@@ -24,6 +25,59 @@ def test_parsers():
     assert parse_contract_status("2,650만원") is False
     assert parse_mileage_km("52,100 km")==52_100 and parse_year_month("21/11식")=="2021/11"
     assert detect_fuel("연료\n가솔린\n전기 시트") == "GASOLINE"
+
+
+def test_rental_offer_parses_list_and_detail_terms():
+    list_text = """현대 쏘나타 디 엣지(DN8) 1.6 터보 S
+26/07식 · 1km · 가솔린 · 서울
+월 36만원/24개월
+렌트
+"""
+    detail_text = """월36만원
+월렌트료(24개월)
+인수금
+0만원
+차량가격
+864 만원
+"""
+
+    assert parse_rental_terms(list_text) == {
+        "offer_type": "RENT",
+        "rental_monthly_payment_krw": 360_000,
+        "rental_term_months": 24,
+        "rental_acquisition_price_krw": None,
+        "vehicle_price_krw": None,
+    }
+    assert parse_rental_terms(detail_text) == {
+        "offer_type": "RENT",
+        "rental_monthly_payment_krw": 360_000,
+        "rental_term_months": 24,
+        "rental_acquisition_price_krw": 0,
+        "vehicle_price_krw": 8_640_000,
+    }
+    assert parse_list_row({"list_text": list_text})["price_krw"] == 360_000
+    assert parse_list_row({"list_text": list_text})["offer_type"] == "RENT"
+
+
+def test_monthly_finance_hint_is_not_mistaken_for_a_rental_offer():
+    text = "예상 월 36만원\n할부 계산\n2,630만원\n총비용계산기"
+    assert parse_rental_terms(text) is None
+
+
+def test_lease_offer_parses_visible_and_embedded_encar_formats():
+    visible = "월 31만원/22개월\n리스"
+    embedded = '''"leaseRentType":"LEASE","advertisement":{"price":1480,
+    "leaseRentInfo":{"residualMonth":22,"monthlyFee":31}}'''
+    expected = {
+        "offer_type": "LEASE",
+        "lease_monthly_payment_krw": 310_000,
+        "lease_term_months": 22,
+    }
+
+    assert parse_lease_terms(visible) == expected
+    assert parse_lease_terms(embedded) == expected
+    assert parse_list_row({"list_text": visible})["price_krw"] == 310_000
+    assert parse_list_row({"list_text": visible})["offer_type"] == "LEASE"
 def test_detection():
     assert detect_fuel("가솔린+전기")=="HYBRID" and detect_drivetrain("사륜")=="AWD"
     assert classify_accident("무사고 확인\n내차 피해\n없음\n타차 가해\n없음")["summary"]=="NO_PROBLEMS_STATED"

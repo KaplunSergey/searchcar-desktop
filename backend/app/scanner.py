@@ -25,7 +25,9 @@ from .parser import (
     parse_contract_status,
     parse_options,
     parse_detail_price_krw,
+    parse_lease_terms,
     parse_price_krw,
+    parse_rental_terms,
     parse_condition,
     parse_vehicle_fields,
     parse_year_month,
@@ -115,6 +117,42 @@ def is_sold_page(text: str) -> bool:
     return any(marker in (text or "") for marker in SOLD_MARKERS)
 
 
+def _offer_price(text: str) -> tuple[int | None, str | None, dict]:
+    rental = parse_rental_terms(text)
+    if rental:
+        return (
+            rental["rental_monthly_payment_krw"],
+            "DETAIL_RENTAL_MONTHLY",
+            rental,
+        )
+    lease = parse_lease_terms(text)
+    if lease:
+        return (
+            lease["lease_monthly_payment_krw"],
+            "DETAIL_LEASE_MONTHLY",
+            lease,
+        )
+    return parse_detail_price_krw(text), "DETAIL_PRIMARY", {
+        "offer_type": "SALE",
+        "rental_monthly_payment_krw": None,
+        "rental_term_months": None,
+        "rental_acquisition_price_krw": None,
+        "vehicle_price_krw": None,
+    }
+
+
+def _page_offer_price(page, body_text: str) -> tuple[int | None, str | None, dict]:
+    """Use Encar's embedded state only when the visible price did not render."""
+
+    offer = _offer_price(body_text)
+    if offer[0] is not None:
+        return offer
+    try:
+        return _offer_price("\n".join((body_text, page.content())))
+    except PlaywrightError:
+        return offer
+
+
 def resolve_listing_identity(
     requested_id: str,
     structured_text: str,
@@ -181,7 +219,7 @@ def _wait_for_detail_content(page, wait_seconds: int = 14) -> str:
         if _has_captcha(text) or is_sold_page(text):
             return text
         signal = (
-            parse_detail_price_krw(text),
+            _page_offer_price(page, text)[0],
             parse_mileage_km(text),
             parse_year_month(text),
             parse_new_car_price_percent(text),
@@ -212,7 +250,7 @@ def _wait_for_price_status(page, wait_seconds: int = 8) -> str:
             best = text
         if _has_captcha(text) or is_sold_page(text):
             return text
-        price = parse_detail_price_krw(text)
+        price = _page_offer_price(page, text)[0]
         if price is not None and price == previous_price:
             return text
         previous_price = price
@@ -635,11 +673,18 @@ def collect_search_pages(
 
 def parse_list_row(item: dict) -> dict:
     text = item.get("list_text") or ""
+    rental = parse_rental_terms(text)
+    lease = parse_lease_terms(text)
     return {
         "title": next((line.strip() for line in text.splitlines() if len(line.strip()) > 8), None),
-        "price_krw": parse_price_krw(text),
+        "price_krw": (
+            rental["rental_monthly_payment_krw"] if rental
+            else lease["lease_monthly_payment_krw"] if lease
+            else parse_price_krw(text)
+        ),
         "mileage_km": parse_mileage_km(text),
         "year_month": parse_year_month(text),
+        **(rental or lease or {"offer_type": "SALE"}),
     }
 
 
@@ -737,7 +782,7 @@ def read_detail(page, item: dict, storage: Path) -> dict:
                 _has_captcha(body_text)
                 or is_sold_page(body_text)
                 or (
-                    parse_detail_price_krw(body_text)
+                    _page_offer_price(page, body_text)[0]
                     and parse_mileage_km(body_text) is not None
                 )
             ):
@@ -748,7 +793,7 @@ def read_detail(page, item: dict, storage: Path) -> dict:
             missing = [
                 name
                 for name, value in (
-                    ("price", parse_detail_price_krw(body_text)),
+                    ("price", _page_offer_price(page, body_text)[0]),
                     ("mileage", parse_mileage_km(body_text)),
                 )
                 if value is None
@@ -769,7 +814,7 @@ def read_detail(page, item: dict, storage: Path) -> dict:
     structured_text = "\n".join((title, main_text))
     source_id = str(item["source_car_id"])
     sold = is_sold_page(body_text)
-    detail_price = parse_detail_price_krw(body_text)
+    detail_price, price_source, offer = _page_offer_price(page, body_text)
     canonical, displayed_id = resolve_listing_identity(
         source_id,
         structured_text,
@@ -796,7 +841,8 @@ def read_detail(page, item: dict, storage: Path) -> dict:
         "vin": vehicle["vin"],
         "mileage_km": parse_mileage_km(structured_text),
         "price_krw": None if sold else detail_price,
-        "price_source": None if sold else "DETAIL_PRIMARY",
+        "price_source": None if sold else price_source,
+        **offer,
         "new_car_price_percent": (
             None if sold else parse_new_car_price_percent(full_text)
         ),
@@ -909,7 +955,7 @@ def read_price_status(page, item: dict) -> dict:
         raise CaptchaError("Encar CAPTCHA detected")
 
     sold = is_sold_page(body_text)
-    price = parse_detail_price_krw(body_text)
+    price, price_source, offer = _page_offer_price(page, body_text)
     if not sold and price is None:
         raise IncompleteDetailError("Encar detail page did not finish loading: price")
     source_id = str(item["source_car_id"])
@@ -925,6 +971,8 @@ def read_price_status(page, item: dict) -> dict:
         "displayed_car_id": displayed_id,
         "url": f"https://fem.encar.com/cars/detail/{canonical}",
         "price_krw": None if sold else price,
+        "price_source": None if sold else price_source,
+        **offer,
         "checked_at": utcnow().isoformat(),
         "sold": sold,
     }

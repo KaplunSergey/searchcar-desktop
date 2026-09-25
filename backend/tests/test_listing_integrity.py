@@ -272,6 +272,72 @@ def test_fast_price_status_update_preserves_the_full_listing_profile(db):
     assert db.scalar(select(PriceHistory.payload))["price_krw"] == 23_900_000
 
 
+def test_fast_rental_status_updates_monthly_payment_and_terms(db):
+    project, car, _ = tracked_car(db)
+    car.current_price = 370_000
+    car.details = {
+        **car.details,
+        "offer_type": "RENT",
+        "price_krw": 370_000,
+        "price_source": "DETAIL_RENTAL_MONTHLY",
+        "rental_monthly_payment_krw": 370_000,
+        "rental_term_months": 24,
+        "vehicle_price_krw": 8_640_000,
+    }
+    db.commit()
+
+    updated = upsert_price_status(
+        db,
+        project,
+        {
+            "canonical_car_id": "41093659",
+            "source_car_id": "41093659",
+            "price_krw": 360_000,
+            "price_source": "DETAIL_RENTAL_MONTHLY",
+            "offer_type": "RENT",
+            "rental_monthly_payment_krw": 360_000,
+            "rental_term_months": 24,
+            "rental_acquisition_price_krw": 0,
+            "vehicle_price_krw": 8_640_000,
+            "sold": False,
+            "checked_at": "2026-09-25T10:00:00+00:00",
+        },
+    )
+
+    assert updated.current_price == 360_000
+    assert updated.details["offer_type"] == "RENT"
+    assert updated.details["rental_monthly_payment_krw"] == 360_000
+    assert updated.details["rental_term_months"] == 24
+    assert updated.details["rental_acquisition_price_krw"] == 0
+    assert updated.details["vehicle_price_krw"] == 8_640_000
+    assert db.scalar(select(PriceHistory.payload))["price_source"] == "DETAIL_RENTAL_MONTHLY"
+
+
+def test_fast_lease_status_updates_monthly_payment_and_terms(db):
+    project, car, _ = tracked_car(db)
+    updated = upsert_price_status(
+        db,
+        project,
+        {
+            "canonical_car_id": "41093659",
+            "source_car_id": "41093659",
+            "price_krw": 310_000,
+            "price_source": "DETAIL_LEASE_MONTHLY",
+            "offer_type": "LEASE",
+            "lease_monthly_payment_krw": 310_000,
+            "lease_term_months": 22,
+            "sold": False,
+            "checked_at": "2026-09-25T10:00:00+00:00",
+        },
+    )
+
+    assert updated.current_price == 310_000
+    assert updated.details["offer_type"] == "LEASE"
+    assert updated.details["lease_monthly_payment_krw"] == 310_000
+    assert updated.details["lease_term_months"] == 22
+    assert db.scalar(select(PriceHistory.payload))["price_source"] == "DETAIL_LEASE_MONTHLY"
+
+
 def test_removed_relation_cannot_be_revived_by_late_page_result(db):
     project, car, relation = tracked_car(db)
     relation.tracking_enabled = False

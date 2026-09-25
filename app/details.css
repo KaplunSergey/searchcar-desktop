@@ -61,6 +61,7 @@
 .car-row .price span{margin-top:3px}
 .car-row .tags{display:grid;align-content:center;justify-items:start;gap:4px}
 .car-row .tags span{padding:4px 8px;border-radius:14px;font-size:10px;line-height:1.2}
+.tags .rental-offer,.rental-offer{display:inline-flex;width:max-content;align-items:center;padding:4px 8px;border-radius:14px;background:#f3e8ff;color:#7e22ce;font-size:10px;font-weight:800}.detail-rental-offer{margin-top:6px}
 .car-row .row-actions{align-self:stretch;align-content:center;gap:4px;padding-left:7px;border-left:1px solid #dce5f1}
 .car-row .row-actions button{display:grid;place-items:center;width:28px;min-height:28px;padding:0;border-radius:50%;font-size:13px}
 .car-row .row-actions .external-car-link{background:#edf5ff;color:#1670e8;border:1px solid #d8e9ff}
