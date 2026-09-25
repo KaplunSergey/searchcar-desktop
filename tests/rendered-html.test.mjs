@@ -34,7 +34,7 @@ test("ships required product surfaces and localization",async()=>{
   assert.doesNotMatch(page,/progress-chip/);
   assert.match(page,/report-favorite/);
   assert.match(page,/carsCountLabel/);
-  assert.match(page,/projectSingular/);
+  assert.match(translations,/projectSingular:/);
   assert.match(page,/projectFavorites/);
   assert.match(page,/removeCarFromProject/);
   assert.match(page,/project_statuses/);
@@ -109,6 +109,22 @@ test("scan reports combine project and status filters",async()=>{
   assert.match(page,/setExcludedProjectIds\(new Set\(\)\);[\s\S]*setExcludedChanges\(new Set\(\)\)/);
   assert.match(page,/projects=\{projectsQuery\.data \|\| \[\]\}/);
   assert.match(styles,/\.report-filter-menu\{[^}]*max-height:min\(70vh,520px\)[^}]*overflow:auto/);
+});
+test("scan history uses expandable run cards and keeps report filters beside changes",async()=>{
+  const [page,styles,translations]=await Promise.all([
+    readFile(new URL("app/page.tsx",root),"utf8"),
+    readFile(new URL("app/details.css",root),"utf8"),
+    readFile(new URL("app/translations.ts",root),"utf8"),
+  ]);
+  assert.match(page,/className="scan-history-list"/);
+  assert.match(page,/className=\{`scan-run-card \$\{scan\.status\.toLowerCase\(\)\} \$\{open \? "open" : ""\}`\}/);
+  assert.match(page,/className="scan-run-header"/);
+  assert.match(page,/className="scan-run-progress"/);
+  assert.match(page,/heading=\{t\("changesTitle"\)\}/);
+  assert.doesNotMatch(page,/className="table-head"/);
+  assert.match(styles,/\.scan-run-card\{/);
+  assert.match(styles,/\.report-filter-toolbar\.with-heading\{/);
+  assert.match(translations,/changesTitle: "Изменения"/);
 });
 test("desktop onboarding and notifications are clear inside a small app window",async()=>{
   const [page,styles]=await Promise.all([

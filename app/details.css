@@ -213,3 +213,54 @@
 .scan-report>.report-heading{padding-right:46px}
 .scan-report>.report-list-shell{position:static}
 .scan-report>.report-list-shell>.report-filter-toolbar{position:absolute;top:16px;right:16px;margin:0}
+
+/* Run history uses compact expandable cards; the existing car card stays untouched. */
+.scan-history-list{display:grid;gap:12px}
+.scan-history-list>.empty-state{border:1px solid var(--line);border-radius:12px;background:#fff}
+.scan-run-card{overflow:hidden;border:1px solid #d7e2f1;border-radius:12px;background:#fff;box-shadow:0 5px 18px #24466e0b}
+.scan-run-card.open.succeeded{border-color:#d2ede0;background:#fcfffd}
+.scan-run-header{display:grid;grid-template-columns:48px minmax(220px,1fr) minmax(220px,.9fr) auto auto 40px;align-items:center;gap:14px;min-height:78px;padding:13px 18px}
+.scan-run-status-icon{display:grid;place-items:center;width:38px;height:38px;border-radius:50%;background:#edf2f8;color:#64748b;font-size:17px;font-weight:900}
+.scan-run-card.succeeded .scan-run-status-icon{background:#e7f8ee;color:#16a34a}
+.scan-run-card.running .scan-run-status-icon,.scan-run-card.queued .scan-run-status-icon,.scan-run-card.cancel_requested .scan-run-status-icon{background:#fff2e7;color:#f08a12}
+.scan-run-card.failed .scan-run-status-icon,.scan-run-card.captcha .scan-run-status-icon,.scan-run-card.partial .scan-run-status-icon{background:#fff0f1;color:#dc2626}
+.scan-run-summary{display:grid;gap:4px;min-width:0}
+.scan-run-summary strong{font-size:16px;line-height:1.2;font-variant-numeric:tabular-nums}
+.scan-run-summary small{overflow:hidden;color:#63799a;font-size:11px;line-height:1.4;text-overflow:ellipsis;white-space:nowrap}
+.scan-run-progress,.scan-run-progress-placeholder{grid-column:3;min-width:0}
+.scan-run-progress{display:grid;grid-template-columns:minmax(120px,1fr) 38px;align-items:center;gap:6px 10px}
+.scan-run-progress>strong{grid-column:1/-1;font-size:11px}
+.scan-run-progress>span{height:6px;overflow:hidden;border-radius:6px;background:#e5ebf4}
+.scan-run-progress>span>i{display:block;height:100%;border-radius:6px;background:var(--blue)}
+.scan-run-progress>b{color:#58719a;font-size:11px;font-variant-numeric:tabular-nums}
+.scan-run-status{grid-column:4;display:inline-flex;align-items:center;gap:7px;width:max-content;margin:0;padding:7px 11px;border-radius:16px;background:#eef2f7;color:#64748b;white-space:nowrap}
+.scan-run-status>i{width:7px;height:7px;margin:0;border-radius:50%;background:currentColor}
+.scan-run-status.succeeded{background:#e9f9ef;color:#159447}
+.scan-run-status.running,.scan-run-status.queued,.scan-run-status.cancel_requested{background:#fff4e3;color:#d97706}
+.scan-run-status.failed,.scan-run-status.captcha,.scan-run-status.partial{background:#fff0f1;color:#dc2626}
+.scan-run-header>.cancel-scan{grid-column:5;padding:8px 12px;white-space:nowrap}
+.scan-run-toggle{grid-column:6;display:grid;place-items:center;width:36px;height:36px;border:0;border-radius:50%;background:#edf4ff;color:var(--blue)}
+.scan-run-toggle:disabled{color:#94a3b8;background:#f1f5f9}
+.scan-run-toggle .report-chevron{display:grid;place-items:center}
+.scan-run-details{padding:0 14px 14px}
+.scan-run-details>.report-list-shell{padding:12px;border:1px solid #dce6f3;border-radius:10px;background:#fbfdff}
+.report-filter-toolbar.with-heading{align-items:center;justify-content:space-between;margin:0 0 8px}
+.report-filter-toolbar.with-heading>strong{font-size:13px}
+.report-filter-toolbar.with-heading .report-filter{margin-left:auto}
+.scan-run-details>.failure-list{margin:10px 0 0}
+@media(max-width:1050px){
+  .scan-run-header{grid-template-columns:48px minmax(180px,1fr) minmax(180px,.8fr) auto 40px}
+  .scan-run-header>.cancel-scan{grid-column:3;grid-row:2;justify-self:start}
+  .scan-run-status{grid-column:4}
+  .scan-run-toggle{grid-column:5}
+}
+@media(max-width:700px){
+  .scan-run-header{grid-template-columns:42px minmax(0,1fr) auto;gap:10px;padding:12px}
+  .scan-run-status-icon{grid-column:1;grid-row:1;width:34px;height:34px}
+  .scan-run-summary{grid-column:2;grid-row:1}
+  .scan-run-toggle{grid-column:3;grid-row:1}
+  .scan-run-progress,.scan-run-progress-placeholder{grid-column:2/4;grid-row:2}
+  .scan-run-status{grid-column:2;grid-row:3}
+  .scan-run-header>.cancel-scan{grid-column:3;grid-row:3;justify-self:end}
+  .scan-run-details{padding:0 8px 8px}
+}

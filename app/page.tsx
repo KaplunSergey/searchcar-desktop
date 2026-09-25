@@ -1898,12 +1898,14 @@ function ReportList({
   t,
   locale,
   openCar,
+  heading,
 }: {
   items: ScanReportItem[];
   projects: ProjectRecord[];
   t: Translate;
   locale: Locale;
   openCar: (item: ScanReportItem) => void;
+  heading?: string;
 }) {
   const currentProjectNames = useMemo(
     () => new Map(projects.map((project) => [project.id, project.name])),
@@ -2005,7 +2007,8 @@ function ReportList({
 
   return (
     <div className="report-list-shell">
-      <div className="report-filter-toolbar">
+      <div className={`report-filter-toolbar ${heading ? "with-heading" : ""}`}>
+        {heading ? <strong>{heading} · {sorted.length}</strong> : null}
         <details className="report-filter">
           <summary aria-label={t("reportFilter")} title={t("reportFilter")}>
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -3499,6 +3502,7 @@ function ScanReportSection({
   t,
   locale,
   openCar,
+  cancelScan,
 }: {
   scan: ScanRecord;
   initiallyOpen: boolean;
@@ -3506,9 +3510,11 @@ function ScanReportSection({
   t: Translate;
   locale: Locale;
   openCar: (item: ScanReportItem) => void;
+  cancelScan: (scanId: number) => void;
 }) {
   const [open, setOpen] = useState(initiallyOpen);
   const report = scan.payload?.report || [];
+  const failures = scan.payload?.failures || [];
   const didAutoOpen = useRef(initiallyOpen);
   useEffect(() => {
     if (initiallyOpen && report.length && !didAutoOpen.current) {
@@ -3518,45 +3524,98 @@ function ScanReportSection({
   }, [initiallyOpen, report.length]);
   const invalidated = scan.payload?.invalidated_report_count || 0;
   const pagination = Object.values(scan.payload?.pagination || {});
-  if (!report.length && !invalidated && !pagination.length) return null;
+  const active = ["QUEUED", "RUNNING", "CANCEL_REQUESTED"].includes(scan.status);
+  const pagesVisited = pagination.reduce((sum, item) => sum + item.pages_visited, 0);
+  const listingsFound = pagination.reduce((sum, item) => sum + item.found_count, 0);
+  const projectTotal = scan.payload?.project_ids?.length || 0;
+  const completedProjects = Object.keys(scan.payload?.project_statuses || {}).length;
+  const currentProject = projectTotal ? Math.min(projectTotal, completedProjects + 1) : 0;
+  const hasDetails = Boolean(report.length || failures.length || invalidated || pagination.length);
+  const summary = [
+    active
+      ? pagesVisited || listingsFound
+        ? null
+        : t("scanInProgress")
+      : scan.status === "SUCCEEDED"
+        ? report.length
+          ? `${t("changesTitle")}: ${report.length}`
+          : t("noChanges")
+        : t(scanStatusKey(scan.status)),
+    pagination.length ? `${t("pagesScanned")}: ${pagesVisited}` : null,
+    pagination.length ? `${t("listingsFound")}: ${listingsFound}` : null,
+  ].filter(Boolean).join(" · ");
+  const statusIcon = scan.status === "SUCCEEDED"
+    ? "✓"
+    : active
+      ? "◷"
+      : ["FAILED", "CAPTCHA", "PARTIAL"].includes(scan.status)
+        ? "!"
+        : "■";
   return (
-    <section className={`scan-report-inline ${open ? "open" : ""}`}>
-      {!!pagination.length && (
-        <p className="pagination-summary">
-          {t("pagesScanned")}:{" "}
-          {pagination.reduce((sum, item) => sum + item.pages_visited, 0)} ·{" "}
-          {t("listingsFound")}:{" "}
-          {pagination.reduce((sum, item) => sum + item.found_count, 0)}
-        </p>
-      )}
-      {!!invalidated && (
-        <p className="integrity-notice">
-          {t("invalidatedHistoryHidden")}: {invalidated}
-        </p>
-      )}
-      {!!report.length && (
-        <>
+    <article className={`scan-run-card ${scan.status.toLowerCase()} ${open ? "open" : ""}`}>
+      <div className="scan-run-header">
+        <span className="scan-run-status-icon" aria-hidden="true">{statusIcon}</span>
+        <span className="scan-run-summary">
+          <strong>{formatDate(scan.created_at, locale)}</strong>
+          <small>{summary}</small>
+        </span>
+        {active ? (
+          <span className="scan-run-progress">
+            <strong>
+              {projectTotal
+                ? `${t("updatingProject")} ${currentProject} ${t("of")} ${projectTotal}`
+                : t("running")}
+            </strong>
+            <span><i style={{ width: `${scan.progress}%` }} /></span>
+            <b>{scan.progress}%</b>
+          </span>
+        ) : <span className="scan-run-progress-placeholder" />}
+        <span className={`scan-run-status status ${scan.status.toLowerCase()}`}>
+          <i />{t(scanStatusKey(scan.status))}
+        </span>
+        {active ? (
           <button
-            className="scan-report-toggle"
-            aria-expanded={open}
-            aria-label={t(open ? "collapseList" : "expandList")}
-            onClick={() => setOpen((value) => !value)}
+            className="cancel-scan"
+            disabled={scan.status === "CANCEL_REQUESTED"}
+            onClick={() => cancelScan(scan.id)}
           >
-            <strong>{t("updatedCars")} · {report.length}</strong>
-            <span className={`report-chevron ${open ? "open" : ""}`} aria-hidden="true" />
+            {t(scan.status === "CANCEL_REQUESTED" ? "cancelling" : "cancelUpdate")}
           </button>
-          {open && (
+        ) : null}
+        <button
+          className="scan-run-toggle"
+          aria-expanded={open}
+          aria-controls={`scan-run-details-${scan.id}`}
+          aria-label={t(open ? "collapseList" : "expandList")}
+          disabled={!hasDetails}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <span className={`report-chevron ${open ? "open" : ""}`} aria-hidden="true" />
+        </button>
+      </div>
+      {open && hasDetails ? (
+        <div className="scan-run-details" id={`scan-run-details-${scan.id}`}>
+          {!!invalidated && (
+            <p className="integrity-notice">
+              {t("invalidatedHistoryHidden")}: {invalidated}
+            </p>
+          )}
+          {report.length ? (
             <ReportList
               items={report}
               projects={projects}
               t={t}
               locale={locale}
               openCar={openCar}
+              heading={t("changesTitle")}
             />
+          ) : failures.length ? null : (
+            <div className="report-empty">{t("noChangedCars")}</div>
           )}
-        </>
-      )}
-    </section>
+          <FailureList failures={failures} t={t} />
+        </div>
+      ) : null}
+    </article>
   );
 }
 
@@ -3584,45 +3643,19 @@ function Scans({
           <p>{t("scanSubtitle")}</p>
         </div>
       </div>
-      <section className="panel table">
-        <div className="table-head">
-          <span>{t("started")}</span>
-          <span>{t("scope")}</span>
-          <span>{t("mode")}</span>
-          <span>{t("statusLabel")}</span>
-        </div>
+      <section className="scan-history-list">
         {!scans.length && <div className="empty-state">{t("noScans")}</div>}
         {scans.map((scan) => (
-          <div className="scan-run" key={scan.id}>
-            <div className="table-row">
-              <span>{formatDate(scan.created_at, locale)}</span>
-              <span>{t(scan.kind === "PROJECTS" ? "projectSingular" : "auto")}</span>
-              <span>{scan.kind === "PROJECTS" ? t("projects") : t("cars")}</span>
-              <span className="scan-status-actions">
-                <span className={`status ${scan.status.toLowerCase()}`}>
-                  {t(scanStatusKey(scan.status))}
-                </span>
-                {["QUEUED", "RUNNING", "CANCEL_REQUESTED"].includes(scan.status) ? (
-                  <button
-                    className="cancel-scan"
-                    disabled={scan.status === "CANCEL_REQUESTED"}
-                    onClick={() => cancelScan(scan.id)}
-                  >
-                    {t(scan.status === "CANCEL_REQUESTED" ? "cancelling" : "cancelUpdate")}
-                  </button>
-                ) : null}
-              </span>
-            </div>
-            <ScanReportSection
-              scan={scan}
-              initiallyOpen={scan.id === latestReportId}
-              projects={projects}
-              t={t}
-              locale={locale}
-              openCar={openCar}
-            />
-            <FailureList failures={scan.payload?.failures || []} t={t} />
-          </div>
+          <ScanReportSection
+            key={scan.id}
+            scan={scan}
+            initiallyOpen={scan.id === latestReportId}
+            projects={projects}
+            t={t}
+            locale={locale}
+            openCar={openCar}
+            cancelScan={cancelScan}
+          />
         ))}
       </section>
     </>
