@@ -154,6 +154,24 @@ def _search_performance_mode(connection: Connection) -> None:
     )
 
 
+def _project_car_new_status(connection: Connection) -> None:
+    _add_column_if_missing(
+        connection,
+        "project_cars",
+        "is_new",
+        "BOOLEAN NOT NULL DEFAULT 0",
+    )
+    connection.execute(
+        text(
+            """
+            UPDATE project_cars
+            SET is_new = 1
+            WHERE car_id IN (SELECT id FROM cars WHERE status = 'NEW')
+            """
+        )
+    )
+
+
 MIGRATIONS = (
     SQLiteMigration(1, "current_web_schema_baseline", _baseline),
     SQLiteMigration(2, "durable_single_worker_scan_queue", _durable_scan_queue),
@@ -161,6 +179,7 @@ MIGRATIONS = (
     SQLiteMigration(4, "scheduler_completion_checkpoint", _scheduler_completion_checkpoint),
     SQLiteMigration(5, "project_price_filters", _project_price_filters),
     SQLiteMigration(6, "search_performance_mode", _search_performance_mode),
+    SQLiteMigration(7, "project_car_new_status", _project_car_new_status),
 )
 
 

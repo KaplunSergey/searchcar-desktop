@@ -96,6 +96,7 @@ type PriceChange = {
 };
 type CarRecord = {
   id: number;
+  other_listings?: CarRecord[];
   project_id?: number;
   project_name?: string;
   encar_id: string;
@@ -2657,6 +2658,7 @@ function CarListRow({
     car.status === "SOLD" ? "is-sold" : "",
   ].filter(Boolean).join(" ");
   return (
+    <div className="vehicle-listing-group">
     <article className={stateClasses}>
       <button className="car-thumb" onClick={() => openCar(car)}>
         {car.image ? (
@@ -2706,7 +2708,9 @@ function CarListRow({
       </div>
       <div className="tags">
         {monthlyOffer ? <span className="rental-offer">{monthlyOfferLabel(details, t)}</span> : null}
-        <span className={`car-status ${car.status.toLowerCase()}`}>{carStatusText(car.status, t)}</span>
+        {car.status !== "UPDATED" ? (
+          <span className={`car-status ${car.status.toLowerCase()}`}>{carStatusText(car.status, t)}</span>
+        ) : null}
         <span className={`condition-chip ${condition.tone}`}>{condition.label}</span>
         {!car.viewed && <span className="unviewed">{t("notViewed")}</span>}
       </div>
@@ -2739,6 +2743,25 @@ function CarListRow({
         ) : null}
       </div>
     </article>
+    {car.other_listings?.length ? (
+      <details className="vehicle-other-listings">
+        <summary>{t("otherVehicleListings")} ({car.other_listings.length})</summary>
+        <div className="cars-list">
+          {car.other_listings.map((listing) => (
+            <CarListRow
+              key={listing.id}
+              car={listing}
+              t={t}
+              openCar={openCar}
+              toggleFavorite={toggleFavorite}
+              removeFromProject={removeFromProject}
+              showProject={showProject}
+            />
+          ))}
+        </div>
+      </details>
+    ) : null}
+    </div>
   );
 }
 
@@ -2896,13 +2919,20 @@ function Project({
   const cars = carsQuery.data || [];
   const activePagination = activeScan?.payload?.pagination?.[String(projectId || "")];
   const activeDetailProgress = activeScan?.payload?.detail_progress?.[String(projectId || "")];
-  const filtered = cars.filter((car) => {
+  const matchesFilter = (car: CarRecord) => {
     if (filter === "all") return true;
     if (filter === "favorite") return car.favorite;
     return filter === "UNAVAILABLE"
       ? ["UNAVAILABLE", "NOT_FOUND_IN_SEARCH"].includes(car.status)
       : car.status === filter;
+  };
+  const filtered = cars.flatMap((car) => {
+    const matching = [car, ...(car.other_listings || [])].filter(matchesFilter);
+    return matching.length ? [{ ...matching[0], other_listings: matching.slice(1) }] : [];
   });
+  const favoriteCount = cars.filter((car) =>
+    [car, ...(car.other_listings || [])].some((listing) => listing.favorite),
+  ).length;
   const visible = [...filtered].sort((left, right) => {
     if (sort === "priority") {
       const priority = (car: CarRecord) =>
@@ -2939,7 +2969,7 @@ function Project({
         </div>
         <div>
           <Button onClick={() => setFilter("favorite")}>
-            ★ {t("projectFavorites")} ({cars.filter((car) => car.favorite).length})
+            ★ {t("projectFavorites")} ({favoriteCount})
           </Button>
           {activeScan ? (
             <Button
@@ -2975,10 +3005,12 @@ function Project({
       </div>
       <div className="stats compact">
         <Stat label={t("carsFound")} value={cars.length} />
-        <Stat label={t("new")} value={cars.filter((car) => car.status === "NEW").length} tone="green" />
+        <Stat label={t("new")} value={cars.filter((car) =>
+          [car, ...(car.other_listings || [])].some((listing) => listing.status === "NEW"),
+        ).length} tone="green" />
         <Stat
           label={t("projectFavorites")}
-          value={cars.filter((car) => car.favorite).length}
+          value={favoriteCount}
           tone="red"
           onClick={() => setFilter("favorite")}
         />
@@ -3393,7 +3425,9 @@ function Car({
             </span>
           ) : null}
           <div className="tags wide">
-            <span className="new">{carStatusText(car.status, t)}</span>
+            {car.status !== "UPDATED" ? (
+              <span className="new">{carStatusText(car.status, t)}</span>
+            ) : null}
             <span className={`condition-summary ${String(details.condition_summary || "UNVERIFIED").toLowerCase()}`}>
               {summaryLabels[String(details.condition_summary || "UNVERIFIED")]}
             </span>
@@ -3812,11 +3846,42 @@ function Settings({
         body: JSON.stringify(scheduler),
       }),
     onSuccess: (saved) => {
+      client.setQueryData(["scheduler"], saved);
       setSchedulerDraft(saved);
       notify(t("saved"));
       void client.invalidateQueries({ queryKey: ["scheduler"] });
     },
     onError: () => notify(t("actionFailed")),
+  });
+  const savePerformanceMode = useMutation({
+    mutationFn: (performanceMode: SchedulerRecord["performance_mode"]) => {
+      const savedScheduler = client.getQueryData<SchedulerRecord>(["scheduler"]);
+      if (!savedScheduler) throw new Error("settings_not_loaded");
+      return request<SchedulerRecord>("/settings", {
+        method: "PUT",
+        body: JSON.stringify({ ...savedScheduler, performance_mode: performanceMode }),
+      });
+    },
+    onMutate: (performanceMode) => {
+      const previousMode = scheduler.performance_mode;
+      setSchedulerDraft({ ...scheduler, performance_mode: performanceMode });
+      return { previousMode };
+    },
+    onSuccess: (saved) => {
+      client.setQueryData(["scheduler"], saved);
+      setSchedulerDraft((current) =>
+        current ? { ...current, performance_mode: saved.performance_mode } : saved,
+      );
+      notify(t("saved"));
+    },
+    onError: (_error, _performanceMode, context) => {
+      if (context) {
+        setSchedulerDraft((current) =>
+          current ? { ...current, performance_mode: context.previousMode } : current,
+        );
+      }
+      notify(t("actionFailed"));
+    },
   });
   const importMutation = useMutation({
     mutationFn: () =>
@@ -4021,6 +4086,43 @@ function Settings({
       <section className="panel settings">
         <div className="setting-row">
           <div>
+            <h3>{t("generalSettings")}</h3>
+            <p>{t("generalSettingsHelp")}</p>
+          </div>
+        </div>
+        <fieldset>
+          <legend>{t("searchPerformance")}</legend>
+          <label>
+            <input
+              type="radio"
+              name="performance-mode"
+              checked={scheduler.performance_mode === "ECO"}
+              disabled={!schedulerQuery.data || savePerformanceMode.isPending}
+              onChange={() => savePerformanceMode.mutate("ECO")}
+            />
+            <span>
+              <b>{t("searchPerformanceEco")}</b>
+              <small>{t("searchPerformanceEcoHelp")}</small>
+            </span>
+          </label>
+          <label>
+            <input
+              type="radio"
+              name="performance-mode"
+              checked={scheduler.performance_mode === "FAST"}
+              disabled={!schedulerQuery.data || savePerformanceMode.isPending}
+              onChange={() => savePerformanceMode.mutate("FAST")}
+            />
+            <span>
+              <b>{t("searchPerformanceFast")}</b>
+              <small>{t("searchPerformanceFastHelp")}</small>
+            </span>
+          </label>
+        </fieldset>
+      </section>
+      <section className="panel settings import-panel">
+        <div className="setting-row">
+          <div>
             <h3>{t("schedulerTitle")}</h3>
             <p>{t("automaticHelp")}</p>
             <div className="scheduler-state">
@@ -4092,33 +4194,6 @@ function Settings({
             <b>{t("catchUpScans")}</b>
             <small>{t("catchUpScansHelp")}</small>
           </p>
-        </fieldset>
-        <fieldset>
-          <legend>{t("searchPerformance")}</legend>
-          <label>
-            <input
-              type="radio"
-              name="performance-mode"
-              checked={scheduler.performance_mode === "ECO"}
-              onChange={() => setSchedulerDraft({ ...scheduler, performance_mode: "ECO" })}
-            />
-            <span>
-              <b>{t("searchPerformanceEco")}</b>
-              <small>{t("searchPerformanceEcoHelp")}</small>
-            </span>
-          </label>
-          <label>
-            <input
-              type="radio"
-              name="performance-mode"
-              checked={scheduler.performance_mode === "FAST"}
-              onChange={() => setSchedulerDraft({ ...scheduler, performance_mode: "FAST" })}
-            />
-            <span>
-              <b>{t("searchPerformanceFast")}</b>
-              <small>{t("searchPerformanceFastHelp")}</small>
-            </span>
-          </label>
         </fieldset>
         <fieldset>
           <legend>{t("scheduledProjects")}</legend>

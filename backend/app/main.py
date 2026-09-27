@@ -91,6 +91,7 @@ from .schemas import (
 )
 from .services import merge_reliable_detail
 from .reporting import dedupe_report
+from .vehicle_groups import group_vehicle_listings
 from .live_updates import live_updates
 
 logger = logging.getLogger(__name__)
@@ -752,9 +753,10 @@ def admin_audit(
 
 
 def project_out(project: Project, db: Session) -> dict:
-    cars = (
-        db.scalar(
-            select(func.count())
+    cars = len(group_vehicle_listings([
+        {"id": car.id, "details": car.details}
+        for car in db.scalars(
+            select(Car)
             .select_from(ProjectCar)
             .join(Car, Car.id == ProjectCar.car_id)
             .outerjoin(
@@ -774,8 +776,7 @@ def project_out(project: Project, db: Session) -> dict:
                 ),
             )
         )
-        or 0
-    )
+    ]))
     last_run = db.execute(
         select(ProjectScanRun, ScanRun)
         .join(ScanRun, ScanRun.id == ProjectScanRun.scan_run_id)
@@ -824,6 +825,10 @@ def effective_status(record: Car, relation: ProjectCar | None) -> str:
         return "SOLD"
     if relation.search_status == "NOT_FOUND_IN_SEARCH":
         return "NOT_FOUND_IN_SEARCH"
+    if relation.is_new:
+        return "NEW"
+    if record.status == "NEW":
+        return "UPDATED"
     return record.status
 
 
@@ -1133,6 +1138,8 @@ def project_cars(
             query = query.where(
                 ProjectCar.search_status == "NOT_FOUND_IN_SEARCH"
             )
+        elif status == "NEW":
+            query = query.where(ProjectCar.is_new.is_(True))
         else:
             query = query.where(Car.status == status)
     result = []
@@ -1156,7 +1163,7 @@ def project_cars(
                 "price_change": latest_price_change(car, db),
             }
         )
-    return result
+    return group_vehicle_listings(result)
 
 
 @app.get("/api/favorites")

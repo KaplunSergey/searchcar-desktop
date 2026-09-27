@@ -14,7 +14,8 @@ class User(Base):
     password_hash: Mapped[str]=mapped_column(Text)
     role: Mapped[str]=mapped_column(String(16), default="USER")
     status: Mapped[str]=mapped_column(String(24), default="ACTIVE")
-    project_limit: Mapped[int|None]=mapped_column(Integer, default=1)
+    # Explicit None means unlimited; only omitted values get the legacy default.
+    project_limit: Mapped[int|None]=mapped_column(Integer().evaluates_none(), default=1)
     must_change_password: Mapped[bool]=mapped_column(Boolean, default=True)
     preferred_locale: Mapped[str]=mapped_column(String(2), default="ru")
     last_login_at: Mapped[datetime|None]=mapped_column(UTCDateTime())
@@ -80,7 +81,7 @@ class ProjectCar(Base):
     __tablename__="project_cars"
     project_id: Mapped[int]=mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True); car_id: Mapped[int]=mapped_column(ForeignKey("cars.id"), primary_key=True)
     first_seen_at: Mapped[datetime|None]=mapped_column(UTCDateTime()); last_seen_at: Mapped[datetime|None]=mapped_column(UTCDateTime()); last_found_at: Mapped[datetime|None]=mapped_column(UTCDateTime())
-    consecutive_missing_scans: Mapped[int]=mapped_column(default=0); search_status: Mapped[str]=mapped_column(String(30), default="FOUND"); favorite: Mapped[bool]=mapped_column(default=False); viewed: Mapped[bool]=mapped_column(default=False); viewed_at: Mapped[datetime|None]=mapped_column(UTCDateTime()); tracking_enabled: Mapped[bool]=mapped_column(Boolean, default=True)
+    consecutive_missing_scans: Mapped[int]=mapped_column(default=0); search_status: Mapped[str]=mapped_column(String(30), default="FOUND"); is_new: Mapped[bool]=mapped_column(Boolean, default=False); favorite: Mapped[bool]=mapped_column(default=False); viewed: Mapped[bool]=mapped_column(default=False); viewed_at: Mapped[datetime|None]=mapped_column(UTCDateTime()); tracking_enabled: Mapped[bool]=mapped_column(Boolean, default=True)
     last_observed_snapshot_id: Mapped[int|None]=mapped_column(ForeignKey("car_snapshots.id", ondelete="SET NULL"))
     last_observed_price: Mapped[int|None]=mapped_column(BigInteger)
     last_observed_fingerprint: Mapped[str|None]=mapped_column(String(64))

@@ -235,6 +235,10 @@
 .scan-run-progress>span>i{display:block;height:100%;border-radius:6px;background:var(--blue)}
 .scan-run-progress>b{color:#58719a;font-size:11px;font-variant-numeric:tabular-nums}
 .scan-run-status{grid-column:4;display:inline-flex;align-items:center;gap:7px;width:max-content;margin:0;padding:7px 11px;border-radius:16px;background:#eef2f7;color:#64748b;white-space:nowrap}
+.vehicle-listing-group{min-width:0}
+.vehicle-other-listings{padding:8px 12px;border:1px solid var(--line);border-top:0;border-radius:0 0 8px 8px;background:#f8fafc}
+.vehicle-other-listings>summary{cursor:pointer;color:var(--blue);font-size:12px;font-weight:650}
+.vehicle-other-listings>.cars-list{margin-top:10px}
 .scan-run-status>i{width:7px;height:7px;margin:0;border-radius:50%;background:currentColor}
 .scan-run-status.succeeded{background:#e9f9ef;color:#159447}
 .scan-run-status.running,.scan-run-status.queued,.scan-run-status.cancel_requested{background:#fff4e3;color:#d97706}

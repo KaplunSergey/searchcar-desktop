@@ -316,6 +316,7 @@ def upsert_detail(
             car_id=car.id,
             first_seen_at=now(),
             search_status="FOUND",
+            is_new=True,
             tracking_enabled=True,
         )
         db.add(link)
@@ -363,6 +364,7 @@ def mark_found_without_detail(db, project: Project, car: Car) -> str | None:
             car_id=car.id,
             first_seen_at=now(),
             search_status="FOUND",
+            is_new=True,
             tracking_enabled=True,
         )
         db.add(link)

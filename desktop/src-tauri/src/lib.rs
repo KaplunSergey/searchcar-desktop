@@ -32,6 +32,7 @@ struct SidecarProcess {
     child: CommandChild,
     port: u16,
     secret: String,
+    terminated: Arc<AtomicBool>,
 }
 
 struct SidecarState(Mutex<Option<SidecarProcess>>);
@@ -517,10 +518,12 @@ fn stop_sidecar(app: &tauri::AppHandle) {
     if let Some(process) = process {
         if request_sidecar_shutdown(process.port, &process.secret) {
             let deadline = Instant::now() + Duration::from_secs(40);
-            while Instant::now() < deadline && health_is_ready(process.port) {
+            // HTTP stops before Python finishes cleanup and releases desktop.lock.
+            // Wait for the process exit event, not the health endpoint disappearing.
+            while Instant::now() < deadline && !process.terminated.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_millis(150));
             }
-            if !health_is_ready(process.port) {
+            if process.terminated.load(Ordering::SeqCst) {
                 return;
             }
         }
@@ -957,14 +960,15 @@ pub fn run() {
                     return Ok(());
                 }
             };
+            let sidecar_terminated = Arc::new(AtomicBool::new(false));
             *app.state::<SidecarState>().0.lock().expect("sidecar state") =
                 Some(SidecarProcess {
                     child,
                     port,
                     secret: secret.clone(),
+                    terminated: Arc::clone(&sidecar_terminated),
                 });
 
-            let sidecar_terminated = Arc::new(AtomicBool::new(false));
             let termination_for_events = Arc::clone(&sidecar_terminated);
             tauri::async_runtime::spawn(async move {
                 while let Some(event) = events.recv().await {

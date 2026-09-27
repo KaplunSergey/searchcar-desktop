@@ -7,7 +7,7 @@ from pathlib import Path
 from threading import Event
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from .database import SessionLocal, engine, settings
 from .desktop_runtime import desktop_playwright
@@ -333,6 +333,32 @@ def _missing_cars(
         for relation, car in links
         if _should_refresh_missing_car(relation, car, found_ids)
     ]
+
+
+def _previous_new_car_ids(db, project_id: int) -> set[int]:
+    return set(
+        db.scalars(
+            select(ProjectCar.car_id).where(
+                ProjectCar.project_id == project_id,
+                ProjectCar.is_new.is_(True),
+            )
+        )
+    )
+
+
+def _expire_previous_new_relations(
+    db, project_id: int, car_ids: set[int]
+) -> None:
+    if not car_ids:
+        return
+    db.execute(
+        update(ProjectCar)
+        .where(
+            ProjectCar.project_id == project_id,
+            ProjectCar.car_id.in_(car_ids),
+        )
+        .values(is_new=False)
+    )
 
 
 def _should_apply_search_absence(page_mode: str) -> bool:
@@ -710,6 +736,7 @@ def process_job(job_id: int) -> None:
                         )
                     )
                     project_run.status = "RUNNING"
+                    previous_new_car_ids = _previous_new_car_ids(db, project.id)
                     initial_full_scan = _requires_initial_full_scan(db, project.id)
                     price_filter_needs_baseline = _price_filter_needs_baseline(
                         project
@@ -1205,6 +1232,9 @@ def process_job(job_id: int) -> None:
                         ) == price_filter_revision:
                             project.price_filter_baseline_revision = price_filter_revision
                         project.updated_at = datetime.now(timezone.utc)
+                        _expire_previous_new_relations(
+                            db, project.id, previous_new_car_ids
+                        )
                         project_run.status = "SUCCEEDED"
                         successes += 1
                         db.commit()

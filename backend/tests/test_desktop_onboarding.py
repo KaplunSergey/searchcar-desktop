@@ -19,6 +19,7 @@ from app.main import (
     _require_desktop_data_access,
     activate_desktop_workspace,
     claim_desktop_onboarding_transfer,
+    create_project,
     desktop_onboarding_status,
     download_desktop_backup,
     import_desktop_backup,
@@ -29,6 +30,7 @@ from app.models import Project, User
 from app.schemas import (
     DesktopOnboardingActivateIn,
     DesktopOnboardingTransferClaimIn,
+    ProjectIn,
 )
 
 
@@ -77,6 +79,7 @@ def test_desktop_activation_creates_passwordless_workspace_and_session(
         assert result["user"]["username"] == "SearchCar"
         assert result["user"]["passwordless_workspace"] is True
         assert result["user"]["preferred_locale"] == "uk"
+        assert result["user"]["project_limit"] is None
         assert result["csrf_token"]
         cookies = "\n".join(response.headers.getlist("set-cookie"))
         assert "encar_session=" in cookies
@@ -120,6 +123,7 @@ def test_single_legacy_user_becomes_hidden_workspace_without_losing_identity() -
         assert workspace.username == "SearchCar"
         assert workspace.preferred_locale == "uk"
         assert workspace.role == "USER"
+        assert workspace.project_limit is None
         assert workspace.must_change_password is False
         assert db.scalar(select(Project.owner_id)) == legacy_id
         assert migrate_legacy_desktop_workspace(db) == "workspace"
@@ -172,11 +176,70 @@ def test_desktop_transfer_can_complete_before_local_workspace_exists(
         ]
         assert result["user"]["passwordless_workspace"] is True
         assert result["user"]["preferred_locale"] == "ru"
+        assert result["user"]["project_limit"] is None
         assert result["csrf_token"]
         assert desktop_onboarding_status(db) == {"required": False}
         cookies = "\n".join(response.headers.getlist("set-cookie"))
         assert "encar_session=" in cookies
         assert "encar_csrf=" in cookies
+
+
+@pytest.mark.parametrize("existing_limit", [None, 0, 1, 10])
+def test_desktop_workspace_allows_multiple_projects_after_restart(existing_limit) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = create_desktop_workspace(db)
+        db.commit()
+        db.refresh(workspace)
+        assert workspace.project_limit is None
+        first = create_project(
+            ProjectIn(name="First", search_url="https://www.encar.com/search?project=1"),
+            workspace,
+            db,
+        )
+        workspace_id = workspace.id
+        if existing_limit is not None:
+            # Reproduce an already-activated installation with a persisted limit.
+            workspace.project_limit = existing_limit
+            db.commit()
+
+    with Session(engine) as db:
+        assert migrate_legacy_desktop_workspace(db) == "workspace"
+        db.commit()
+        workspace = desktop_workspace_user(db)
+        assert workspace.id == workspace_id
+        assert workspace.project_limit is None
+        assert db.get(Project, first["id"]).owner_id == workspace_id
+        second = create_project(
+            ProjectIn(name="Second", search_url="https://www.encar.com/search?project=2"),
+            workspace,
+            db,
+        )
+        assert second["id"] != first["id"]
+
+
+def test_unspecified_project_limit_still_defaults_to_one_for_regular_accounts() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(username="Regular", username_key="regular", password_hash="test-only")
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        assert user.project_limit == 1
+        create_project(
+            ProjectIn(name="First", search_url="https://www.encar.com/search?project=1"),
+            user,
+            db,
+        )
+        with pytest.raises(HTTPException) as denied:
+            create_project(
+                ProjectIn(name="Second", search_url="https://www.encar.com/search?project=2"),
+                user,
+                db,
+            )
+        assert denied.value.detail == "project_limit_reached"
 
 
 def test_desktop_transfer_onboarding_rejects_existing_workspace(

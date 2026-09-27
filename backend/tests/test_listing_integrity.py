@@ -3,6 +3,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.database import Base
+from app.main import effective_status, project_cars, project_out
 from app.models import Car, CarAlias, PriceHistory, Project, ProjectCar, User
 from app.scanner import resolve_listing_identity
 from app.services import (
@@ -11,6 +12,7 @@ from app.services import (
     upsert_detail,
     upsert_price_status,
 )
+from app.worker import _expire_previous_new_relations, _previous_new_car_ids
 
 
 @pytest.fixture()
@@ -64,6 +66,30 @@ def tracked_car(db: Session):
     return project, car, relation
 
 
+def test_project_groups_existing_duplicate_listings_without_losing_tracking(db):
+    project, car, relation = tracked_car(db)
+    car.details = {**car.details, "registration_number": "237허8037"}
+    car.status = "SOLD"
+    relation.favorite = True
+    duplicate = Car(
+        canonical_encar_id="41093660", url="https://fem.encar.com/cars/detail/41093660",
+        title="Audi", current_price=25_000_000, status="UPDATED",
+        details={"registration_number": "237 허8037"},
+    )
+    db.add(duplicate)
+    db.flush()
+    db.add(ProjectCar(project_id=project.id, car_id=duplicate.id, tracking_enabled=True, search_status="FOUND"))
+    db.commit()
+    owner = db.get(User, project.owner_id)
+    rows = project_cars(project.id, current=owner, db=db)
+    assert len(rows) == project_out(project, db)["cars"] == 1
+    assert rows[0]["id"] == duplicate.id
+    assert rows[0]["other_listings"][0]["id"] == car.id
+    assert rows[0]["other_listings"][0]["favorite"] is True
+    assert project_cars(project.id, favorite=True, current=owner, db=db)[0]["id"] == car.id
+    assert len(db.scalars(select(ProjectCar)).all()) == 2
+
+
 def test_clean_database_saves_listing_with_distinct_encar_ids(db):
     user = User(
         username="Owner",
@@ -110,10 +136,49 @@ def test_clean_database_saves_listing_with_distinct_encar_ids(db):
 
     assert car.canonical_encar_id == "42319346"
     assert car.details["displayed_car_id"] == "42318013"
-    assert db.get(
+    relation = db.get(
         ProjectCar,
         {"project_id": project.id, "car_id": car.id},
-    ).search_status == "FOUND"
+    )
+    assert relation.search_status == "FOUND"
+    assert relation.is_new is True
+    assert effective_status(car, relation) == "NEW"
+
+
+def test_only_cars_from_the_latest_successful_scan_remain_new(db):
+    project, first, first_relation = tracked_car(db)
+    first.status = "NEW"
+    first_relation.is_new = True
+    db.commit()
+
+    previous_new_ids = _previous_new_car_ids(db, project.id)
+    second = Car(
+        canonical_encar_id="41093660",
+        url="https://fem.encar.com/cars/detail/41093660",
+        title="Audi 2",
+        current_price=25_000_000,
+        status="NEW",
+        details={"canonical_car_id": "41093660", "price_krw": 25_000_000},
+    )
+    db.add(second)
+    db.flush()
+    second_relation = ProjectCar(
+        project_id=project.id,
+        car_id=second.id,
+        tracking_enabled=True,
+        search_status="FOUND",
+        is_new=True,
+    )
+    db.add(second_relation)
+    db.flush()
+
+    _expire_previous_new_relations(db, project.id, previous_new_ids)
+    db.flush()
+
+    assert first_relation.is_new is False
+    assert effective_status(first, first_relation) == "UPDATED"
+    assert second_relation.is_new is True
+    assert effective_status(second, second_relation) == "NEW"
 
 
 def test_three_search_misses_never_mark_active_listing_sold(db):

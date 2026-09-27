@@ -1,5 +1,6 @@
 import argparse
 from contextvars import ContextVar
+import errno
 import hashlib
 import hmac
 import json
@@ -10,6 +11,7 @@ import secrets
 import shutil
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -19,6 +21,7 @@ BROWSER_MANIFEST_NAME = "searchcar-browser-manifest.json"
 PLAYWRIGHT_DRIVER_MANIFEST_NAME = "searchcar-playwright-driver-manifest.json"
 BUNDLED_CHROMIUM_ENV = "SEARCHCAR_CHROMIUM_EXECUTABLE"
 GRACEFUL_SHUTDOWN_SECONDS = 35
+INSTANCE_LOCK_WAIT_SECONDS = 60
 PARENT_WATCH_INTERVAL_SECONDS = 2.0
 desktop_correlation_id: ContextVar[str] = ContextVar(
     "searchcar_desktop_correlation_id", default="desktop-process"
@@ -177,9 +180,11 @@ class DesktopInstanceLock:
         self.path = path
         self.file = None
 
-    def acquire(self) -> None:
+    def acquire(self, *, timeout_seconds: float = 0) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+b")
+        handle = os.fdopen(os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600), "r+b")
+        deadline = time.monotonic() + max(0, timeout_seconds)
+        waiting_logged = False
         try:
             if os.name == "nt":
                 import msvcrt
@@ -187,19 +192,33 @@ class DesktopInstanceLock:
                 if self.path.stat().st_size == 0:
                     handle.write(b"\0")
                     handle.flush()
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
+            while True:
+                try:
+                    if os.name == "nt":
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
 
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as exc:
+                    if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                        raise
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError("desktop_instance_already_running") from exc
+                    if not waiting_logged:
+                        logging.getLogger(__name__).info("Waiting for previous desktop process to release its data lock")
+                        waiting_logged = True
+                    time.sleep(min(0.2, remaining))
+            handle.seek(0)
+            handle.write(f"{os.getpid()}\n".encode("ascii"))
+            handle.truncate()
+            handle.flush()
+        except BaseException:
             handle.close()
-            raise RuntimeError("desktop_instance_already_running") from exc
-        handle.seek(0)
-        handle.truncate()
-        handle.write(f"{os.getpid()}\n".encode("ascii"))
-        handle.flush()
+            raise
         self.file = handle
 
     def release(self) -> None:
@@ -1161,7 +1180,7 @@ def main() -> None:
     )
     configure_structured_logging(paths["logs"])
     instance_lock = DesktopInstanceLock(paths["root"] / "runtime" / "desktop.lock")
-    instance_lock.acquire()
+    instance_lock.acquire(timeout_seconds=INSTANCE_LOCK_WAIT_SECONDS)
     from .maintenance import clear_stale_maintenance_lock
 
     clear_stale_maintenance_lock()

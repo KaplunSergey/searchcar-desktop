@@ -36,7 +36,11 @@ from app.models import (
     SchedulerSetting,
     User,
 )
-from app.sqlite_migrations import migrate_sqlite, sqlite_schema_version
+from app.sqlite_migrations import (
+    _project_car_new_status,
+    migrate_sqlite,
+    sqlite_schema_version,
+)
 from app.worker import (
     _requires_initial_full_scan,
     _reanchor_scheduler_after_manual_projects,
@@ -68,9 +72,9 @@ def add_user(db: Session, username: str = "owner") -> User:
 def test_sqlite_migrations_are_versioned_and_idempotent(tmp_path: Path) -> None:
     engine = sqlite_engine(tmp_path)
 
-    assert migrate_sqlite(engine) == 6
-    assert migrate_sqlite(engine) == 6
-    assert sqlite_schema_version(engine) == 6
+    assert migrate_sqlite(engine) == 7
+    assert migrate_sqlite(engine) == 7
+    assert sqlite_schema_version(engine) == 7
 
     with engine.connect() as connection:
         columns = {
@@ -94,8 +98,37 @@ def test_sqlite_migrations_are_versioned_and_idempotent(tmp_path: Path) -> None:
             "last_completed_run_at",
             "performance_mode",
         } <= scheduler_columns
+        project_car_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns("project_cars")
+        }
+        assert "is_new" in project_car_columns
         assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
         assert connection.execute(text("PRAGMA integrity_check")).scalar_one() == "ok"
+
+
+def test_new_status_migration_preserves_existing_new_cars(tmp_path: Path) -> None:
+    engine = sqlite_engine(tmp_path)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE cars (id INTEGER PRIMARY KEY, status VARCHAR(40) NOT NULL)"
+        )
+        connection.exec_driver_sql(
+            "CREATE TABLE project_cars (project_id INTEGER, car_id INTEGER)"
+        )
+        connection.execute(
+            text("INSERT INTO cars (id, status) VALUES (1, 'NEW'), (2, 'UPDATED')")
+        )
+        connection.execute(
+            text("INSERT INTO project_cars (project_id, car_id) VALUES (7, 1), (7, 2)")
+        )
+        _project_car_new_status(connection)
+
+        rows = connection.execute(
+            text("SELECT car_id, is_new FROM project_cars ORDER BY car_id")
+        ).all()
+
+    assert rows == [(1, 1), (2, 0)]
 
 
 def test_pre_migration_desktop_database_is_adopted(tmp_path: Path) -> None:
@@ -141,7 +174,7 @@ def test_pre_migration_desktop_database_is_adopted(tmp_path: Path) -> None:
             )
         )
 
-    assert migrate_sqlite(engine) == 6
+    assert migrate_sqlite(engine) == 7
     with engine.connect() as connection:
         row = connection.execute(
             text(

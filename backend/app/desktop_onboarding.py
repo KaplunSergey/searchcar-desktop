@@ -53,6 +53,9 @@ def migrate_legacy_desktop_workspace(db: Session) -> str:
         and user.password_hash == DESKTOP_WORKSPACE_PASSWORD_MARKER
         and user.status == "ACTIVE"
     ):
+        # Repair workspaces created when the ORM replaced explicit None with 1.
+        user.project_limit = None
+        db.flush()
         return "workspace"
 
     user.username = DESKTOP_WORKSPACE_USERNAME

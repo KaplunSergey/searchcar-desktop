@@ -1,7 +1,26 @@
+// @ts-check
+
+/**
+ * @typedef {{ project_id: number, project_ids?: number[] }} ReportProject
+ */
+
+/**
+ * @param {ReportProject} item
+ * @returns {number[]}
+ */
 export function reportProjectIds(item) {
   return item.project_ids?.length ? item.project_ids : [item.project_id];
 }
 
+/**
+ * @template {ReportProject & { change: string }} T
+ * @param {T[]} items
+ * @param {string[]} availableChanges
+ * @param {number[]} availableProjectIds
+ * @param {ReadonlySet<string>} excludedChanges
+ * @param {ReadonlySet<number>} excludedProjectIds
+ * @returns {T[]}
+ */
 export function filterReportItems(
   items,
   availableChanges,

@@ -175,6 +175,46 @@ def test_desktop_instance_lock_allows_only_one_backend(tmp_path: Path) -> None:
     second.release()
 
 
+def test_immediate_restart_waits_for_previous_backend_to_release_lock(tmp_path, monkeypatch):
+    path = tmp_path / "desktop.lock"
+    previous = DesktopInstanceLock(path)
+    restarted = DesktopInstanceLock(path)
+    previous.acquire()
+    waits = []
+
+    def finish_previous_shutdown(seconds):
+        waits.append(seconds)
+        assert restarted.file is None
+        previous.release()
+
+    monkeypatch.setattr("app.desktop_runtime.time.sleep", finish_previous_shutdown)
+    try:
+        restarted.acquire(timeout_seconds=2)
+        assert waits
+        assert restarted.file is not None
+        restarted.file.seek(0)
+        assert restarted.file.read().decode("ascii").strip() == str(os.getpid())
+    finally:
+        previous.release()
+        restarted.release()
+
+
+def test_restart_lock_wait_is_bounded_and_does_not_steal_lock(tmp_path):
+    path = tmp_path / "desktop.lock"
+    previous = DesktopInstanceLock(path)
+    restarted = DesktopInstanceLock(path)
+    previous.acquire()
+    try:
+        with pytest.raises(RuntimeError, match="desktop_instance_already_running"):
+            restarted.acquire(timeout_seconds=0.01)
+        assert restarted.file is None
+        assert previous.file is not None
+    finally:
+        previous.release()
+    restarted.acquire()
+    restarted.release()
+
+
 def test_parent_watchdog_requests_shutdown_when_shell_disappears(
     monkeypatch,
 ) -> None:
