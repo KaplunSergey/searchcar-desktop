@@ -353,7 +353,17 @@ def apply_price_filter(
     matches = list(_PRICE_RANGE_RE.finditer(action))
     if len(matches) > 1:
         raise PriceFilterUrlError("Encar search URL contains multiple price filters")
-    if matches:
+    price_condition = None
+    if minimum_krw is not None or maximum_krw is not None:
+        minimum = "" if minimum_krw is None else f"{minimum_krw // ENCAR_PRICE_UNIT_KRW:,}"
+        maximum = "" if maximum_krw is None else f"{maximum_krw // ENCAR_PRICE_UNIT_KRW:,}"
+        price_condition = f"Price.range({minimum}..{maximum})"
+    if matches and price_condition is not None:
+        # Replace only the price: Encar uses different separators after
+        # range conditions and nested groups, both of which end in ')'.
+        start, end = matches[0].span()
+        action = action[:start] + price_condition + action[end:]
+    elif matches:
         start, end = matches[0].span()
         if action[end:].startswith("._."):
             end += 3
@@ -370,28 +380,16 @@ def apply_price_filter(
             action = "(And.)"
     toggles = state.get("toggle")
     toggles = dict(toggles) if isinstance(toggles, dict) else {}
-    if minimum_krw is None and maximum_krw is None:
+    if price_condition is None:
         toggles["4"] = 0
     else:
-        if action == "(And.)":
-            action_prefix = "(And"
-            separator = "."
-        elif action.endswith(".)"):
-            action_prefix = action[:-2]
-            # A nested group already ends in ')'. Its separator is '_.',
-            # while a plain condition needs '._.'.
-            separator = "_." if action_prefix.endswith(")") else "._."
-        elif action.endswith(")"):
-            # Foreign-car links can end in nested filter groups, for example
-            # ``...(C.Manufacturer.Audi._.ModelGroup.A3.)))``.  The price
-            # condition belongs in the outer ``And`` group.
-            action_prefix = action[:-1]
-            separator = "_."
-        else:
-            raise PriceFilterUrlError("Encar search URL has an unsupported action")
-        minimum = "" if minimum_krw is None else f"{minimum_krw // ENCAR_PRICE_UNIT_KRW:,}"
-        maximum = "" if maximum_krw is None else f"{maximum_krw // ENCAR_PRICE_UNIT_KRW:,}"
-        action = f"{action_prefix}{separator}Price.range({minimum}..{maximum}).)"
+        if not matches:
+            if not action.endswith(")"):
+                raise PriceFilterUrlError("Encar search URL has an unsupported action")
+            # Keep the existing condition's terminator, removing only the
+            # outer And's closing parenthesis before adding a condition.
+            separator = "" if action == "(And.)" else "_."
+            action = f"{action[:-1]}{separator}{price_condition}.)"
         toggles["4"] = 1
     state = {**state, "action": action, "toggle": toggles, "page": 1, "cursor": None}
     parts = urlsplit(url)

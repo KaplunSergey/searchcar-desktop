@@ -963,7 +963,7 @@ test("transfer approval rejects an inactive license without moving its device", 
   );
   assert.equal(requested.response.status, 200);
   await database
-    .prepare("UPDATE licenses SET status = 'REVOKED' WHERE id = ?")
+    .prepare("UPDATE licenses SET status = 'SUSPENDED' WHERE id = ?")
     .bind(trial.json.data.license_id)
     .run();
 

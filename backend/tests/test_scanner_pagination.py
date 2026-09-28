@@ -161,7 +161,7 @@ def test_price_filter_replaces_first_condition_in_encar_link():
     assert extract_price_filter(original) == (None, 10_000_000)
     changed = apply_price_filter(original, 15_000_000, 25_000_000)
     assert decoded_state(changed)["action"] == (
-        "(And.Hidden.N._.Manufacturer.현대._.Price.range(1,500..2,500).)"
+        "(And.Price.range(1,500..2,500)._.Hidden.N._.Manufacturer.현대.)"
     )
     assert extract_price_filter(changed) == (15_000_000, 25_000_000)
 
@@ -200,6 +200,32 @@ def test_price_filter_replaces_only_condition_in_encar_link():
 
     changed = apply_price_filter(original, 15_000_000, 25_000_000)
     assert decoded_state(changed)["action"] == "(And.Price.range(1,500..2,500).)"
+
+
+@pytest.mark.parametrize("existing_price", [True, False])
+def test_i30_custom_price_preserves_year_range_separator(existing_price):
+    from urllib.parse import quote
+
+    action = (
+        "(And.Hidden.N._.(C.CarType.Y._.(C.Manufacturer.현대._.ModelGroup.i30.))"
+        "_.FuelType.가솔린._.Year.range(201800..202699).)"
+    )
+    if existing_price:
+        action = action.replace("(And.", "(And.Price.range(..1000)._.", 1)
+    state = {**decoded_state(modern_search_url()), "action": action}
+    url = "https://www.encar.com/dc/dc_carsearchlist.do?carType=kor#!" + quote(
+        json.dumps(state, ensure_ascii=False), safe=""
+    )
+
+    changed = apply_price_filter(url, 0, 10_000_000)
+
+    expected = (
+        action.replace("Price.range(..1000)", "Price.range(0..1,000)")
+        if existing_price
+        else action[:-1] + "_.Price.range(0..1,000).)"
+    )
+    assert decoded_state(changed)["action"] == expected
+    assert extract_price_filter(changed) == (0, 10_000_000)
 
 
 def test_price_filter_is_added_to_encar_url_that_has_no_price_range():
