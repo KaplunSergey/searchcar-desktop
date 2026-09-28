@@ -17,6 +17,7 @@ from app.scanner import (
     extract_price_filter,
     search_page_number,
     search_url_for_page,
+    _wait_for_search_results,
 )
 
 
@@ -145,6 +146,60 @@ def test_price_filter_replaces_existing_encar_range_without_touching_other_filte
     assert after["action"].replace("._.Price.range(1,500..2,500)", "") == state[
         "action"
     ].replace("._.Price.range(1,000..3,000)", "")
+
+
+def test_price_filter_replaces_first_condition_in_encar_link():
+    from urllib.parse import quote
+
+    state = decoded_state(modern_search_url())
+    state["action"] = "(And.Price.range(..1000)._.Hidden.N._.Manufacturer.현대.)"
+    original = (
+        "https://www.encar.com/dc/dc_carsearchlist.do?carType=kor#!"
+        + quote(json.dumps(state, ensure_ascii=False, separators=(",", ":")), safe="")
+    )
+
+    assert extract_price_filter(original) == (None, 10_000_000)
+    changed = apply_price_filter(original, 15_000_000, 25_000_000)
+    assert decoded_state(changed)["action"] == (
+        "(And.Hidden.N._.Manufacturer.현대._.Price.range(1,500..2,500).)"
+    )
+    assert extract_price_filter(changed) == (15_000_000, 25_000_000)
+
+
+def test_price_filter_preserves_separator_after_nested_group():
+    from urllib.parse import quote
+
+    state = decoded_state(modern_search_url())
+    state["action"] = (
+        "(And.Mileage.range(..100000)._."
+        "(Or.FuelType.가솔린+전기._.FuelType.가솔린.)_."
+        "Price.range(1,600..2,900).)"
+    )
+    original = (
+        "https://www.encar.com/dc/dc_carsearchlist.do?carType=kor#!"
+        + quote(json.dumps(state, ensure_ascii=False, separators=(",", ":")), safe="")
+    )
+
+    changed = apply_price_filter(original, 0, 26_000_000)
+
+    assert decoded_state(changed)["action"] == state["action"].replace(
+        "Price.range(1,600..2,900)", "Price.range(0..2,600)"
+    )
+    assert extract_price_filter(changed) == (0, 26_000_000)
+
+
+def test_price_filter_replaces_only_condition_in_encar_link():
+    from urllib.parse import quote
+
+    state = decoded_state(modern_search_url())
+    state["action"] = "(And.Price.range(..1000).)"
+    original = (
+        "https://www.encar.com/dc/dc_carsearchlist.do?carType=kor#!"
+        + quote(json.dumps(state, ensure_ascii=False, separators=(",", ":")), safe="")
+    )
+
+    changed = apply_price_filter(original, 15_000_000, 25_000_000)
+    assert decoded_state(changed)["action"] == "(And.Price.range(1,500..2,500).)"
 
 
 def test_price_filter_is_added_to_encar_url_that_has_no_price_range():
@@ -321,6 +376,42 @@ def test_network_outage_retries_once_then_returns_timeout() -> None:
         _open_page(page, "https://www.encar.com/list")
 
     assert page.waits == [2500]
+
+
+def test_search_waits_for_result_links_not_unrelated_car_ids():
+    class DelayedPage:
+        def __init__(self):
+            self.waits = []
+            self.mouse = self
+
+        def locator(self, selector):
+            self.selector = selector
+            return self
+
+        def inner_text(self, **_kwargs):
+            return "국산차 검색 시작"
+
+        def count(self):
+            return int(1000 in self.waits)
+
+        def content(self):
+            return '<a href="/cars/detail/41000001">recently viewed</a>'
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+        def wheel(self, *_args):
+            pass
+
+    page = DelayedPage()
+    _wait_for_search_results(page)
+    assert page.waits[:1] == [1000]
+
+
+def test_encar_traffic_restriction_is_classified_as_captcha():
+    assert scanner._has_captcha(
+        "서비스 이용 제한됨: 비정상적인 트래픽이 감지되었습니다"
+    )
 
 
 def test_captcha_search_page_is_reported_before_any_listing_is_read(monkeypatch) -> None:

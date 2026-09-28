@@ -34,7 +34,10 @@ from .parser import (
     parse_year_month,
 )
 
-CAPTCHA_MARKERS = ("captcha", "자동입력 방지", "로봇이 아닙니다", "보안문자")
+CAPTCHA_MARKERS = (
+    "captcha", "자동입력 방지", "로봇이 아닙니다", "보안문자",
+    "서비스 이용 제한됨", "비정상적인 트래픽",
+)
 SOLD_MARKERS = (
     "이 차량은 판매되었거나 삭제된 차량입니다",
     "판매되었거나 삭제된 차량",
@@ -101,7 +104,7 @@ class PriceFilterUrlError(ScanError):
 ENCAR_PRICE_UNIT_KRW = 10_000
 ENCAR_MAX_PRICE_KRW = 100_000_000
 _PRICE_RANGE_RE = re.compile(
-    r"(?:\._\.|_\.)Price\.range\((?P<minimum>[\d,]*)\.\.(?P<maximum>[\d,]*)\)"
+    r"Price\.range\((?P<minimum>[\d,]*)\.\.(?P<maximum>[\d,]*)\)"
 )
 
 
@@ -174,7 +177,12 @@ def resolve_listing_identity(
 def _wait_for_search_results(page, wait_seconds: int = 8) -> None:
     deadline = utcnow().timestamp() + max(wait_seconds, 3)
     while utcnow().timestamp() < deadline:
-        if extract_car_id(page.content()):
+        text = page.locator("body").inner_text(timeout=8_000)
+        if _has_captcha(text) or any(marker in text for marker in NO_RESULTS_MARKERS):
+            break
+        if page.locator(
+            '#rySch_result [data-role="list_container"] a[href*="carid="]'
+        ).count():
             break
         page.wait_for_timeout(1000)
     for _ in range(3):
@@ -342,17 +350,37 @@ def apply_price_filter(
     action = state.get("action") if state else None
     if not isinstance(action, str):
         raise PriceFilterUrlError("Encar search URL does not expose filter state")
-    if len(_PRICE_RANGE_RE.findall(action)) > 1:
+    matches = list(_PRICE_RANGE_RE.finditer(action))
+    if len(matches) > 1:
         raise PriceFilterUrlError("Encar search URL contains multiple price filters")
-    action = _PRICE_RANGE_RE.sub("", action)
+    if matches:
+        start, end = matches[0].span()
+        if action[end:].startswith("._."):
+            end += 3
+        elif action[end:].startswith("_."):
+            end += 2
+        elif action[:start].endswith("._."):
+            start -= 3
+        elif action[:start].endswith("_."):
+            start -= 2
+        elif not action[:start].endswith("And."):
+            raise PriceFilterUrlError("Encar search URL has an unsupported price condition")
+        action = action[:start] + action[end:]
+        if action == "(And..)":
+            action = "(And.)"
     toggles = state.get("toggle")
     toggles = dict(toggles) if isinstance(toggles, dict) else {}
     if minimum_krw is None and maximum_krw is None:
         toggles["4"] = 0
     else:
-        if action.endswith(".)"):
+        if action == "(And.)":
+            action_prefix = "(And"
+            separator = "."
+        elif action.endswith(".)"):
             action_prefix = action[:-2]
-            separator = "._."
+            # A nested group already ends in ')'. Its separator is '_.',
+            # while a plain condition needs '._.'.
+            separator = "_." if action_prefix.endswith(")") else "._."
         elif action.endswith(")"):
             # Foreign-car links can end in nested filter groups, for example
             # ``...(C.Manufacturer.Audi._.ModelGroup.A3.)))``.  The price
