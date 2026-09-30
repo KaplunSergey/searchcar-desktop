@@ -59,6 +59,9 @@ const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const SUPPORT_REPORT_PREFIX: &str = "searchcar-support-";
 
+#[cfg(any(windows, test))]
+mod windows_update;
+
 enum StartupWait {
     Ready,
     Terminated,
@@ -810,11 +813,29 @@ fn start_update_check(app: &tauri::AppHandle, interactive: bool) {
 
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        let result = match app_handle
-            .updater_builder()
-            .timeout(UPDATE_CHECK_TIMEOUT)
-            .build()
+        let builder = app_handle.updater_builder().timeout(UPDATE_CHECK_TIMEOUT);
+        #[cfg(windows)]
+        let builder = match std::env::current_exe()
+            .map_err(|error| error.to_string())
+            .and_then(|executable| windows_update::install_directory_argument(&executable))
         {
+            // NSIS requires /D to be the final, unquoted argument. Updater
+            // 2.10.1 appends installer_args after its /UPDATE and /ARGS flags.
+            // Never select a different installation through stale registry data.
+            Ok(directory) => builder.clear_installer_args().installer_arg(directory),
+            Err(error) => {
+                set_update_status(&app_handle, "failed", None);
+                finish_update_operation(&app_handle);
+                show_update_result(
+                    &app_handle,
+                    "Ошибка обновления",
+                    format!("Не удалось определить папку приложения: {error}"),
+                    MessageDialogKind::Error,
+                );
+                return;
+            }
+        };
+        let result = match builder.build() {
             Ok(updater) => updater.check().await.map_err(|error| error.to_string()),
             Err(error) => Err(error.to_string()),
         };

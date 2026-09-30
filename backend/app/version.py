@@ -1,3 +1,3 @@
 """Build version shared by the desktop backend and API."""
 
-APP_VERSION = "0.3.1"
+APP_VERSION = "0.4.0"

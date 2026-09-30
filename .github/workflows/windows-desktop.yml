@@ -234,6 +234,16 @@ jobs:
             "work/windows-smoke/installer.json" -Encoding utf8
           Get-Content "work/windows-smoke/installer.json"
 
+      - name: Verify Windows update directory and shortcuts
+        shell: pwsh
+        run: |
+          cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml --lib windows_update
+          if ($LASTEXITCODE -ne 0) { throw "Windows updater tests failed" }
+          scripts/windows_installer_update_smoke.ps1 `
+            -Installer "work/windows-artifact/SearchCar-Desktop-Windows-x64-setup.exe"
+          scripts/diagnose_windows_installation.ps1 `
+            -OutputPath "work/windows-smoke/installation.json"
+
       - name: Upload Windows pilot artifacts
         uses: actions/upload-artifact@v4
         with:

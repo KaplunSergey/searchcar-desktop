@@ -195,6 +195,40 @@ add platform signing and updater signatures in a later milestone.
 
 ## Required smoke tests
 
+### Windows update installation continuity
+
+The Windows updater passes the running executable's parent directory as the
+final NSIS `/D=...` argument (unquoted even for spaces). Without this argument,
+NSIS uses the saved registry location or the default LocalAppData directory;
+stale registration can update a different copy while a shortcut opens the old
+one. Keep the product name, publisher, binary name and install scope stable.
+
+The Windows CI workflow runs `scripts/windows_installer_update_smoke.ps1` on
+its disposable runner: install in a custom Unicode path, point registration
+elsewhere, update with `/D`, and check the executable, registration, Desktop
+and Start menu shortcuts. This test must never run on a user's computer.
+
+For a reported old version after update, run `Diagnose SearchCar for Windows.cmd`
+on the affected Windows computer while SearchCar is open. It saves
+`SearchCar-installation-*.json` on the Desktop. Run it once after updater restart
+and once after launch through the problematic shortcut. The report contains
+process paths, registry locations, shortcut targets, executable versions and
+hashes, including local usernames in paths. It does not change installations
+or collect database, license secrets or cookies.
+
+Compare the two reports before removing anything. A second backend extraction
+cache is not a second installed desktop application. If duplicate installed
+apps are confirmed, back up the workspace and identify the active installation
+and its shortcuts before using the obsolete installation's uninstaller; do not
+delete app data. Arbitrary old directories, copied executables, other users'
+installations and pinned shortcuts are not automatically deleted or retargeted.
+
+The fix controls updates initiated by a build containing it. It cannot change
+the updater in an already installed old release; a one-time manual install into
+the verified existing path may be needed to repair an affected machine.
+
+### Runtime checks
+
 - compiled sidecar `check` creates SQLite with FK, WAL and busy timeout;
 - compiled sidecar starts `/api/health` and serves the SPA only after bootstrap;
 - browser check creates a non-empty PNG using the bundled headless shell;
