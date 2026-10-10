@@ -108,6 +108,8 @@ The Worker now provides the Phase 8 owner-session foundation:
 - `POST /v1/owner/license-sources` replaces the allowed sources for one
   license. Its JSON body is `{ "license_id": "…", "source_keys": ["encar"] }`;
   an empty array deliberately disables all parser sources for that license;
+  `["*"]` restores all current and future active sites (wildcard cannot be mixed
+  with explicit keys). The owner panel exposes “Все сайты, включая новые”;
 - `POST /v1/owner/licenses/delete` irreversibly revokes one license. It
   requires `{ "license_id": "…", "confirmation": "DELETE" }`, deactivates
   its device and unused codes, and records `LICENSE_DELETED` in the audit log;
@@ -130,10 +132,23 @@ source control or browser query parameters.
 ## Source entitlements
 
 Migration `0003_source_entitlements.sql` creates `source_catalog` and
-`license_sources`. It grants `encar` to existing active licenses, and new
-trials/new owner-created licenses also receive it by default. The current
-signed lease contains `entitlements.sources`; the desktop backend permits an
-Encar scan only when that signed list contains `encar`.
+`license_sources`. Originally it granted only `encar` by default.
+Migration `0006_default_source_access.sql` makes new trial/paid licenses default
+to all active sites (`licenses.sources_all = 1`). Existing owner restrictions,
+including empty grants, retain their explicit policy via the successful
+`LICENSE_SOURCES_UPDATED` audit record. Default legacy Encar grants remain
+compatible but no longer limit an all-sites policy. An all-policy lease still
+contains explicit signed active catalog keys, not a wildcard: older applications
+can read it, and normal refresh picks up newly activated catalog sites. Only
+shipped/approved sources should be activated in the production catalog; this
+change does not activate Copart or IAA.
+
+Deploy separately through the existing authorized license-service workflow:
+back up D1, apply migration 0006 **before** deploying the new Worker, then smoke
+trial/paid check, subset/empty/all and owner dashboard. Local implementation and
+Miniflare tests do not change production rights. Rolling back only the Worker
+to the old grants-only implementation loses all-policy behavior; do not remove
+the migration or assume an old Worker honors `sources_all`.
 
 Source access and license lifecycle are deliberately independent. Saving an
 empty source list does not suspend, unbind or delete the license. The next

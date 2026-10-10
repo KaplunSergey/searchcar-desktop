@@ -360,6 +360,41 @@ def test_startup_recovery_preserves_partial_payload(tmp_path: Path) -> None:
         assert project_run.error_code == "APP_INTERRUPTED"
 
 
+def test_restart_terminalizes_partial_cancellation_without_losing_success(tmp_path: Path) -> None:
+    engine = sqlite_engine(tmp_path)
+    migrate_sqlite(engine)
+    with Session(engine) as db:
+        user = add_user(db)
+        projects = [Project(owner_id=user.id, name=name, name_key=name.lower(),
+                            search_url=f"https://example.invalid/search/{name}")
+                    for name in ("Done", "Cancelling", "Pending")]
+        db.add_all(projects)
+        db.flush()
+        ids = [project.id for project in projects]
+        statuses = dict(zip(map(str, ids), ("SUCCEEDED", "CANCEL_REQUESTED", "QUEUED")))
+        report = [{"project_id": ids[0], "car_id": 7, "change": "NEW"}]
+        run = ScanRun(owner_id=user.id, kind="PROJECTS", status="RUNNING",
+                      payload={"project_ids": ids, "cancelled_project_ids": [ids[1]],
+                               "project_statuses": statuses, "report": report})
+        db.add(run)
+        db.flush()
+        db.add_all([ProjectScanRun(scan_run_id=run.id, project_id=project_id,
+                                  status=statuses[str(project_id)]) for project_id in ids])
+        db.commit()
+        run_id = run.id
+
+    assert recover_interrupted_jobs(engine) == [run_id]
+    assert recover_interrupted_jobs(engine) == []
+    with Session(engine) as db:
+        run = db.get(ScanRun, run_id)
+        actual = {row.project_id: row.status for row in db.scalars(
+            select(ProjectScanRun).where(ProjectScanRun.scan_run_id == run_id))}
+        assert run.status == "INTERRUPTED"
+        assert actual == {ids[0]: "SUCCEEDED", ids[1]: "CANCELLED", ids[2]: "INTERRUPTED"}
+        assert run.payload["project_statuses"] == {str(key): value for key, value in actual.items()}
+        assert run.payload["report"] == report
+
+
 def test_shutdown_cancels_queue_and_requests_running_job(tmp_path: Path) -> None:
     engine = sqlite_engine(tmp_path)
     migrate_sqlite(engine)
@@ -606,6 +641,65 @@ def test_scheduler_always_enqueues_one_overdue_run(
         assert runs[0].payload["trigger"] == "AUTOMATIC"
         setting = db.scalar(select(SchedulerSetting))
         assert setting.next_run_at == now + timedelta(hours=1)
+
+
+def test_scheduler_skips_busy_project_but_queues_other_due_project(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    engine = sqlite_engine(tmp_path)
+    migrate_sqlite(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    with factory.begin() as db:
+        user = add_user(db)
+        busy = Project(
+            owner_id=user.id,
+            name="Busy",
+            name_key="busy",
+            search_url="https://www.encar.com/dc/dc_carsearchlist.do?busy=1",
+            auto_update=True,
+        )
+        free = Project(
+            owner_id=user.id,
+            name="Free",
+            name_key="free",
+            search_url="https://www.encar.com/dc/dc_carsearchlist.do?free=1",
+            auto_update=True,
+        )
+        db.add_all([busy, free])
+        db.flush()
+        setting = SchedulerSetting(
+            user_id=user.id,
+            enabled=True,
+            paused=False,
+            interval_minutes=60,
+            next_run_at=now - timedelta(minutes=20),
+        )
+        db.add(setting)
+        db.flush()
+        db.add_all(
+            [
+                ScheduledProject(scheduler_id=setting.id, project_id=busy.id),
+                ScheduledProject(scheduler_id=setting.id, project_id=free.id),
+                ScanRun(
+                    owner_id=user.id,
+                    kind="PROJECTS",
+                    status="RUNNING",
+                    payload={"project_ids": [busy.id], "trigger": "MANUAL"},
+                ),
+            ]
+        )
+
+    monkeypatch.setattr("app.worker.SessionLocal", factory)
+    enqueue_scheduled(now=now)
+
+    with factory() as db:
+        queued = db.scalar(select(ScanRun).where(ScanRun.status == "QUEUED"))
+        assert queued is not None
+        assert queued.payload["project_ids"] == [free.id]
+        assert queued.payload["trigger"] == "AUTOMATIC"
+        assert queued.payload["project_plans"][0]["project_id"] == free.id
 
 
 def test_scheduler_enqueues_one_catch_up_and_tray_can_pause(

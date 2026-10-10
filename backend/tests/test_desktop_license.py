@@ -89,6 +89,58 @@ def decision(state, now):
     )
 
 
+def install_sources(state, sources, *, missing=False):
+    if missing:
+        state["payload"]["entitlements"].pop("sources", None)
+    else:
+        state["payload"]["entitlements"]["sources"] = sources
+    signature = state["private_key"].sign(
+        (LEASE_MESSAGE_PREFIX + canonical_json(state["payload"])).encode("utf-8")
+    )
+    (state["directory"] / "lease.json").write_text(
+        json.dumps({"payload": state["payload"], "signature": b64url(signature)}),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("missing", [True, False])
+def test_default_and_wildcard_allow_all_shipped_sources(tmp_path, monkeypatch, missing):
+    from types import SimpleNamespace
+    state = license_state(tmp_path)
+    install_sources(state, ["*"], missing=missing)
+    monkeypatch.setattr("app.sources.registry.list_sources", lambda: tuple(
+        SimpleNamespace(key=key) for key in ("encar", "copart", "iaa")
+    ))
+    result = decision(state, state["now"])
+    assert result.can_search is True
+    assert result.sources == ("copart", "encar", "iaa")
+
+
+@pytest.mark.parametrize("sources", [None, "*", ["*", "encar"], ["bad/key"], [1]])
+def test_invalid_signed_source_policy_fails_closed(tmp_path, sources):
+    state = license_state(tmp_path)
+    install_sources(state, sources)
+    assert decision(state, state["now"]).reason == "LICENSE_SOURCES_INVALID"
+
+
+def test_signed_source_access_changes_without_reinstall_and_keeps_expiry(tmp_path):
+    from app.desktop_license import require_search_entitlement, SearchEntitlementError
+    state = license_state(tmp_path)
+    kwargs = dict(now=state["now"], data_dir=tmp_path,
+                  public_keys=state["public_keys"], mode="required")
+    install_sources(state, ["*"])
+    require_search_entitlement("encar", **kwargs)
+    install_sources(state, ["copart"])
+    with pytest.raises(SearchEntitlementError, match="LICENSE_SOURCE_NOT_ALLOWED"):
+        require_search_entitlement("encar", **kwargs)
+    require_search_entitlement("copart", **kwargs)
+    install_sources(state, [])
+    assert decision(state, state["now"]).can_search is False
+    install_sources(state, ["*"])
+    require_search_entitlement("encar", **kwargs)
+    assert decision(state, state["now"] + timedelta(hours=49)).reason == "LICENSE_LEASE_EXPIRED"
+
+
 def test_valid_signed_lease_allows_offline_search(tmp_path) -> None:
     state = license_state(tmp_path)
 

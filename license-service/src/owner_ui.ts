@@ -98,7 +98,7 @@ const OWNER_APP = String.raw`<!doctype html>
       const sourceNames = new Map(data.sources.map(x => [x.source_key, x.display_name]));
       const licenseSources = new Map(data.licenses.map(x => [x.id, []]));
       data.license_sources.forEach(x => { if (licenseSources.has(x.license_id)) licenseSources.get(x.license_id).push(sourceNames.get(x.source_key) || x.source_key); });
-      table('licenses',['Клиент','Тип','Статус','Источники','Действует до','Устройство'],data.licenses.map(x=>[x.customer_name,x.kind,x.deleted_at ? 'УДАЛЕНА' : x.status,(licenseSources.get(x.id) || []).join(', '),x.perpetual ? 'Бессрочно' : x.expires_at,x.active_device_label || x.active_device_id]));
+      table('licenses',['Клиент','Тип','Статус','Источники','Действует до','Устройство'],data.licenses.map(x=>[x.customer_name,x.kind,x.deleted_at ? 'УДАЛЕНА' : x.status,x.sources_all ? 'Все сайты, включая новые' : (licenseSources.get(x.id) || []).join(', ') || 'Нет доступа',x.perpetual ? 'Бессрочно' : x.expires_at,x.active_device_label || x.active_device_id]));
       table('codes',['Клиент','Тип','Срок','Подсказка','Статус'],data.activation_codes.map(x=>[x.customer_name,x.license_kind,x.makes_perpetual ? 'Бессрочно' : x.duration_months+' мес.',x.code_hint,x.used_at ? 'Использован' : 'Активен']));
       table('transfers',['Клиент','Код','Устройство','Статус','Истекает'],data.transfers.map(x=>[x.customer_name,x.public_code_hint,x.requested_label,x.status,x.expires_at]));
       table('devices',['Клиент','Лицензия','Устройство','Состояние','Последняя связь'],data.devices.map(x=>[x.customer_name,x.license_kind,x.label,x.is_active ? 'Активно' : 'Отключено',x.last_seen_at]));
@@ -113,8 +113,10 @@ const OWNER_APP = String.raw`<!doctype html>
       root.replaceChildren();
       const available=data.sources.filter(x=>x.is_active);
       if (!selected) { root.textContent='Сначала выберите лицензию.'; return; }
-      if (!available.length) { root.textContent='Нет доступных источников.'; return; }
-      available.forEach(source => { const label=document.createElement('label'), input=document.createElement('input'), text=document.createElement('span'); label.className='source-option'; input.type='checkbox'; input.name='source_key'; input.value=source.source_key; input.checked=granted.has(source.source_key); text.textContent=source.display_name+' ('+source.source_key+')'; label.append(input,text); root.append(label); });
+      const allLabel=document.createElement('label'), allInput=document.createElement('input'), allText=document.createElement('span');
+      allLabel.className='source-option'; allInput.type='checkbox'; allInput.name='all_sources'; allInput.checked=!!data.licenses.find(x=>x.id===selected).sources_all; allText.textContent='Все сайты, включая новые'; allLabel.append(allInput,allText); root.append(allLabel);
+      available.forEach(source => { const label=document.createElement('label'), input=document.createElement('input'), text=document.createElement('span'); label.className='source-option'; input.type='checkbox'; input.name='source_key'; input.value=source.source_key; input.checked=granted.has(source.source_key); input.disabled=allInput.checked; text.textContent=source.display_name+' ('+source.source_key+')'; label.append(input,text); root.append(label); });
+      allInput.addEventListener('change', () => root.querySelectorAll('input[name="source_key"]').forEach(input => { input.disabled=allInput.checked; }));
     };
     const renderTransferSummary = () => {
       const root=$('transfer-summary'), data=state.data;
@@ -139,7 +141,7 @@ const OWNER_APP = String.raw`<!doctype html>
     form('license-form', f => mutation('/v1/owner/licenses',{customer_id:f.get('customer_id')}), 'dashboard-message');
     form('code-form', async f => { const data=await mutation('/v1/owner/activation-codes',{license_id:f.get('license_id'),duration:f.get('duration')}); return {notice:'Код создан. Скопируйте и передайте пользователю: '+data.activation_code}; }, 'dashboard-message');
     form('code-diagnostic-form', async f => { const data=await mutation('/v1/owner/activation-codes/diagnose',{activation_code:f.get('activation_code')}); const labels={STABLE_V2:'Код найден: текущий стабильный формат.',LEGACY_CURRENT_PEPPER:'Код найден: старый формат с текущим CODE_PEPPER.',NOT_FOUND:'Точный код не найден.'}; const states={AVAILABLE:' Код доступен для активации.',USED:' Код уже использован.',EXPIRED:' Срок кода истёк.',LICENSE_NOT_ACTIVE:' Лицензия кода неактивна.',NOT_FOUND:''}; const hint=data.hint_matches.length ? ' Записей с такой подсказкой в D1: '+data.hint_matches.length+'.' : ' Записей с такой подсказкой в D1 нет.'; return {notice:labels[data.matched_by]+states[data.availability]+hint}; }, 'dashboard-message');
-    form('source-form', f => mutation('/v1/owner/license-sources',{license_id:f.get('license_id'),source_keys:f.getAll('source_key')}), 'dashboard-message');
+    form('source-form', f => mutation('/v1/owner/license-sources',{license_id:f.get('license_id'),source_keys:f.has('all_sources') ? ['*'] : f.getAll('source_key')}), 'dashboard-message');
     form('delete-license-form', f => { const id=String(f.get('license_id') || ''); const license=state.data.licenses.find(x=>x.id===id); const label=license ? license.customer_name+' · '+id.slice(0,8) : id; if (!window.confirm('Удалить лицензию '+label+'? Это действие нельзя отменить.')) return {notice:'Удаление отменено.'}; return mutation('/v1/owner/licenses/delete',{license_id:id,confirmation:'DELETE'}).then(()=>({notice:'Лицензия удалена. После следующей проверки приложение очистит локальную лицензию.'})); }, 'dashboard-message');
     form('transfer-form', async f => {
       const transfer=state.data.transfers.find(x=>x.id===f.get('transfer_code'));

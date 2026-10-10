@@ -231,6 +231,15 @@ the verified existing path may be needed to repair an affected machine.
 
 ### Runtime checks
 
+Before compiling, both native workflows run
+`python scripts/multisource_acceptance_smoke.py --report-dir work/queue-smoke`.
+It checks the shared sequential queue with fake sources, the HTTP API and
+prepared native Chromium/Node resources using disposable databases/storage.
+JSON resource reports and JUnit XML are saved as a separate artifact even
+when a later build step fails. This is source-runtime evidence, not a compiled
+or installed-app smoke and not live Copart/IAA access. See
+[MULTISOURCE_ACCEPTANCE.md](MULTISOURCE_ACCEPTANCE.md) for commands and open gates.
+
 - compiled sidecar `check` creates SQLite with FK, WAL and busy timeout;
 - compiled sidecar starts `/api/health` and serves the SPA only after bootstrap;
 - browser check creates a non-empty PNG using the bundled headless shell;

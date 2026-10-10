@@ -1,9 +1,11 @@
 import os
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 from uuid import uuid4
 
 from sqlalchemy import select, update
@@ -12,7 +14,7 @@ from .database import SessionLocal, engine, settings
 from .desktop_runtime import desktop_playwright
 from .detail_workers import DetailTask, DetailWorkerPool
 from .external_links import validated_external_url
-from .job_queue import claim_next_job
+from .job_queue import SCAN_COMMAND_LOCK, claim_next_job, project_execution_order
 from .live_updates import publish_scan_update
 from .models import (
     Car,
@@ -42,6 +44,14 @@ from .money import comparable_money, encar_money_values, payload_money_values
 
 class ScanCancelled(Exception):
     pass
+
+
+class ProjectScanCancelled(Exception):
+    pass
+
+
+class SourceBlockedError(ScanError):
+    code = "CAPTCHA"
 
 
 def _reanchor_scheduler_after_manual_projects(
@@ -127,12 +137,53 @@ def _raise_if_cancelled(db, job: ScanRun) -> None:
         raise ScanCancelled()
 
 
+def _raise_if_project_cancelled(db, job: ScanRun, project_id: int) -> None:
+    _raise_if_cancelled(db, job)
+    if project_id in set((job.payload or {}).get("cancelled_project_ids") or []):
+        raise ProjectScanCancelled()
+    if hasattr(job, "owner_id") and db.scalar(
+        select(ProjectScanRun.id).where(
+            ProjectScanRun.scan_run_id == job.id,
+            ProjectScanRun.project_id == project_id,
+            ProjectScanRun.status.in_(["CANCEL_REQUESTED", "CANCELLED"]),
+        ).limit(1)
+    ) is not None:
+        raise ProjectScanCancelled()
+
+
 def _owned_project(db, project_id: int, owner_id: int) -> Project | None:
     return db.scalar(
         select(Project).where(
             Project.id == project_id,
             Project.owner_id == owner_id,
         )
+    )
+
+
+def _project_for_execution(project: Project, payload: dict):
+    plan = next(
+        (
+            item
+            for item in payload.get("project_plans") or []
+            if item.get("project_id") == project.id
+        ),
+        None,
+    )
+    if plan is None:
+        return project
+    return SimpleNamespace(
+        id=project.id,
+        owner_id=project.owner_id,
+        source_key=plan["source_key"],
+        name=plan["name"],
+        search_url=plan["search_url"],
+        scan_mode=plan["scan_mode"],
+        search_page_mode=plan["search_page_mode"],
+        price_filter_mode=plan["price_filter_mode"],
+        price_min_krw=plan["price_min_krw"],
+        price_max_krw=plan["price_max_krw"],
+        price_filter_revision=plan["price_filter_revision"],
+        price_filter_baseline_revision=plan["price_filter_baseline_revision"],
     )
 
 
@@ -154,7 +205,7 @@ def _finish_cancelled_job(
     interrupted_by_sleep = interruption_reason == "SYSTEM_SLEEP"
     terminal_status = "INTERRUPTED_SLEEP" if interrupted_by_sleep else "CANCELLED"
     for project_run in project_runs:
-        if project_run.status in {"QUEUED", "RUNNING"}:
+        if project_run.status in {"QUEUED", "RUNNING", "CANCEL_REQUESTED"}:
             project_run.status = terminal_status
             project_run.error_code = "SYSTEM_SLEEP" if interrupted_by_sleep else None
         project_statuses[str(project_run.project_id)] = project_run.status
@@ -252,8 +303,10 @@ def _publish_project_results(
     )
 
 
-def _material_changes(old: dict, new: dict) -> list[dict]:
-    return get_source("encar").material_changes(old, new)
+def _material_changes(
+    old: dict, new: dict, source_key: str = "encar"
+) -> list[dict]:
+    return get_source(source_key).material_changes(old, new)
 
 
 def _failure_detail(
@@ -278,6 +331,7 @@ def _failure_detail(
         external_url = None
     return {
         "scope": scope,
+        "source_key": getattr(project, "source_key", None) or getattr(car, "source_key", None),
         "project_id": project.id if project else None,
         "project_name": project.name if project else None,
         "car_id": car.id if car else None,
@@ -292,11 +346,15 @@ def _dedupe_report(report: list[dict]) -> list[dict]:
     return dedupe_report(report)
 
 
-def _known_car(db, source_id: str) -> Car | None:
-    # A search result id identifies one Encar listing. Legacy aliases are kept
-    # for user lookup only; using them during scans caused two database rows to
-    # be compared as if they were the same listing.
-    return db.scalar(select(Car).where(Car.source_key == "encar", Car.source_listing_id == source_id))
+def _known_car(db, source_id: str, source_key: str = "encar") -> Car | None:
+    # A result id is unique only inside its source. Legacy aliases are kept for
+    # user lookup and must not merge listings from two sites during a scan.
+    return db.scalar(
+        select(Car).where(
+            Car.source_key == source_key,
+            Car.source_listing_id == source_id,
+        )
+    )
 
 
 def _should_refresh_missing_car(
@@ -377,10 +435,11 @@ def _price_filter_needs_baseline(project: Project) -> bool:
     )
 
 
-def _effective_search_url(project: Project) -> str:
+def _effective_search_url(project: Project, source=None) -> str:
     mode = getattr(project, "price_filter_mode", "LINK")
     if mode == "CUSTOM":
-        return get_source("encar").apply_price_filter(
+        source = source or get_source(getattr(project, "source_key", "encar"))
+        return source.apply_price_filter(
             project.search_url,
             getattr(project, "price_min_krw", None),
             getattr(project, "price_max_krw", None),
@@ -462,7 +521,7 @@ def _previous_state(
         fingerprint=(
             relation.last_observed_fingerprint
             if relation.last_observed_at is not None
-            else get_source("encar").fingerprint_listing(previous_details)
+            else get_source(car.source_key).fingerprint_listing(previous_details)
         ),
         status=previous_status,
         details=previous_details,
@@ -492,7 +551,7 @@ def _remember_observation(
 ) -> None:
     relation.last_observed_snapshot_id = snapshot_id
     relation.last_observed_price = car.current_price
-    relation.last_observed_fingerprint = get_source("encar").fingerprint_listing(
+    relation.last_observed_fingerprint = get_source(car.source_key).fingerprint_listing(
         car.details or {}
     )
     relation.last_observed_status = car.status
@@ -508,7 +567,7 @@ def _read_verified_detail(
     read_kind: str = "FULL",
 ) -> dict:
     """Compatibility entry point; source readers receive scalar values, not ORM."""
-    return get_source("encar").read_verified_detail(
+    return get_source(row.get("source_key") or "encar").read_verified_detail(
         page, row, storage, getattr(known_price, "current_price", known_price),
         read_kind=read_kind,
     )
@@ -552,7 +611,11 @@ def _change_report(
             ]
         elif previous_offer_type != current_offer_type:
             change = "MATERIAL_UPDATE"
-            changes = _material_changes(previous.details, car.details or {})
+            changes = _material_changes(
+                previous.details,
+                car.details or {},
+                getattr(car, "source_key", "encar"),
+            )
         elif old_price != car.current_price and not (
             len(previous_money) == len(current_money) == 1
             and comparable_money(previous_money[0], current_money[0])
@@ -563,7 +626,11 @@ def _change_report(
             change = "PRICE_DROP" if (old_price or 0) > (car.current_price or 0) else "PRICE_INCREASE"
             changes = [{"field": "price", "old": old_price, "new": car.current_price}]
         elif previous.fingerprint != car.fingerprint:
-            changes = _material_changes(previous.details, car.details or {})
+            changes = _material_changes(
+                previous.details,
+                car.details or {},
+                getattr(car, "source_key", "encar"),
+            )
             if not changes:
                 return None
             change = "MATERIAL_UPDATE"
@@ -588,6 +655,7 @@ def _change_report(
         "car_id": car.id,
         "project_id": project.id,
         "project_name": project.name,
+        "source_key": getattr(project, "source_key", "encar"),
         "encar_id": car.canonical_encar_id,
         "source_car_id": (car.details or {}).get("source_car_id"),
         "registration_number": (car.details or {}).get("registration_number"),
@@ -642,56 +710,105 @@ def process_job(job_id: int) -> None:
         car_ids = list(dict.fromkeys(payload.get("car_ids") or []))
         if payload.get("project_id") and not car_ids:
             project_ids = [payload["project_id"]]
-        for project_id in project_ids:
-            if _owned_project(db, project_id, job.owner_id):
-                db.add(
-                    ProjectScanRun(
-                        scan_run_id=job.id,
-                        project_id=project_id,
-                        status="QUEUED",
+        project_ids = project_execution_order(db, job.owner_id, payload, project_ids)
+        with SCAN_COMMAND_LOCK:
+            for project_id in project_ids:
+                if _owned_project(db, project_id, job.owner_id) and not db.scalar(
+                    select(ProjectScanRun.id).where(
+                        ProjectScanRun.scan_run_id == job.id,
+                        ProjectScanRun.project_id == project_id,
+                    ).limit(1)
+                ):
+                    db.add(
+                        ProjectScanRun(
+                            scan_run_id=job.id,
+                            project_id=project_id,
+                            status="QUEUED",
+                        )
                     )
-                )
-        db.commit()
+            db.commit()
         total_units = max(1, len(project_ids) + len(car_ids))
         completed = 0
         failures: list[str] = []
         failure_details: list[dict] = []
         successes = 0
         report: list[dict] = []
-        stop_for_captcha = False
+        blocked_sources: set[str] = set()
 
         try:
             from .desktop_license import require_search_entitlement
 
-            descriptor = get_source_descriptor("encar")
+            source_keys = list(
+                dict.fromkeys((job.payload or payload).get("source_keys") or ["encar"])
+            )
+            if not project_ids and not car_ids:
+                for key in source_keys:
+                    require_search_entitlement(get_source_descriptor(key).key)
             job.payload = {
                 **(job.payload or payload),
                 "execution_versions": {
                     "app": APP_VERSION,
-                    "sources": {
+                    "sources": {},
+                },
+            }
+            db.commit()
+            with desktop_playwright() as playwright, ExitStack() as runtime_cleanup:
+                executable_path = os.environ.get("SEARCHCAR_CHROMIUM_EXECUTABLE")
+                source = browser = context = page = None
+                active_source_key = None
+
+                def close_source_runtime() -> None:
+                    nonlocal browser, context, page, source, active_source_key
+                    closing_context, closing_browser = context, browser
+                    source = browser = context = page = None
+                    active_source_key = None
+                    try:
+                        if closing_context is not None:
+                            closing_context.close()
+                    finally:
+                        if closing_browser is not None:
+                            closing_browser.close()
+
+                runtime_cleanup.callback(close_source_runtime)
+
+                def activate_source(source_key: str):
+                    nonlocal browser, context, page, source, active_source_key
+                    descriptor = get_source_descriptor(source_key)
+                    require_search_entitlement(descriptor.key)
+                    if source_key == active_source_key and source is not None:
+                        return source, page
+                    close_source_runtime()
+                    next_source = get_source(source_key)
+                    versions = dict((job.payload or {}).get("execution_versions") or {})
+                    versions["sources"] = {
+                        **versions.get("sources", {}),
                         descriptor.key: {
                             "adapter": descriptor.adapter_version,
                             "contract": descriptor.contract_version,
                         },
-                    },
-                },
-            }
-            db.commit()
-            source = get_source("encar")  # Existing DB projects remain Encar until MSA-05.
-            require_search_entitlement(source.descriptor.key)
-            with desktop_playwright() as playwright:
-                executable_path = os.environ.get("SEARCHCAR_CHROMIUM_EXECUTABLE")
-                browser, context, page = source.open_browser(
-                    playwright,
-                    headless=settings.playwright_headless,
-                    executable_path=executable_path or None,
-                )
+                    }
+                    job.payload = {**(job.payload or payload), "execution_versions": versions}
+                    db.commit()
+                    next_browser, next_context, next_page = next_source.open_browser(
+                        playwright,
+                        headless=settings.playwright_headless,
+                        executable_path=executable_path or None,
+                    )
+                    source = next_source
+                    browser, context, page = (
+                        next_browser,
+                        next_context,
+                        next_page,
+                    )
+                    active_source_key = source_key
+                    return source, page
+
                 _raise_if_cancelled(db, job)
 
                 for project_id in project_ids:
                     _raise_if_cancelled(db, job)
-                    project = _owned_project(db, project_id, job.owner_id)
-                    if not project:
+                    stored_project = _owned_project(db, project_id, job.owner_id)
+                    if not stored_project:
                         failures.append(f"project:{project_id}:NOT_FOUND")
                         failure_details.append(
                             {
@@ -706,12 +823,37 @@ def process_job(job_id: int) -> None:
                         )
                         completed += 1
                         continue
+                    project = _project_for_execution(stored_project, payload)
                     project_run = db.scalar(
                         select(ProjectScanRun).where(
                             ProjectScanRun.scan_run_id == job.id,
                             ProjectScanRun.project_id == project.id,
                         )
                     )
+                    try:
+                        _raise_if_project_cancelled(db, job, project.id)
+                    except ProjectScanCancelled:
+                        project_run.status = "CANCELLED"
+                        project_run.error_code = None
+                        project_statuses = dict(
+                            (job.payload or {}).get("project_statuses") or {}
+                        )
+                        project_statuses[str(project.id)] = "CANCELLED"
+                        _publish_project_results(
+                            job,
+                            payload,
+                            report,
+                            failures,
+                            failure_details,
+                            project_statuses,
+                        )
+                        completed += 1
+                        job.progress = min(
+                            99, round(completed / total_units * 100)
+                        )
+                        db.commit()
+                        publish_scan_update(job.owner_id, job.id)
+                        continue
                     project_run.status = "RUNNING"
                     previous_new_car_ids = _previous_new_car_ids(db, project.id)
                     initial_full_scan = _requires_initial_full_scan(db, project.id)
@@ -732,12 +874,17 @@ def process_job(job_id: int) -> None:
                     db.commit()
                     publish_scan_update(job.owner_id, job.id)
                     try:
+                        if project.source_key in blocked_sources:
+                            raise SourceBlockedError(
+                                "Source blocked earlier in this run"
+                            )
+                        source, page = activate_source(project.source_key)
                         scan_mode, page_mode = _project_scan_modes(
                             project,
                             initial_full_scan,
                             price_filter_needs_baseline,
                         )
-                        effective_search_url = _effective_search_url(project)
+                        effective_search_url = _effective_search_url(project, source)
 
                         def update_page_progress(info: dict) -> None:
                             pagination = dict(
@@ -777,11 +924,13 @@ def process_job(job_id: int) -> None:
                             effective_search_url,
                             project.name,
                             all_pages=page_mode == "ALL_PAGES",
-                            checkpoint=lambda: _raise_if_cancelled(db, job),
+                            checkpoint=lambda: _raise_if_project_cancelled(
+                                db, job, project.id
+                            ),
                             progress=update_page_progress,
                         )
                         rows = collection.rows
-                        _raise_if_cancelled(db, job)
+                        _raise_if_project_cancelled(db, job, project.id)
                         search_found_ids: set[str] = set()
                         processed_source_ids: set[str] = set()
                         confirmed_sold: set[str] = set()
@@ -814,12 +963,14 @@ def process_job(job_id: int) -> None:
                             publish_scan_update(job.owner_id, job.id)
 
                         for row_index, row in enumerate(row_values):
-                            _raise_if_cancelled(db, job)
+                            _raise_if_project_cancelled(db, job, project.id)
                             source_id = str(row["source_car_id"])
                             if source_id in processed_source_ids:
                                 continue
                             processed_source_ids.add(source_id)
-                            known = _known_car(db, source_id)
+                            known = _known_car(
+                                db, source_id, source.descriptor.key
+                            )
                             if known and (known.excluded or known.status == "SOLD"):
                                 continue
                             known_relation = (
@@ -900,7 +1051,7 @@ def process_job(job_id: int) -> None:
                             search_found_ids.add(car.canonical_encar_id)
                             processed_rows += 1
                             publish_row_progress()
-                            _raise_if_cancelled(db, job)
+                            _raise_if_project_cancelled(db, job, project.id)
 
                         missing_cars = (
                             []
@@ -947,210 +1098,207 @@ def process_job(job_id: int) -> None:
                             # starting detail workers: the source budget is two
                             # active Chromium browsers, not two plus an idle one.
                             db.commit()
-                            context.close()
-                            browser.close()
-                            try:
-                                detail_workers_count = _detail_worker_count(
-                                    db, job.owner_id
+                            detail_source = source
+                            close_source_runtime()
+                            detail_workers_count = _detail_worker_count(
+                                db, job.owner_id
+                            )
+                            detail_total = processed_rows + len(detail_tasks)
+
+                            def publish_detail_progress() -> None:
+                                detail_progress = dict(
+                                    (job.payload or {}).get(
+                                        "detail_progress"
+                                    )
+                                    or {}
                                 )
-                                detail_total = processed_rows + len(detail_tasks)
-
-                                def publish_detail_progress() -> None:
-                                    detail_progress = dict(
-                                        (job.payload or {}).get(
-                                            "detail_progress"
-                                        )
-                                        or {}
-                                    )
-                                    detail_progress[str(project.id)] = {
-                                        "completed": processed_rows,
-                                        "total": detail_total,
-                                        "checking": min(
-                                            detail_workers_count,
-                                            detail_total - processed_rows,
-                                        ),
-                                    }
-                                    job.payload = {
-                                        **(job.payload or payload),
-                                        "detail_progress": detail_progress,
-                                    }
-                                    job.progress = round(
-                                        (
-                                            completed
-                                            + 0.15
-                                            + 0.80
-                                            * processed_rows
-                                            / max(1, detail_total)
-                                        )
-                                        / total_units
-                                        * 100
-                                    )
-                                    _publish_live_results(
-                                        job,
-                                        payload,
-                                        report,
-                                        failures,
-                                        failure_details,
-                                        project_statuses,
-                                        current_project_id=project.id,
-                                    )
-                                    db.commit()
-                                    publish_scan_update(job.owner_id, job.id)
-
-                                publish_detail_progress()
-                                with DetailWorkerPool(
-                                    lambda: source.detail_reader(
-                                        Path(settings.storage_root),
-                                        headless=settings.playwright_headless,
-                                        executable_path=executable_path or None,
+                                detail_progress[str(project.id)] = {
+                                    "completed": processed_rows,
+                                    "total": detail_total,
+                                    "checking": min(
+                                        detail_workers_count,
+                                        detail_total - processed_rows,
                                     ),
-                                    workers=detail_workers_count,
-                                ) as detail_workers:
-                                    detail_workers.submit_all(detail_tasks)
-                                    for result in detail_workers.results(
-                                        len(detail_tasks)
-                                    ):
-                                        _raise_if_cancelled(db, job)
-                                        task_context = result.task.context
-                                        assert isinstance(
-                                            task_context, ProjectDetailContext
-                                        )
-                                        known = (
-                                            db.get(Car, task_context.known_car_id)
-                                            if task_context.known_car_id is not None
-                                            else None
-                                        )
-                                        known_relation = (
-                                            db.get(
-                                                ProjectCar,
-                                                {
-                                                    "project_id": project.id,
-                                                    "car_id": known.id,
-                                                },
-                                            )
-                                            if known
-                                            else None
-                                        )
-                                        if result.error:
-                                            if (
-                                                task_context.mark_search_found
-                                                and not isinstance(result.error, ScanError)
-                                            ):
-                                                raise result.error
-                                            if (
-                                                task_context.mark_search_found
-                                                and known
-                                                and known_relation
-                                            ):
-                                                mark_found_without_detail(
-                                                    db, project, known
-                                                )
-                                                search_found_ids.add(
-                                                    known.canonical_encar_id
-                                                )
-                                            failure = _failure_detail(
-                                                exc=result.error,
-                                                scope=(
-                                                    "SEARCH_CAR"
-                                                    if task_context.mark_search_found
-                                                    else "MISSING_CAR"
-                                                ),
-                                                project=project,
-                                                car=known,
-                                                url=result.task.row.get("url"),
-                                            )
-                                            failure["encar_id"] = task_context.source_id
-                                            if task_context.mark_search_found:
-                                                failures.append(
-                                                    f"{project.name}:{task_context.source_id}:"
-                                                    f"{failure['code']}: {result.error}"
-                                                )
-                                            else:
-                                                failures.append(
-                                                    f"missing:{task_context.source_id}:"
-                                                    f"{failure['code']}: {result.error}"
-                                                )
-                                            failure_details.append(failure)
-                                            processed_rows += 1
-                                            publish_detail_progress()
-                                            if (
-                                                isinstance(result.error, ScanError)
-                                                and result.error.code == "CAPTCHA"
-                                            ):
-                                                detail_workers.cancel()
-                                                raise result.error
-                                            continue
+                                }
+                                job.payload = {
+                                    **(job.payload or payload),
+                                    "detail_progress": detail_progress,
+                                }
+                                job.progress = round(
+                                    (
+                                        completed
+                                        + 0.15
+                                        + 0.80
+                                        * processed_rows
+                                        / max(1, detail_total)
+                                    )
+                                    / total_units
+                                    * 100
+                                )
+                                _publish_live_results(
+                                    job,
+                                    payload,
+                                    report,
+                                    failures,
+                                    failure_details,
+                                    project_statuses,
+                                    current_project_id=project.id,
+                                )
+                                db.commit()
+                                publish_scan_update(job.owner_id, job.id)
 
-                                        detail = result.detail
-                                        assert detail is not None
-                                        detail["scan_run_id"] = job.id
-                                        try:
-                                            car = (
-                                                upsert_price_status(
-                                                    db,
-                                                    project,
-                                                    detail,
-                                                    mark_search_found=(
-                                                        task_context.mark_search_found
-                                                    ),
-                                                )
-                                                if result.task.read_kind == "PRICE_STATUS"
-                                                else upsert_detail(
+                            publish_detail_progress()
+                            with DetailWorkerPool(
+                                lambda: detail_source.detail_reader(
+                                    Path(settings.storage_root),
+                                    headless=settings.playwright_headless,
+                                    executable_path=executable_path or None,
+                                ),
+                                workers=detail_workers_count,
+                            ) as detail_workers:
+                                detail_workers.submit_all(detail_tasks)
+                                for result in detail_workers.results(
+                                    len(detail_tasks)
+                                ):
+                                    _raise_if_project_cancelled(
+                                        db, job, project.id
+                                    )
+                                    task_context = result.task.context
+                                    assert isinstance(
+                                        task_context, ProjectDetailContext
+                                    )
+                                    known = (
+                                        db.get(Car, task_context.known_car_id)
+                                        if task_context.known_car_id is not None
+                                        else None
+                                    )
+                                    known_relation = (
+                                        db.get(
+                                            ProjectCar,
+                                            {
+                                                "project_id": project.id,
+                                                "car_id": known.id,
+                                            },
+                                        )
+                                        if known
+                                        else None
+                                    )
+                                    if result.error:
+                                        if (
+                                            task_context.mark_search_found
+                                            and not isinstance(result.error, ScanError)
+                                        ):
+                                            raise result.error
+                                        if (
+                                            task_context.mark_search_found
+                                            and known
+                                            and known_relation
+                                        ):
+                                            mark_found_without_detail(
+                                                db, project, known
+                                            )
+                                            search_found_ids.add(
+                                                known.canonical_encar_id
+                                            )
+                                        failure = _failure_detail(
+                                            exc=result.error,
+                                            scope=(
+                                                "SEARCH_CAR"
+                                                if task_context.mark_search_found
+                                                else "MISSING_CAR"
+                                            ),
+                                            project=project,
+                                            car=known,
+                                            url=result.task.row.get("url"),
+                                        )
+                                        failure["encar_id"] = task_context.source_id
+                                        if task_context.mark_search_found:
+                                            failures.append(
+                                                f"{project.name}:{task_context.source_id}:"
+                                                f"{failure['code']}: {result.error}"
+                                            )
+                                        else:
+                                            failures.append(
+                                                f"missing:{task_context.source_id}:"
+                                                f"{failure['code']}: {result.error}"
+                                            )
+                                        failure_details.append(failure)
+                                        processed_rows += 1
+                                        publish_detail_progress()
+                                        if (
+                                            isinstance(result.error, ScanError)
+                                            and result.error.code == "CAPTCHA"
+                                        ):
+                                            detail_workers.cancel()
+                                            raise result.error
+                                        continue
+
+                                    detail = result.detail
+                                    assert detail is not None
+                                    detail["scan_run_id"] = job.id
+                                    try:
+                                        car = (
+                                            upsert_price_status(
                                                 db,
                                                 project,
                                                 detail,
                                                 mark_search_found=(
                                                     task_context.mark_search_found
                                                 ),
-                                                )
                                             )
-                                        except TrackingDisabledError:
-                                            db.rollback()
-                                            processed_rows += 1
-                                            publish_detail_progress()
-                                            continue
-                                        if detail.get("sold"):
-                                            confirmed_sold.update(
-                                                {
-                                                    task_context.source_id,
-                                                    car.canonical_encar_id,
-                                                }
-                                            )
-                                        current_relation = db.get(
-                                            ProjectCar,
-                                            {"project_id": project.id, "car_id": car.id},
-                                        )
-                                        after_snapshot_id = _latest_snapshot_id(
-                                            db, car.id
-                                        )
-                                        if item := _change_report(
-                                            car,
-                                            project,
-                                            task_context.previous,
-                                            search_status=current_relation.search_status,
-                                            after_snapshot_id=after_snapshot_id,
-                                        ):
-                                            report.append(item)
-                                        _remember_observation(
+                                            if result.task.read_kind == "PRICE_STATUS"
+                                            else upsert_detail(
                                             db,
-                                            current_relation,
-                                            car,
-                                            after_snapshot_id,
-                                        )
-                                        if task_context.mark_search_found:
-                                            search_found_ids.add(
-                                                car.canonical_encar_id
+                                            project,
+                                            detail,
+                                            mark_search_found=(
+                                                task_context.mark_search_found
+                                            ),
                                             )
+                                        )
+                                    except TrackingDisabledError:
+                                        db.rollback()
                                         processed_rows += 1
                                         publish_detail_progress()
-                                        _raise_if_cancelled(db, job)
-                            finally:
-                                browser, context, page = source.open_browser(
-                                    playwright,
-                                    headless=settings.playwright_headless,
-                                    executable_path=executable_path or None,
-                                )
-                        _raise_if_cancelled(db, job)
+                                        continue
+                                    if detail.get("sold"):
+                                        confirmed_sold.update(
+                                            {
+                                                task_context.source_id,
+                                                car.canonical_encar_id,
+                                            }
+                                        )
+                                    current_relation = db.get(
+                                        ProjectCar,
+                                        {"project_id": project.id, "car_id": car.id},
+                                    )
+                                    after_snapshot_id = _latest_snapshot_id(
+                                        db, car.id
+                                    )
+                                    if item := _change_report(
+                                        car,
+                                        project,
+                                        task_context.previous,
+                                        search_status=current_relation.search_status,
+                                        after_snapshot_id=after_snapshot_id,
+                                    ):
+                                        report.append(item)
+                                    _remember_observation(
+                                        db,
+                                        current_relation,
+                                        car,
+                                        after_snapshot_id,
+                                    )
+                                    if task_context.mark_search_found:
+                                        search_found_ids.add(
+                                            car.canonical_encar_id
+                                        )
+                                    processed_rows += 1
+                                    publish_detail_progress()
+                                    _raise_if_project_cancelled(
+                                        db, job, project.id
+                                    )
+                        _raise_if_project_cancelled(db, job, project.id)
                         if (
                             not price_filter_needs_baseline
                             and _should_apply_search_absence(page_mode)
@@ -1168,6 +1316,7 @@ def process_job(job_id: int) -> None:
                                         "car_id": missing_car.id,
                                         "project_id": project.id,
                                         "project_name": project.name,
+                                        "source_key": project.source_key,
                                         "encar_id": missing_car.canonical_encar_id,
                                         "title": missing_car.title,
                                         "change": search_change,
@@ -1204,20 +1353,27 @@ def process_job(job_id: int) -> None:
                                 Project.id == project.id
                             )
                         ) == price_filter_revision:
-                            project.price_filter_baseline_revision = price_filter_revision
-                        project.updated_at = datetime.now(timezone.utc)
+                            stored_project.price_filter_baseline_revision = (
+                                price_filter_revision
+                            )
+                        stored_project.updated_at = datetime.now(timezone.utc)
                         _expire_previous_new_relations(
                             db, project.id, previous_new_car_ids
                         )
                         project_run.status = "SUCCEEDED"
                         successes += 1
                         db.commit()
+                    except ProjectScanCancelled:
+                        project_run.status = "CANCELLED"
+                        project_run.error_code = None
+                        db.commit()
                     except ScanCancelled:
                         raise
                     except ScanError as exc:
                         project_run.status = "FAILED"
                         project_run.error_code = exc.code
-                        stop_for_captcha = exc.code == "CAPTCHA"
+                        if exc.code == "CAPTCHA":
+                            blocked_sources.add(project.source_key)
                         failures.append(f"{project.name}:{exc.code}: {exc}")
                         failure_details.append(
                             _failure_detail(exc=exc, scope="PROJECT", project=project)
@@ -1232,6 +1388,9 @@ def process_job(job_id: int) -> None:
                         failures.append(f"{project.name}:{type(exc).__name__}: {exc}")
                         failure_details.append(failure)
                         db.commit()
+                    finally:
+                        if project_run.status != "SUCCEEDED":
+                            close_source_runtime()
                     project_statuses = dict(
                         (job.payload or {}).get("project_statuses") or {}
                     )
@@ -1249,17 +1408,6 @@ def process_job(job_id: int) -> None:
                     db.commit()
                     publish_scan_update(job.owner_id, job.id)
                     _raise_if_cancelled(db, job)
-                    if stop_for_captcha:
-                        for pending in db.scalars(
-                            select(ProjectScanRun).where(
-                                ProjectScanRun.scan_run_id == job.id,
-                                ProjectScanRun.status == "QUEUED",
-                            )
-                        ):
-                            pending.status = "FAILED"
-                            pending.error_code = "CAPTCHA"
-                        db.commit()
-                        break
 
                 for car_id in car_ids:
                     _raise_if_cancelled(db, job)
@@ -1297,6 +1445,7 @@ def process_job(job_id: int) -> None:
                         )
                         if project:
                             try:
+                                source, page = activate_source(project.source_key)
                                 current_relation = db.get(
                                     ProjectCar,
                                     {
@@ -1310,6 +1459,7 @@ def process_job(job_id: int) -> None:
                                 manual_row = {
                                     "url": car.url,
                                     "source_car_id": car.canonical_encar_id,
+                                    "source_key": project.source_key,
                                     "source": project.name,
                                     "list_text": "",
                                 }
@@ -1409,14 +1559,24 @@ def process_job(job_id: int) -> None:
                     db.commit()
                     publish_scan_update(job.owner_id, job.id)
                     _raise_if_cancelled(db, job)
-                context.close()
-                browser.close()
+                close_source_runtime()
 
             _raise_if_cancelled(db, job)
             report = _dedupe_report(report)
             job.progress = 100
             job.error = "\n".join(failures) or None
-            job.status = "SUCCEEDED" if not failures else ("PARTIAL" if successes else "FAILED")
+            cancelled_count = sum(
+                status == "CANCELLED"
+                for status in dict(
+                    (job.payload or {}).get("project_statuses") or {}
+                ).values()
+            )
+            if failures:
+                job.status = "PARTIAL" if successes else "FAILED"
+            elif cancelled_count:
+                job.status = "PARTIAL" if successes else "CANCELLED"
+            else:
+                job.status = "SUCCEEDED"
             job.finished_at = datetime.now(timezone.utc)
             job.heartbeat_at = job.finished_at
             job.payload = {
@@ -1430,6 +1590,7 @@ def process_job(job_id: int) -> None:
                         item["change"] in {"PRICE_DROP", "PRICE_INCREASE"} for item in report
                     ),
                     "failed": len(failures),
+                    "cancelled": cancelled_count,
                 },
             }
             _record_completed_scheduler_run(db, job, job.finished_at)
@@ -1452,12 +1613,25 @@ def process_job(job_id: int) -> None:
             publish_scan_update(job.owner_id, job.id)
         except Exception as exc:
             report = _dedupe_report(report)
+            project_statuses = dict((job.payload or {}).get("project_statuses") or {})
+            for portion in db.scalars(select(ProjectScanRun).where(
+                ProjectScanRun.scan_run_id == job.id,
+            )):
+                if portion.status == "CANCEL_REQUESTED":
+                    portion.status = "CANCELLED"
+                    portion.error_code = None
+                elif portion.status in {"QUEUED", "RUNNING"}:
+                    portion.status = "FAILED"
+                    portion.error_code = "RUN_FAILED"
+                project_statuses[str(portion.project_id)] = portion.status
             job.status = "FAILED"
             job.finished_at = datetime.now(timezone.utc)
             job.heartbeat_at = job.finished_at
             job.error = f"{type(exc).__name__}: {exc}"
             job.payload = {
                 **(job.payload or payload),
+                "current_project_id": None,
+                "project_statuses": project_statuses,
                 "report": report,
                 "failures": [
                     *failure_details,
@@ -1485,15 +1659,16 @@ def process_job(job_id: int) -> None:
 def enqueue_scheduled(*, now: datetime | None = None) -> None:
     from .desktop_license import SearchEntitlementError, require_search_entitlement
     from .maintenance import maintenance_active
+    from fastapi import HTTPException
 
     if maintenance_active():
         return
     try:
-        require_search_entitlement("encar")
+        require_search_entitlement()
         can_run_scheduled_search = True
     except SearchEntitlementError:
         can_run_scheduled_search = False
-    with SessionLocal.begin() as db:
+    with SessionLocal() as db:
         current = now or datetime.now(timezone.utc)
         settings_to_check = list(
             db.scalars(
@@ -1520,45 +1695,80 @@ def enqueue_scheduled(*, now: datetime | None = None) -> None:
                     minutes=setting.interval_minutes
                 )
                 continue
-            ids = list(
+            projects = list(
                 db.scalars(
-                    select(ScheduledProject.project_id)
-                    .join(Project, Project.id == ScheduledProject.project_id)
+                    select(Project)
+                    .join(
+                        ScheduledProject,
+                        ScheduledProject.project_id == Project.id,
+                    )
                     .where(
                         ScheduledProject.scheduler_id == setting.id,
                         Project.owner_id == setting.user_id,
                         Project.auto_update.is_(True),
                     )
+                    .order_by(Project.id)
                 )
             )
-            if not ids:
+            if not projects:
                 setting.enabled = False
                 setting.next_run_at = None
                 continue
-            active = db.scalar(
-                select(ScanRun).where(
-                    ScanRun.owner_id == setting.user_id,
-                    ScanRun.status.in_(
-                        ["QUEUED", "RUNNING", "CANCEL_REQUESTED"]
-                    ),
-                )
-            )
-            if not active:
-                db.add(
-                    ScanRun(
-                        owner_id=setting.user_id,
-                        kind="PROJECTS",
-                        status="QUEUED",
-                        payload={
-                            "project_ids": ids,
-                            "scheduled": True,
-                            "trigger": "AUTOMATIC",
-                        },
-                    )
-                )
+            allowed_projects = []
+            for project in projects:
+                try:
+                    require_search_entitlement(project.source_key)
+                except SearchEntitlementError:
+                    continue
+                allowed_projects.append(project)
+            projects = allowed_projects
+            if not projects:
+                setting.next_run_at = current + timedelta(minutes=setting.interval_minutes)
+                continue
+            from .main import enqueue
+
+            launch_payload = {
+                "project_ids": [project.id for project in projects],
+                "source_keys": list(
+                    dict.fromkeys(project.source_key for project in projects)
+                ),
+                "project_plans": [
+                    {
+                        "project_id": project.id,
+                        "source_key": project.source_key,
+                        "name": project.name,
+                        "search_url": project.search_url,
+                        "scan_mode": project.scan_mode,
+                        "search_page_mode": project.search_page_mode,
+                        "price_filter_mode": project.price_filter_mode,
+                        "price_min_krw": project.price_min_krw,
+                        "price_max_krw": project.price_max_krw,
+                        "price_filter_revision": project.price_filter_revision,
+                        "price_filter_baseline_revision": (
+                            project.price_filter_baseline_revision
+                        ),
+                    }
+                    for project in projects
+                ],
+                "launch_scope": {
+                    "mode": "SCHEDULED_PROJECTS",
+                    "project_ids": [project.id for project in projects],
+                    "source_keys": [],
+                },
+                "scheduled": True,
+                "trigger": "AUTOMATIC",
+            }
+            try:
+                enqueue("PROJECTS", launch_payload, db.get(User, setting.user_id), db)
+            except HTTPException as exc:
+                # A normal license refresh can revoke access after preflight.
+                # Reanchor the schedule, without stopping the shared worker.
+                if exc.status_code != 402:
+                    raise
             setting.next_run_at = current + timedelta(
                 minutes=setting.interval_minutes
             )
+        db.commit()
 
 
 def run(stop_event: Event | None = None) -> None:

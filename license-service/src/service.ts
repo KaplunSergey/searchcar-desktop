@@ -178,12 +178,16 @@ async function createLease(env: Env, source: LeaseSource) {
 
 async function sourceKeysForLicense(env: Env, licenseId: string): Promise<string[]> {
   const rows = await env.LICENSE_DB.prepare(
-    `SELECT ls.source_key
-       FROM license_sources ls
-       JOIN source_catalog sc ON sc.source_key = ls.source_key AND sc.is_active = 1
-      WHERE ls.license_id = ?
-      ORDER BY ls.source_key ASC`,
+    `SELECT sc.source_key FROM source_catalog sc
+       JOIN licenses l ON l.id = ?
+      WHERE sc.is_active = 1 AND (l.sources_all = 1 OR EXISTS (
+        SELECT 1 FROM license_sources ls
+        WHERE ls.license_id = l.id AND ls.source_key = sc.source_key
+      ))
+      ORDER BY sc.source_key ASC`,
   ).bind(licenseId).all<{ source_key: string }>();
+  // Explicit signed keys stay compatible with older desktop clients which do
+  // not understand wildcard leases. All-policy expands on each normal refresh.
   return (rows.results ?? []).map((row) => row.source_key);
 }
 
@@ -372,7 +376,9 @@ export async function activateTrial(
     device,
     appVersion: body.app_version,
     now,
-    sourceKeys: [DEFAULT_SOURCE_KEY],
+    sourceKeys: (await env.LICENSE_DB.prepare(
+      "SELECT source_key FROM source_catalog WHERE is_active = 1 ORDER BY source_key ASC",
+    ).all<{ source_key: string }>()).results?.map(row => row.source_key) ?? [],
   });
   try {
     await env.LICENSE_DB.batch([
@@ -881,7 +887,8 @@ export async function setAdminLicenseSources(
     throw new ApiError(400, "INVALID_SOURCE_KEYS", "source_keys must be an array of up to 32 source keys.");
   }
   const sourceKeys = [...new Set(rawSourceKeys)].sort();
-  if (sourceKeys.some((sourceKey) => typeof sourceKey !== "string" || !SOURCE_KEY.test(sourceKey))) {
+  const allSources = rawSourceKeys.length === 1 && rawSourceKeys[0] === "*";
+  if (!allSources && sourceKeys.some((sourceKey) => typeof sourceKey !== "string" || !SOURCE_KEY.test(sourceKey))) {
     throw new ApiError(400, "INVALID_SOURCE_KEYS", "source_keys contains an invalid source key.");
   }
   const license = await env.LICENSE_DB.prepare(
@@ -896,14 +903,16 @@ export async function setAdminLicenseSources(
     "SELECT source_key FROM source_catalog WHERE is_active = 1",
   ).all<{ source_key: string }>();
   const activeKeys = new Set((catalog.results ?? []).map((row) => row.source_key));
-  if (sourceKeys.some((sourceKey) => !activeKeys.has(sourceKey))) {
+  if (!allSources && sourceKeys.some((sourceKey) => !activeKeys.has(sourceKey))) {
     throw new ApiError(409, "SOURCE_NOT_AVAILABLE", "One or more sources are not available.");
   }
 
   const nowIso = now.toISOString();
   await env.LICENSE_DB.batch([
+    env.LICENSE_DB.prepare("UPDATE licenses SET sources_all = ?, updated_at = ? WHERE id = ?")
+      .bind(allSources ? 1 : 0, nowIso, licenseId),
     env.LICENSE_DB.prepare("DELETE FROM license_sources WHERE license_id = ?").bind(licenseId),
-    ...sourceKeys.map((sourceKey) => env.LICENSE_DB.prepare(
+    ...(allSources ? [] : sourceKeys).map((sourceKey) => env.LICENSE_DB.prepare(
       `INSERT INTO license_sources (license_id, source_key, granted_at, granted_by)
        VALUES (?, ?, ?, ?)`,
     ).bind(licenseId, sourceKey, nowIso, actorId)),
@@ -915,7 +924,7 @@ export async function setAdminLicenseSources(
       action: "LICENSE_SOURCES_UPDATED",
       targetType: "LICENSE",
       targetId: licenseId,
-      metadata: { source_count: sourceKeys.length },
+      metadata: { source_count: allSources ? activeKeys.size : sourceKeys.length, sources_all: allSources },
       createdAt: nowIso,
     }),
   ]);

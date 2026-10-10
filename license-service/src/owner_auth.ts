@@ -336,7 +336,7 @@ async function ownerDashboard(request: Request, env: Env, now: Date): Promise<Re
     env.LICENSE_DB.prepare(
       `SELECT l.id, l.customer_id, c.display_name AS customer_name, l.kind, l.status,
               l.expires_at, l.perpetual, l.activation_count, l.updated_at,
-              l.deleted_at,
+              l.deleted_at, l.sources_all,
               d.id AS active_device_id, d.label AS active_device_label, d.last_seen_at
          FROM licenses l LEFT JOIN customers c ON c.id = l.customer_id
          LEFT JOIN devices d ON d.license_id = l.id AND d.is_active = 1

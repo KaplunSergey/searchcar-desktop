@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 import httpx
 import pytest
 
-from app.desktop_license import LEASE_MESSAGE_PREFIX, canonical_json
+from app.desktop_license import LEASE_MESSAGE_PREFIX, canonical_json, evaluate_search_entitlement
 from app.desktop_license_client import (
     DEVICE_MESSAGE_PREFIX,
     LicenseClientError,
@@ -98,6 +98,40 @@ def verify_device_request(body):
         base64.urlsafe_b64decode(proof + "=="),
         (DEVICE_MESSAGE_PREFIX + canonical_json(body)).encode("utf-8"),
     )
+
+
+def test_refresh_installs_signed_source_changes_and_offline_keeps_last_policy(tmp_path, monkeypatch):
+    worker_key = signing_state(monkeypatch)
+    now = datetime.now(timezone.utc)
+    policy = ["*"]
+    offline = False
+
+    def handler(request):
+        if offline:
+            raise httpx.ConnectError("offline", request=request)
+        body = json.loads(request.content)
+        lease = signed_lease(worker_key, body, license_id="license-test", device_id="device-test", now=now)
+        lease["payload"]["entitlements"]["sources"] = policy
+        lease["signature"] = b64url(worker_key.sign(
+            (LEASE_MESSAGE_PREFIX + canonical_json(lease["payload"])).encode("utf-8")))
+        return httpx.Response(200, json={"ok": True, "data": {
+            "license_id": "license-test", "device_id": "device-test", "lease": lease}})
+
+    client = LicenseServiceClient(tmp_path, service_url="https://license.example.test",
+                                  store=MemoryStore(), transport=httpx.MockTransport(handler))
+    assert client.activate_trial("source-policy@example.test")["sources"] == ("encar",)
+    policy = ["copart"]
+    assert client.refresh()["sources"] == ("copart",)
+    cached = (tmp_path / "license" / "lease.json").read_bytes()
+    offline = True
+    with pytest.raises(LicenseClientError):
+        client.refresh()
+    assert (tmp_path / "license" / "lease.json").read_bytes() == cached
+    assert evaluate_search_entitlement(data_dir=tmp_path, mode="required").sources == ("copart",)
+    offline = False
+    policy = ["*"]
+    assert client.refresh()["sources"] == ("encar",)
+    assert evaluate_search_entitlement(data_dir=tmp_path, mode="required", now=now + timedelta(hours=49)).can_search is False
 
 
 def test_device_identity_is_stable_and_private_key_stays_in_store(tmp_path) -> None:

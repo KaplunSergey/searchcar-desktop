@@ -35,7 +35,7 @@ from .auth import (
 from .database import get_db, settings
 from .money import comparable_money, money_values_out, payload_money_values
 from .importer import inspect_source, run as run_import
-from .job_queue import detach_project_from_active_jobs
+from .job_queue import SCAN_COMMAND_LOCK, detach_project_from_active_jobs, project_execution_order
 from .models import (
     Car,
     CarAlias,
@@ -78,6 +78,7 @@ from .schemas import (
     ProjectPatch,
     RatingPatch,
     ScanCarsIn,
+    CancelScanIn,
     ScanProjectsIn,
     SchedulerIn,
     DesktopMigrationIn,
@@ -91,6 +92,8 @@ from .schemas import (
     RegistrationIn,
 )
 from .services import merge_reliable_detail
+from .sources.contracts import InvalidSourceUrlError, SourceUnavailableError
+from .sources.registry import get_source
 from .reporting import dedupe_report
 from .vehicle_groups import group_vehicle_listings
 from .live_updates import live_updates
@@ -787,6 +790,7 @@ def project_out(project: Project, db: Session) -> dict:
     ).first()
     return {
         "id": project.id,
+        "source_key": project.source_key,
         "name": project.name,
         "search_url": project.search_url,
         "telegram_url": project.telegram_url,
@@ -967,14 +971,14 @@ def storage_file(
 def projects(
     current: User = Depends(require_user),
     db: Session = Depends(get_db),
+    source_key: str | None = None,
 ) -> list[dict]:
+    query = select(Project).where(Project.owner_id == current.id)
+    if source_key is not None:
+        query = query.where(Project.source_key == source_key)
     return [
         project_out(project, db)
-        for project in db.scalars(
-            select(Project)
-            .where(Project.owner_id == current.id)
-            .order_by(Project.updated_at.desc())
-        )
+        for project in db.scalars(query.order_by(Project.updated_at.desc()))
     ]
 
 
@@ -1170,6 +1174,8 @@ def project_cars(
         result.append(
             {
                 "id": car.id,
+                "source_key": car.source_key,
+                "source_listing_id": car.source_listing_id,
                 "encar_id": car.canonical_encar_id,
                 "url": car.url,
                 "title": car.title,
@@ -1193,9 +1199,10 @@ def project_cars(
 def favorite_cars(
     current: User = Depends(require_user),
     db: Session = Depends(get_db),
+    source_key: str | None = None,
 ) -> list[dict]:
     result = []
-    rows = db.execute(
+    query = (
         select(ProjectCar, Car, Project)
         .join(Car, Car.id == ProjectCar.car_id)
         .join(Project, Project.id == ProjectCar.project_id)
@@ -1216,12 +1223,16 @@ def favorite_cars(
                 UserCarState.excluded.is_(False),
             ),
         )
-        .order_by(Car.updated_at.desc())
-    ).all()
+    )
+    if source_key is not None:
+        query = query.where(Project.source_key == source_key, Car.source_key == source_key)
+    rows = db.execute(query.order_by(Car.updated_at.desc())).all()
     for relation, car, project in rows:
         result.append(
             {
                 "id": car.id,
+                "source_key": car.source_key,
+                "source_listing_id": car.source_listing_id,
                 "project_id": project.id,
                 "project_name": project.name,
                 "encar_id": car.canonical_encar_id,
@@ -1415,6 +1426,8 @@ def car(
     state = user_car_state(current.id, car_id, db)
     return {
         "id": record.id,
+        "source_key": record.source_key,
+        "source_listing_id": record.source_listing_id,
         "encar_id": record.canonical_encar_id,
         "url": record.url,
         "title": record.title,
@@ -1632,16 +1645,52 @@ Encar URL: {record.url}"""
 
 
 def enqueue(kind: str, payload: dict, owner: User, db: Session) -> dict:
+    with SCAN_COMMAND_LOCK:
+        return _enqueue_unlocked(kind, payload, owner, db)
+
+
+def _project_payload_subset(payload: dict, project_ids: list[int]) -> dict:
+    allowed = set(project_ids)
+    result = {**payload, "project_ids": project_ids}
+    plan_by_project = {
+        plan["project_id"]: plan
+        for plan in payload.get("project_plans") or []
+        if plan.get("project_id") in allowed
+    }
+    plans = [plan_by_project[project_id] for project_id in project_ids if project_id in plan_by_project]
+    if "project_plans" in payload:
+        result["project_plans"] = plans
+    if plans:
+        result["source_keys"] = list(
+            dict.fromkeys(plan.get("source_key") or "encar" for plan in plans)
+        )
+    return result
+
+
+def _enqueue_unlocked(kind: str, payload: dict, owner: User, db: Session) -> dict:
     from .maintenance import maintenance_active
     from .desktop_license import SearchEntitlementError, require_search_entitlement
 
     if maintenance_active():
         raise HTTPException(409, "desktop_maintenance_active")
-    try:
-        require_search_entitlement("encar")
-    except SearchEntitlementError as exc:
-        raise HTTPException(402, exc.code.lower()) from exc
-    requested_projects = set(payload.get("project_ids") or [])
+    source_keys = set(payload.get("source_keys") or [])
+    plans = {plan["project_id"]: plan for plan in payload.get("project_plans") or []}
+    if kind == "PROJECTS":
+        for project in db.scalars(select(Project).where(
+            Project.owner_id == owner.id, Project.id.in_(payload.get("project_ids") or [])
+        )):
+            source_keys.add(plans.get(project.id, {}).get("source_key") or project.source_key)
+    elif kind == "CARS":
+        source_keys.update(db.scalars(select(Car.source_key).join(ProjectCar).join(Project).where(
+            Project.owner_id == owner.id, Car.id.in_(payload.get("car_ids") or [])
+        )))
+    for source_key in sorted(source_keys) or [None]:
+        try:
+            require_search_entitlement(source_key)
+        except SearchEntitlementError as exc:
+            raise HTTPException(402, exc.code.lower()) from exc
+    requested_project_ids = list(dict.fromkeys(payload.get("project_ids") or []))
+    requested_projects = set(requested_project_ids)
     requested_cars = set(payload.get("car_ids") or [])
     active_runs = list(db.scalars(
         select(ScanRun).where(
@@ -1671,7 +1720,7 @@ def enqueue(kind: str, payload: dict, owner: User, db: Session) -> dict:
                 if project_id not in overlap
             ]
             if remaining:
-                active.payload = {**active_payload, "project_ids": remaining}
+                active.payload = _project_payload_subset(active_payload, remaining)
             else:
                 active.status = "CANCELLED"
                 active.finished_at = merged_at
@@ -1687,12 +1736,53 @@ def enqueue(kind: str, payload: dict, owner: User, db: Session) -> dict:
             if active.status in {"QUEUED", "RUNNING", "CANCEL_REQUESTED"}
         ]
 
+    busy_projects: dict[int, ScanRun] = {}
     for active in active_runs:
         active_payload = active.payload or {}
-        if requested_projects & set(active_payload.get("project_ids") or []):
-            raise HTTPException(409, "project_scan_already_active")
+        active_project_ids = set(active_payload.get("project_ids") or []) - set(
+            active_payload.get("cancelled_project_ids") or []
+        )
+        active_project_ids -= set(db.scalars(
+            select(ProjectScanRun.project_id).where(
+                ProjectScanRun.scan_run_id == active.id,
+                ProjectScanRun.status.in_(["CANCELLED", "CANCEL_REQUESTED"]),
+            )
+        ))
+        for project_id in requested_projects & set(
+            active_project_ids
+        ):
+            busy_projects.setdefault(project_id, active)
         if requested_cars & set(active_payload.get("car_ids") or []):
             raise HTTPException(409, "car_scan_already_active")
+
+    project_results: list[dict] = []
+    if kind == "PROJECTS":
+        free_project_ids = [
+            project_id
+            for project_id in requested_project_ids
+            if project_id not in busy_projects
+        ]
+        project_results = [
+            {
+                "project_id": project_id,
+                "status": "ALREADY_ACTIVE",
+                "scan_run_id": busy_projects[project_id].id,
+            }
+            for project_id in requested_project_ids
+            if project_id in busy_projects
+        ]
+        if not free_project_ids:
+            existing = busy_projects[requested_project_ids[0]]
+            return {
+                "id": existing.id,
+                "status": "ALREADY_ACTIVE",
+                "created": False,
+                "projects": project_results,
+            }
+        payload = _project_payload_subset(
+            payload, project_execution_order(db, owner.id, payload, free_project_ids),
+        )
+
     run = ScanRun(
         owner_id=owner.id,
         kind=kind,
@@ -1708,7 +1798,28 @@ def enqueue(kind: str, payload: dict, owner: User, db: Session) -> dict:
         payload={"kind": kind},
     )
     db.commit()
-    return {"id": run.id, "status": run.status}
+    result = {"id": run.id, "status": run.status}
+    if kind == "PROJECTS":
+        queued = [
+            {
+                "project_id": project_id,
+                "status": "QUEUED",
+                "scan_run_id": run.id,
+            }
+            for project_id in payload.get("project_ids") or []
+        ]
+        by_project = {
+            item["project_id"]: item for item in [*project_results, *queued]
+        }
+        result.update(
+            {
+                "created": True,
+                "projects": [
+                    by_project[project_id] for project_id in requested_project_ids
+                ],
+            }
+        )
+    return result
 
 
 def _legacy_project_error(
@@ -1799,8 +1910,71 @@ def _report_change_details(item: dict, db: Session) -> dict:
     return enriched
 
 
-def scan_out(run: ScanRun, db: Session) -> dict:
+def _scan_source_payload(run: ScanRun, db: Session, source_key: str) -> dict:
+    """A read-only projection of one shared run, including legacy history."""
     payload = dict(run.payload or {})
+    if payload.get("project_id") and not payload.get("car_ids"):
+        payload["project_ids"] = [payload["project_id"]]
+    plans = list(payload.get("project_plans") or [])
+    reports = list(payload.get("report") or [])
+    failures = list(payload.get("failures") or [])
+    project_sources = {plan["project_id"]: plan.get("source_key") or "encar" for plan in plans}
+    project_ids = set(payload.get("project_ids") or []) | set(project_sources)
+    if payload.get("project_id"):
+        project_ids.add(payload["project_id"])
+    project_ids.update(item["project_id"] for item in [*reports, *failures] if item.get("project_id"))
+    for project in db.scalars(select(Project).where(Project.id.in_(project_ids), Project.owner_id == run.owner_id)):
+        project_sources.setdefault(project.id, project.source_key)
+    # Tagged observations keep deleted projects' history readable. Frozen plans
+    # take precedence over a later change to the stored project.
+    for item in [*reports, *failures]:
+        if item.get("project_id") and item.get("source_key"):
+            project_sources.setdefault(item["project_id"], item["source_key"])
+    if len(payload.get("source_keys") or []) == 1:
+        for project_id in project_ids:
+            project_sources.setdefault(project_id, payload["source_keys"][0])
+    selected = {project_id for project_id, key in project_sources.items() if key == source_key}
+    car_ids = set(payload.get("car_ids") or [])
+    car_ids.update(item["car_id"] for item in [*reports, *failures] if item.get("car_id"))
+    selected_cars = set(db.scalars(select(Car.id).where(Car.id.in_(car_ids), Car.source_key == source_key)))
+    if not selected and not selected_cars and source_key not in (payload.get("source_keys") or []):
+        raise HTTPException(404, "scan_not_found")
+
+    def belongs(item):
+        if item.get("source_key"):
+            return item["source_key"] == source_key
+        if item.get("project_id"):
+            return item["project_id"] in selected
+        if item.get("car_id"):
+            return item["car_id"] in selected_cars
+        return True  # An unscoped driver/job error affects all selected parts.
+
+    payload.update({
+        "project_ids": [project_id for project_id in payload.get("project_ids") or [] if project_id in selected],
+        "project_plans": [plan for plan in plans if plan["project_id"] in selected],
+        "car_ids": [car_id for car_id in payload.get("car_ids") or [] if car_id in selected_cars],
+        "source_keys": [source_key], "report": [item for item in reports if belongs(item)],
+        "failures": [item for item in failures if belongs(item)],
+    })
+    for field in ("project_statuses", "pagination", "detail_progress"):
+        payload[field] = {key: value for key, value in (payload.get(field) or {}).items() if int(key) in selected}
+    for field in ("cancelled_project_ids", "previous_project_ids"):
+        if field in payload:
+            payload[field] = [value for value in payload[field] if value in selected]
+    if payload.get("current_project_id") not in selected:
+        payload.pop("current_project_id", None)
+    if payload.get("project_id") not in selected:
+        payload.pop("project_id", None)
+    if "launch_scope" in payload:
+        payload["launch_scope"] = {"mode": "SITES", "source_keys": [source_key], "project_ids": payload["project_ids"]}
+    if payload.get("execution_versions"):
+        payload["execution_versions"] = {**payload["execution_versions"], "sources": {
+            key: value for key, value in payload["execution_versions"].get("sources", {}).items() if key == source_key}}
+    return payload
+
+
+def scan_out(run: ScanRun, db: Session, source_key: str | None = None) -> dict:
+    payload = dict(run.payload or {}) if source_key is None else _scan_source_payload(run, db, source_key)
     raw_report = list(payload.get("report") or [])
     invalidated_report = [
         item
@@ -1958,10 +2132,13 @@ def scan_out(run: ScanRun, db: Session) -> dict:
         ).all()
         project_names = [row.Project.name for row in project_runs]
         for row in project_runs:
-            technical = _legacy_project_error(
-                run.error,
-                row.Project.name,
-                project_names,
+            if source_key is not None and row.Project.id not in payload["project_ids"]:
+                continue
+            unavailable = source_key is not None and len(project_names) > 1 and (
+                project_names.count(row.Project.name) > 1 or f"{row.Project.name}:" not in (run.error or ""))
+            technical = (
+                "Legacy error details cannot be attributed to this project"
+                if unavailable else _legacy_project_error(run.error, row.Project.name, project_names)
             )
             code = row.ProjectScanRun.error_code or "READ_ERROR"
             if "ERR_TIMED_OUT" in technical or "Timeout" in technical:
@@ -1975,10 +2152,11 @@ def scan_out(run: ScanRun, db: Session) -> dict:
                     "encar_id": None,
                     "code": code,
                     "technical": technical,
+                    **({"details_unavailable": True} if unavailable else {}),
                 }
             )
     payload["failures"] = failures
-    return {
+    result = {
         "id": run.id,
         "kind": run.kind,
         "status": run.status,
@@ -1992,6 +2170,23 @@ def scan_out(run: ScanRun, db: Session) -> dict:
         "created_at": run.created_at,
         "updated_at": run.updated_at,
     }
+    if source_key is not None:
+        portions = list(db.scalars(select(ProjectScanRun).where(
+            ProjectScanRun.scan_run_id == run.id, ProjectScanRun.project_id.in_(payload["project_ids"]))))
+        project_statuses = {**payload["project_statuses"], **{str(portion.project_id): portion.status for portion in portions}}
+        payload["project_statuses"] = project_statuses
+        statuses = set(project_statuses.values())
+        scope_status = next((status for status in ("CANCEL_REQUESTED", "RUNNING", "QUEUED") if status in statuses), None)
+        scope_status = scope_status or (next(iter(statuses)) if len(statuses) == 1 else "PARTIAL" if statuses else run.status)
+        terminal = statuses - {"QUEUED", "RUNNING", "CANCEL_REQUESTED"}
+        scope_progress = round(100 * sum(status in terminal for status in project_statuses.values()) / len(project_statuses)) if project_statuses else run.progress
+        payload["summary"] = {**(payload.get("summary") or {}), "failed": len(failures),
+                              "cancelled": sum(status in {"CANCELLED", "INTERRUPTED_SLEEP"} for status in project_statuses.values())}
+        result.update({"source_key": source_key, "overall_status": run.status, "overall_progress": run.progress,
+                       "status": scope_status, "progress": scope_progress,
+                       "progress_kind": "PROJECT_COMPLETION" if project_statuses else "JOB",
+                       "error": "; ".join(item.get("technical") or item.get("code") or "READ_ERROR" for item in failures) or None})
+    return result
 
 
 @app.post("/api/scans/projects", status_code=202)
@@ -2000,22 +2195,104 @@ def scan_projects(
     current: User = Depends(require_csrf),
     db: Session = Depends(get_db),
 ) -> dict:
-    ids = list(dict.fromkeys(body.project_ids))
-    if not ids:
-        raise HTTPException(422, "project_ids_required")
-    existing = set(
-        db.scalars(
-            select(Project.id).where(
-                Project.id.in_(ids),
-                Project.owner_id == current.id,
+    requested_ids = list(dict.fromkeys(body.project_ids))
+    requested_sources = list(dict.fromkeys(body.source_keys))
+    if body.all_sources and (requested_ids or requested_sources):
+        raise HTTPException(422, "ambiguous_scan_scope")
+
+    if requested_ids:
+        records = list(
+            db.scalars(
+                select(Project).where(
+                    Project.id.in_(requested_ids),
+                    Project.owner_id == current.id,
+                )
             )
         )
-    )
-    if existing != set(ids):
-        raise HTTPException(404, "project_not_found")
+        by_id = {project.id: project for project in records}
+        if set(by_id) != set(requested_ids):
+            raise HTTPException(404, "project_not_found")
+        records = [by_id[project_id] for project_id in requested_ids]
+        if requested_sources and any(
+            project.source_key not in requested_sources for project in records
+        ):
+            raise HTTPException(409, "project_source_mismatch")
+        scope_mode = "PROJECTS"
+    elif body.all_sources:
+        records = list(
+            db.scalars(
+                select(Project)
+                .where(Project.owner_id == current.id)
+                .order_by(Project.id)
+            )
+        )
+        scope_mode = "ALL_SITES"
+    elif requested_sources:
+        records = list(
+            db.scalars(
+                select(Project)
+                .where(
+                    Project.owner_id == current.id,
+                    Project.source_key.in_(requested_sources),
+                )
+                .order_by(Project.id)
+            )
+        )
+        scope_mode = "SITES"
+    else:
+        raise HTTPException(422, "project_scan_scope_required")
+
+    if not records:
+        raise HTTPException(404, "projects_not_found")
+
+    source_keys = list(dict.fromkeys(project.source_key for project in records))
+    sources = {}
+    for source_key in source_keys:
+        try:
+            sources[source_key] = get_source(source_key)
+        except ValueError as exc:
+            raise HTTPException(422, "unsupported_source") from exc
+        except SourceUnavailableError as exc:
+            raise HTTPException(503, "source_unavailable") from exc
+
+    project_plans = []
+    for project in records:
+        try:
+            search_url = sources[project.source_key].validate_search_url(
+                project.search_url
+            )
+        except InvalidSourceUrlError as exc:
+            raise HTTPException(422, "invalid_source_url") from exc
+        project_plans.append(
+            {
+                "project_id": project.id,
+                "source_key": project.source_key,
+                "name": project.name,
+                "search_url": search_url,
+                "scan_mode": project.scan_mode,
+                "search_page_mode": project.search_page_mode,
+                "price_filter_mode": project.price_filter_mode,
+                "price_min_krw": project.price_min_krw,
+                "price_max_krw": project.price_max_krw,
+                "price_filter_revision": project.price_filter_revision,
+                "price_filter_baseline_revision": (
+                    project.price_filter_baseline_revision
+                ),
+            }
+        )
     return enqueue(
         "PROJECTS",
-        {"project_ids": ids, "trigger": "MANUAL"},
+        {
+            "project_ids": [project.id for project in records],
+            "source_keys": source_keys,
+            "project_plans": project_plans,
+            "launch_scope": {
+                "mode": scope_mode,
+                "project_ids": requested_ids,
+                "source_keys": requested_sources,
+            },
+            "trigger": "MANUAL",
+        },
         current,
         db,
     )
@@ -2050,16 +2327,26 @@ def scan_cars(
 def scans(
     current: User = Depends(require_user),
     db: Session = Depends(get_db),
+    source_key: str | None = None,
 ) -> list[dict]:
-    return [
-        scan_out(run, db)
-        for run in db.scalars(
-            select(ScanRun)
-            .where(ScanRun.owner_id == current.id)
-            .order_by(ScanRun.created_at.desc())
-            .limit(100)
-        )
-    ]
+    query = select(ScanRun).where(ScanRun.owner_id == current.id).order_by(ScanRun.created_at.desc())
+    if source_key is None:
+        query = query.limit(100)
+    else:
+        # ponytail: scan legacy JSON until 100 matches; index source membership
+        # if large local histories make this slow. Stream to bound ORM memory.
+        query = query.execution_options(yield_per=100)
+    result = []
+    for run in db.scalars(query):
+        try:
+            result.append(scan_out(run, db, source_key))
+        except HTTPException as exc:
+            if source_key is None or exc.status_code != 404:
+                raise
+            continue
+        if len(result) == 100:
+            break
+    return result
 
 
 @app.get("/api/events")
@@ -2093,6 +2380,7 @@ def scan(
     scan_id: int,
     current: User = Depends(require_user),
     db: Session = Depends(get_db),
+    source_key: str | None = None,
 ) -> dict:
     run = db.scalar(
         select(ScanRun).where(
@@ -2102,14 +2390,22 @@ def scan(
     )
     if not run:
         raise HTTPException(404, "scan_not_found")
-    return scan_out(run, db)
+    return scan_out(run, db, source_key)
 
 
 @app.post("/api/scans/{scan_id}/cancel", status_code=202)
 def cancel_scan(
     scan_id: int,
+    body: CancelScanIn | None = None,
     current: User = Depends(require_csrf),
     db: Session = Depends(get_db),
+) -> dict:
+    with SCAN_COMMAND_LOCK:
+        return _cancel_scan_unlocked(scan_id, body, current, db)
+
+
+def _cancel_scan_unlocked(
+    scan_id: int, body: CancelScanIn | None, current: User, db: Session,
 ) -> dict:
     run = db.scalar(
         select(ScanRun).where(
@@ -2127,6 +2423,146 @@ def cancel_scan(
     cancellation_time = datetime.now(timezone.utc)
     timestamp = cancellation_time.isoformat()
     payload = dict(run.payload or {})
+    requested_project_ids = list(dict.fromkeys(body.project_ids if body else []))
+    requested_sources = list(dict.fromkeys(body.source_keys if body else []))
+    scoped = bool(body and (requested_project_ids or requested_sources))
+    if body and (
+        (body.all_projects and scoped)
+        or (requested_project_ids and requested_sources)
+    ):
+        raise HTTPException(422, "ambiguous_cancel_scope")
+    if scoped:
+        if run.kind != "PROJECTS":
+            raise HTTPException(409, "project_cancel_not_supported")
+        run_project_ids = list(dict.fromkeys(payload.get("project_ids") or []))
+        if requested_project_ids and not set(requested_project_ids) <= set(
+            run_project_ids
+        ):
+            raise HTTPException(404, "project_not_in_scan")
+        if requested_sources:
+            source_by_project = {
+                plan.get("project_id"): plan.get("source_key") or "encar"
+                for plan in payload.get("project_plans") or []
+            }
+            missing_source_ids = [
+                project_id
+                for project_id in run_project_ids
+                if project_id not in source_by_project
+            ]
+            if missing_source_ids:
+                source_by_project.update(
+                    {
+                        project.id: project.source_key
+                        for project in db.scalars(
+                            select(Project).where(
+                                Project.id.in_(missing_source_ids),
+                                Project.owner_id == current.id,
+                            )
+                        )
+                    }
+                )
+            requested_project_ids.extend(
+                project_id
+                for project_id in run_project_ids
+                if source_by_project.get(project_id) in requested_sources
+                and project_id not in requested_project_ids
+            )
+            if not requested_project_ids:
+                raise HTTPException(404, "source_not_in_scan")
+
+        project_runs = {
+            item.project_id: item
+            for item in db.scalars(
+                select(ProjectScanRun).where(ProjectScanRun.scan_run_id == run.id)
+            )
+        }
+        terminal = {"SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED", "INTERRUPTED", "INTERRUPTED_SLEEP"}
+        already_cancelled = set(payload.get("cancelled_project_ids") or [])
+        cancellable = [
+            project_id
+            for project_id in requested_project_ids
+            if project_id not in already_cancelled
+            and (
+                project_id not in project_runs
+                or project_runs[project_id].status not in terminal
+            )
+        ]
+        unfinished = {
+            project_id
+            for project_id in run_project_ids
+            if project_id not in already_cancelled
+            and (
+                project_id not in project_runs
+                or project_runs[project_id].status not in terminal
+            )
+        }
+        if not cancellable:
+            return {
+                "id": run.id,
+                "status": run.status,
+                "projects": [
+                    {
+                        "project_id": project_id,
+                        "status": (
+                            project_runs[project_id].status
+                            if project_id in project_runs
+                            else "ALREADY_CANCELLED"
+                        ),
+                    }
+                    for project_id in requested_project_ids
+                ],
+            }
+        if set(cancellable) != unfinished:
+            statuses = dict(payload.get("project_statuses") or {})
+            cancellation_results = []
+            for project_id in requested_project_ids:
+                project_run = project_runs.get(project_id)
+                if project_id not in cancellable:
+                    status = (
+                        project_run.status if project_run else "ALREADY_CANCELLED"
+                    )
+                elif project_run and project_run.status == "RUNNING":
+                    project_run.status = "CANCEL_REQUESTED"
+                    status = "CANCEL_REQUESTED"
+                else:
+                    if project_run is None and db.get(Project, project_id):
+                        project_run = ProjectScanRun(
+                            scan_run_id=run.id, project_id=project_id,
+                        )
+                        db.add(project_run)
+                    if project_run is not None:
+                        project_run.status = "CANCELLED"
+                        project_run.error_code = None
+                    status = "CANCELLED"
+                statuses[str(project_id)] = status
+                cancellation_results.append(
+                    {"project_id": project_id, "status": status}
+                )
+            payload.update(
+                {
+                    "cancelled_project_ids": list(
+                        dict.fromkeys([*payload.get("cancelled_project_ids", []), *cancellable])
+                    ),
+                    "project_statuses": statuses,
+                    "partial_cancellation_requested_at": timestamp,
+                }
+            )
+            run.payload = payload
+            audit(
+                db,
+                "SCAN_PARTIAL_CANCEL_REQUESTED",
+                actor_user_id=current.id,
+                entity_type="SCAN",
+                entity_id=run.id,
+                payload={"project_ids": requested_project_ids},
+            )
+            db.commit()
+            return {
+                "id": run.id,
+                "status": run.status,
+                "projects": cancellation_results,
+            }
+
     payload["cancellation_requested_at"] = timestamp
     if run.status == "QUEUED":
         run.status = "CANCELLED"
@@ -2148,6 +2584,15 @@ def cancel_scan(
         )
     else:
         run.status = "CANCEL_REQUESTED"
+    for project_run in db.scalars(
+        select(ProjectScanRun).where(
+            ProjectScanRun.scan_run_id == run.id,
+            ProjectScanRun.status.in_(["QUEUED", "RUNNING", "CANCEL_REQUESTED"]),
+        )
+    ):
+        if run.status == "CANCELLED":
+            project_run.status = "CANCELLED"
+            project_run.error_code = None
     run.payload = payload
     audit(
         db,

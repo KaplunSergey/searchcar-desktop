@@ -7,6 +7,7 @@ from app.schemas import ProjectIn, SchedulerIn
 from app.services import merge_reliable_detail
 from app.worker import (
     PreviousState,
+    ProjectScanCancelled,
     ScanCancelled,
     _change_report,
     _dedupe_report,
@@ -21,6 +22,7 @@ from app.worker import (
     _price_filter_needs_baseline,
     _project_scan_modes,
     _raise_if_cancelled,
+    _raise_if_project_cancelled,
     _read_verified_detail,
     _should_apply_search_absence,
     _should_refresh_missing_car,
@@ -542,6 +544,21 @@ def test_cancel_request_interrupts_at_checkpoint():
         _raise_if_cancelled(FakeDb(), SimpleNamespace(status="CANCEL_REQUESTED"))
 
     _raise_if_cancelled(FakeDb(), SimpleNamespace(status="RUNNING"))
+
+
+def test_project_cancel_interrupts_only_the_selected_project():
+    class FakeDb:
+        def refresh(self, job, attribute_names):
+            assert attribute_names == ["status", "payload"]
+
+    job = SimpleNamespace(
+        status="RUNNING",
+        payload={"cancelled_project_ids": [4]},
+    )
+    with pytest.raises(ProjectScanCancelled):
+        _raise_if_project_cancelled(FakeDb(), job, 4)
+
+    _raise_if_project_cancelled(FakeDb(), job, 5)
 
 
 def test_cancelled_job_keeps_partial_report_and_progress():

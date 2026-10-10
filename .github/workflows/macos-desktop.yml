@@ -86,6 +86,18 @@ jobs:
           python scripts/prepare_desktop_browser.py
           python scripts/prepare_desktop_playwright_driver.py
 
+      - name: Verify shared source queue with native Chromium
+        run: python scripts/multisource_acceptance_smoke.py --report-dir work/queue-smoke
+
+      - name: Upload queue acceptance evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: searchcar-queue-smoke-macos-arm64
+          path: work/queue-smoke/**
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Compile diagnostic standalone sidecar
         if: ${{ inputs.include_diagnostic_standalone == true }}
         run: |

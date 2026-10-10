@@ -88,6 +88,21 @@ jobs:
           python scripts/prepare_desktop_browser.py
           python scripts/prepare_desktop_playwright_driver.py
 
+      - name: Verify shared source queue with native Chromium
+        shell: pwsh
+        run: |
+          python scripts/multisource_acceptance_smoke.py --report-dir work/queue-smoke
+          if ($LASTEXITCODE -ne 0) { throw "Shared source queue acceptance failed" }
+
+      - name: Upload queue acceptance evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: searchcar-queue-smoke-windows-x64
+          path: work/queue-smoke/**
+          if-no-files-found: warn
+          retention-days: 14
+
       # Keep one reusable compiler cache. It is deliberately not keyed by the
       # commit SHA: GitHub caches are immutable, and a new cache per commit
       # would quickly exceed the private-repository allowance.

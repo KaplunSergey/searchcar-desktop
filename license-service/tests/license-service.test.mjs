@@ -13,6 +13,7 @@ const migrations = await Promise.all(
     "0003_source_entitlements.sql",
     "0004_license_deletion.sql",
     "0005_device_rebinding.sql",
+    "0006_default_source_access.sql",
   ].map((name) =>
     readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"),
   ),
@@ -153,6 +154,22 @@ before(async () => {
   await mf.ready;
   database = await mf.getD1Database("LICENSE_DB");
   for (const migration of migrations) {
+    if (migration === migrations.at(-1)) {
+      // Simulate licenses from the previous schema, including an empty policy.
+      for (const id of ["legacy-default", "legacy-subset", "legacy-empty"]) {
+        await database.prepare(`INSERT INTO licenses
+          (id,kind,status,started_at,expires_at,created_at,updated_at)
+          VALUES (?,'SUBSCRIPTION','ACTIVE','2026-01-01','2027-01-01','2026-01-01','2026-01-01')`).bind(id).run();
+      }
+      for (const id of ["legacy-default", "legacy-subset"]) {
+        await database.prepare(`INSERT INTO license_sources VALUES (?,'encar','2026-01-01','migration-0003')`).bind(id).run();
+      }
+      for (const id of ["legacy-subset", "legacy-empty"]) {
+        await database.prepare(`INSERT INTO audit_events
+          (id,actor_type,action,target_type,target_id,outcome,metadata_json,created_at)
+          VALUES (?,'ADMIN','LICENSE_SOURCES_UPDATED','LICENSE',?,'SUCCESS','{}','2026-01-01')`).bind(id, id).run();
+      }
+    }
     for (const statement of splitMigrationStatements(migration)) {
       await database.prepare(statement).run();
     }
@@ -225,6 +242,50 @@ test("Worker signing identity matches the desktop trust store", async () => {
   assert.equal(keyId, "searchcar-license-v1");
   assert.equal(worker.vars.LICENSE_SIGNING_PUBLIC_KEY, desktop.public_keys[keyId]);
 });
+
+async function checkDynamicSourcePolicy(context) {
+  if (!localRuntimeAvailable) return context.skip("loopback sockets are blocked by this sandbox");
+  const login = await api("/v1/owner/login", {login: "searchcar-owner", password: "correct-horse-battery-staple-owner"});
+  assert.equal(login.response.status, 200);
+  const cookie = login.response.headers.get("Set-Cookie").split(";", 1)[0];
+  const device = await createDevice("source-policy-device");
+  const trial = await api("/v1/trials/activate", await signedBody(device, {subject_hash: "b".repeat(64)}));
+  assert.equal(trial.response.status, 200);
+  const {license_id, device_id} = trial.json.data;
+  const check = async () => {
+    const result = await api("/v1/licenses/check", await signedBody(device, {license_id, device_id}));
+    assert.equal(result.response.status, 200);
+    const lease = result.json.data.lease;
+    assert.equal(await webcrypto.subtle.verify({name:"Ed25519"}, signingPublicKey,
+      Buffer.from(lease.signature, "base64url"),
+      encoder.encode(`SEARCHCAR-LICENSE-LEASE-V1\n${canonicalJson(lease.payload)}`)), true);
+    return lease.payload.entitlements;
+  };
+  await database.prepare(`INSERT INTO source_catalog VALUES ('test-auction','Test auction',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`).run();
+  try {
+    assert.deepEqual((await check()).sources, ["encar", "test-auction"]);
+    const secondDevice = await createDevice("all-sites-at-first-activation");
+    const secondTrial = await api("/v1/trials/activate", await signedBody(secondDevice, {subject_hash:"5".repeat(64)}));
+    assert.equal(secondTrial.response.status, 200);
+    assert.deepEqual(secondTrial.json.data.lease.payload.entitlements.sources, ["encar", "test-auction"]);
+    const customer = await admin("/v1/admin/customers", {display_name:"Source policy test"});
+    const paidLicense = await admin("/v1/admin/licenses", {customer_id:customer.json.data.customer_id});
+    assert.equal(paidLicense.response.status, 200);
+    assert.equal(await database.prepare("SELECT sources_all FROM licenses WHERE id=?").bind(paidLicense.json.data.license_id).first("sources_all"), 1);
+    const update = async source_keys => ownerApi("/v1/owner/license-sources", {license_id, source_keys}, cookie);
+    assert.equal((await update(["encar"])).response.status, 200);
+    assert.deepEqual((await check()).sources, ["encar"]);
+    assert.equal((await update([])).response.status, 200);
+    assert.deepEqual(await check(), {search:false, data_access:true, backup_restore:true, sources:[]});
+    assert.equal((await update(["*", "encar"])).response.status, 400);
+    assert.equal((await update(["*"])).response.status, 200);
+    assert.deepEqual((await check()).sources, ["encar", "test-auction"]);
+    await database.prepare("UPDATE source_catalog SET is_active=0 WHERE source_key='test-auction'").run();
+    assert.deepEqual((await check()).sources, ["encar"]);
+  } finally {
+    await database.prepare("DELETE FROM source_catalog WHERE source_key='test-auction'").run();
+  }
+}
 
 test("owner transfer picker excludes licenses without an active source device", async () => {
   const ownerUi = await readFile(new URL("../src/owner_ui.ts", import.meta.url), "utf8");
@@ -988,4 +1049,16 @@ test("transfer approval rejects an inactive license without moving its device", 
     .bind(requested.json.data.transfer_code.slice(-5))
     .first();
   assert.equal(transfer.status, "PENDING");
+});
+
+test("default licenses grant active sites dynamically and owner can restrict or restore all", checkDynamicSourcePolicy);
+
+test("migration preserves prior explicit restrictions including empty grants", async context => {
+  if (!localRuntimeAvailable) return context.skip("loopback sockets are blocked by this sandbox");
+  const rows = await database.prepare("SELECT id,sources_all FROM licenses WHERE id LIKE 'legacy-%' ORDER BY id").all();
+  assert.deepEqual(rows.results, [
+    {id:"legacy-default", sources_all:1},
+    {id:"legacy-empty", sources_all:0},
+    {id:"legacy-subset", sources_all:0},
+  ]);
 });

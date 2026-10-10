@@ -104,8 +104,32 @@ class ProjectPatch(BaseModel):
 class BoolPatch(BaseModel): value:bool
 class CommentPatch(BaseModel): comment:str
 class RatingPatch(BaseModel): rating:int|None=Field(default=None,ge=1,le=5)
-class ScanProjectsIn(BaseModel): project_ids:list[int]
+class ScanProjectsIn(BaseModel):
+    project_ids:list[int]=Field(default_factory=list)
+    source_keys:list[str]=Field(default_factory=list)
+    all_sources:bool=False
+
+    @field_validator("source_keys")
+    @classmethod
+    def normalized_source_keys(cls, values):
+        normalized=[]
+        for value in values:
+            key=value.strip().lower()
+            if not key or len(key)>32:
+                raise ValueError("invalid_source_key")
+            if key not in normalized:
+                normalized.append(key)
+        return normalized
 class ScanCarsIn(BaseModel): car_ids:list[int]; project_id:int|None=None
+class CancelScanIn(BaseModel):
+    project_ids:list[int]=Field(default_factory=list)
+    source_keys:list[str]=Field(default_factory=list)
+    all_projects:bool=False
+
+    @field_validator("source_keys")
+    @classmethod
+    def normalized_source_keys(cls, values):
+        return ScanProjectsIn.normalized_source_keys(values)
 class SchedulerIn(BaseModel):
     enabled:bool; paused:bool=False; interval_minutes:Literal[60,180,360,720,1440]; project_ids:list[int]; performance_mode:Literal["ECO", "FAST"]="FAST"
 

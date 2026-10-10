@@ -335,11 +335,12 @@ def evaluate_search_entitlement(
             entitlements.get("search"), bool
         ):
             raise LicenseStateError("LICENSE_ENTITLEMENTS_INVALID")
-        # Leases issued before the source catalog existed are valid only for
-        # the originally supported Encar source.  New leases always contain a
-        # signed explicit list, so adding another source never silently grants
-        # it to an older customer.
-        raw_sources = entitlements.get("sources", ["encar"])
+        # Missing legacy policy and a standalone wildcard grant built-ins only;
+        # no user-controlled module names or unshipped adapters are loaded.
+        raw_sources = entitlements.get("sources", ["*"])
+        if raw_sources == ["*"]:
+            from .sources.registry import list_sources
+            raw_sources = [source.key for source in list_sources()]
         if (
             not isinstance(raw_sources, list)
             or len(raw_sources) > 32

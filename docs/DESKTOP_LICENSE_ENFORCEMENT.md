@@ -79,6 +79,23 @@ An existing binding is checked shortly after application startup and every six
 hours. Each response lease is verified locally before `binding.json` or
 `lease.json` is replaced.
 
+The signed `entitlements.sources` policy controls site access. Missing legacy
+policy or a standalone `["*"]` permits all built-in sources shipped in the
+current application; an explicit list permits only those keys, and `[]` permits
+none. Null, mixed wildcard lists and malformed keys fail closed. Wildcards do
+not load unshipped adapters. Changing local JSON without re-signing cannot
+grant access.
+
+Normal six-hour synchronization (and “Check now”) installs site access changes
+without reactivation or reinstall. Network failure keeps the last verified
+policy only until the existing lease/subscription expiry. Manual project/car
+enqueue derives sources from owned records/frozen plans; scheduled runs skip
+disallowed sites but retain their scheduled selection. Worker rechecks before
+each project/source runtime, so queued work revoked since enqueue records
+`LICENSE_SOURCE_NOT_ALLOWED` while allowed parts continue. Revocation never
+deletes local projects, cars or history; already-running project work is not
+retroactively terminated.
+
 An active license may legitimately contain no enabled parser sources. In that
 case the signed lease remains valid and the settings screen continues showing
 the license, device and expiry, but `can_search` is false and every manual,

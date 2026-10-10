@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from collections import deque
 from datetime import datetime, timezone
+from threading import RLock
 
 from sqlalchemy import Engine, bindparam, select, text, update
 from sqlalchemy.orm import Session
 
 from .db_types import UTCDateTime
-from .models import ProjectScanRun, ScanRun
+from .models import Project, ProjectScanRun, ScanRun
 from .maintenance import maintenance_active
 
 
@@ -19,10 +21,43 @@ TERMINAL_SCAN_STATUSES = (
     "INTERRUPTED",
     "INTERRUPTED_SLEEP",
 )
+# ponytail: desktop has one server process. A multi-process deployment needs
+# DB-level reservations instead of this command/initialization lock.
+SCAN_COMMAND_LOCK = RLock()
 
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def project_execution_order(
+    db: Session, owner_id: int, payload: dict, project_ids: list[int],
+) -> list[int]:
+    """Round-robin sites within one batch; keep each site's submitted order."""
+
+    project_ids = list(dict.fromkeys(project_ids))
+    source_by_project = {
+        plan["project_id"]: plan.get("source_key") or "encar"
+        for plan in payload.get("project_plans") or []
+    }
+    legacy_ids = [project_id for project_id in project_ids if project_id not in source_by_project]
+    if legacy_ids:
+        source_by_project.update({
+            project.id: project.source_key
+            for project in db.scalars(select(Project).where(
+                Project.id.in_(legacy_ids), Project.owner_id == owner_id,
+            ))
+        })
+    groups: dict[str, deque[int]] = {}
+    for project_id in project_ids:
+        groups.setdefault(source_by_project.get(project_id, "encar"), deque()).append(project_id)
+    ordered = []
+    while groups:
+        for key in tuple(groups):
+            ordered.append(groups[key].popleft())
+            if not groups[key]:
+                del groups[key]
+    return ordered
 
 
 def claim_next_job(
@@ -194,14 +229,28 @@ def recover_interrupted_jobs(
             recovered_ids.append(job.id)
 
         if recovered_ids:
+            jobs_by_id = {job.id: job for job in jobs}
             for project_run in db.scalars(
                 select(ProjectScanRun).where(
                     ProjectScanRun.scan_run_id.in_(recovered_ids),
-                    ProjectScanRun.status.in_(("QUEUED", "RUNNING")),
                 )
             ):
-                project_run.status = "INTERRUPTED"
-                project_run.error_code = project_run.error_code or "APP_INTERRUPTED"
+                job = jobs_by_id[project_run.scan_run_id]
+                payload = dict(job.payload or {})
+                if project_run.status == "CANCEL_REQUESTED" or (
+                    project_run.status in {"QUEUED", "RUNNING"}
+                    and project_run.project_id in payload.get("cancelled_project_ids", [])
+                ):
+                    project_run.status = "CANCELLED"
+                    project_run.error_code = None
+                elif project_run.status in {"QUEUED", "RUNNING"}:
+                    project_run.status = "INTERRUPTED"
+                    project_run.error_code = project_run.error_code or "APP_INTERRUPTED"
+                payload["project_statuses"] = {
+                    **payload.get("project_statuses", {}),
+                    str(project_run.project_id): project_run.status,
+                }
+                job.payload = payload
         db.commit()
     return recovered_ids
 
