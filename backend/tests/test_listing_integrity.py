@@ -66,6 +66,38 @@ def tracked_car(db: Session):
     return project, car, relation
 
 
+@pytest.mark.parametrize("sold", [False, True])
+def test_light_observation_survives_storage_without_erasing_profile(db, monkeypatch, tmp_path, sold):
+    from app.sources.registry import get_source
+
+    project, car, _relation = tracked_car(db)
+    car.details = {**car.details, "mileage_km": 18_000, "trim": "Premium"}
+    db.commit()
+    monkeypatch.setattr("app.scanner.read_price_status", lambda *args: {
+        "canonical_car_id": car.canonical_encar_id,
+        "source_car_id": car.canonical_encar_id,
+        "url": car.url,
+        "price_krw": None if sold else car.current_price,
+        "offer_type": "SALE",
+        "sold": sold,
+        "checked_at": "2026-10-09T09:00:00+00:00",
+    })
+    observed = get_source("encar").read_verified_detail(
+        object(), {"source_car_id": car.canonical_encar_id, "url": car.url},
+        tmp_path, car.current_price, read_kind="PRICE_STATUS",
+    )
+    car_id = car.id
+    upsert_price_status(db, project, observed)
+    db.commit()
+    db.expire_all()
+    persisted = db.get(Car, car_id)
+    assert persisted.details["source_observation"] == observed["source_observation"]
+    assert persisted.details["mileage_km"] == 18_000
+    assert persisted.details["trim"] == "Premium"
+    assert persisted.current_price == 24_800_000
+    assert persisted.status == ("SOLD" if sold else "UPDATED")
+
+
 def test_project_groups_existing_duplicate_listings_without_losing_tracking(db):
     project, car, relation = tracked_car(db)
     car.details = {**car.details, "registration_number": "237허8037"}

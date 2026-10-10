@@ -8,7 +8,6 @@ from .models import (
     CarEvent,
     CarImage,
     CarSnapshot,
-    PriceHistory,
     Project,
     ProjectCar,
 )
@@ -21,6 +20,8 @@ from .parser import (
 )
 from .database import settings
 from .storage_paths import portable_storage_path
+from .money import comparable_money, encar_money_values, money_values_out, store_money_values
+from .current_images import persist_images
 
 
 def now() -> datetime:
@@ -32,10 +33,14 @@ def _image_record(db, car_id: int, kind: str, path: str | None, checksum: str | 
     if not path:
         return
     existing = db.scalar(
-        select(CarImage).where(CarImage.car_id == car_id, CarImage.kind == kind)
+        select(CarImage).where(CarImage.car_id == car_id, CarImage.kind == kind,
+                               CarImage.integrity_status == "VALID")
+        .order_by(CarImage.created_at.desc(), CarImage.id.desc())
     )
     payload = {"path": path, "checksum": checksum, "updated_at": now().isoformat()}
     if existing:
+        if (existing.payload or {}).get("path") == path and (existing.payload or {}).get("checksum") == checksum:
+            return
         existing.payload = payload
     else:
         db.add(CarImage(car_id=car_id, kind=kind, payload=payload))
@@ -56,6 +61,7 @@ def merge_reliable_detail(previous: dict, current: dict) -> dict:
             "checked_at",
             "scan_run_id",
             "parse_quality",
+            "source_observation",
             "sold",
             "unavailable",
             "screenshot_path",
@@ -149,6 +155,8 @@ def upsert_price_status(db, project: Project, status: dict, *, mark_search_found
             "lease_monthly_payment_krw": status.get("lease_monthly_payment_krw"),
             "lease_term_months": status.get("lease_term_months"),
             "checked_at": status.get("checked_at"),
+            "_images": status.get("_images") or {},
+            **({"source_observation": status["source_observation"]} if "source_observation" in status else {}),
             "parse_quality": "SOLD_PAGE" if status.get("sold") else "PRICE_STATUS",
             "sold": bool(status.get("sold")),
             "unavailable": False,
@@ -164,13 +172,17 @@ def upsert_detail(
     *,
     mark_search_found: bool = True,
 ) -> Car:
+    if (getattr(project, "source_key", None) or "encar") != "encar":
+        raise ValueError("Encar storage cannot update a project from another source")
+    detail = dict(detail)
+    images = detail.pop("_images", {})
     canonical = str(detail["canonical_car_id"])
     source_id = str(detail.get("source_car_id") or canonical)
     if not detail.get("sold") and source_id != canonical:
         raise ValueError(
             f"Refusing cross-listing update: requested {source_id}, displayed {canonical}"
         )
-    car = db.scalar(select(Car).where(Car.canonical_encar_id == canonical))
+    car = db.scalar(select(Car).where(Car.source_key == "encar", Car.source_listing_id == canonical))
     link = (
         db.get(ProjectCar, {"project_id": project.id, "car_id": car.id})
         if car
@@ -182,24 +194,27 @@ def upsert_detail(
         )
 
     old_price = car.current_price if car else None
+    old_money = money_values_out(car, db) if car else []
     old_details = car.details or {} if car else {}
     old_fingerprint = fingerprint_listing(old_details) if old_details else None
     detail = merge_reliable_detail(old_details, detail)
     material_diff = material_changes(old_details, detail) if old_details else []
-    if not car:
+    is_new = car is None
+    if is_new:
         car = Car(
             canonical_encar_id=canonical,
+            source_key="encar",
+            source_listing_id=canonical,
             url=detail.get("url") or f"https://fem.encar.com/cars/detail/{canonical}",
             title=detail.get("title"),
             status="NEW",
         )
         db.add(car)
         db.flush()
-        db.add(CarEvent(car_id=car.id, kind="NEW", payload=detail))
 
     authoritative_price = (
         detail.get("price_krw")
-        if detail.get("price_source") in {
+        if not detail.get("sold") and detail.get("price_source") in {
             "DETAIL_PRIMARY",
             "DETAIL_RENTAL_MONTHLY",
             "DETAIL_LEASE_MONTHLY",
@@ -215,23 +230,14 @@ def upsert_detail(
         "scan_run_id": detail.get("scan_run_id"),
         "checked_at": detail.get("checked_at"),
     }
-    change = None if offer_type_changed else price_change(old_price, authoritative_price)
+    incoming_money = encar_money_values({"offer_type": new_offer_type, "price_krw": authoritative_price})
+    same_basis = bool(old_money and comparable_money(old_money[0], incoming_money[0]))
+    change = price_change(old_price, authoritative_price) if same_basis and not offer_type_changed else None
+    detail["money_values"] = store_money_values(db, car, incoming_money, provenance=provenance)
+    provenance["money_values"] = detail["money_values"]
+    if is_new:
+        db.add(CarEvent(car_id=car.id, kind="NEW", payload=detail))
     sold_transition = bool(detail.get("sold") and car.status != "SOLD")
-    if authoritative_price and authoritative_price != old_price:
-        db.add(
-            PriceHistory(
-                car_id=car.id,
-                kind="PRICE",
-                payload={
-                    "price_krw": authoritative_price,
-                    "price_source": detail.get("price_source"),
-                    "offer_type": new_offer_type,
-                    "source_car_id": source_id,
-                    "scan_run_id": detail.get("scan_run_id"),
-                    "checked_at": detail.get("checked_at"),
-                },
-            )
-        )
     if detail.get("sold"):
         if sold_transition:
             db.add(
@@ -248,7 +254,7 @@ def upsert_detail(
             CarEvent(
                 car_id=car.id,
                 kind=change["type"],
-                payload={**change, **provenance},
+                payload={**change, **provenance, "previous_money_values": old_money},
             )
         )
     elif car.status == "SOLD":
@@ -301,11 +307,32 @@ def upsert_detail(
 
     car.url = detail.get("url") or car.url
     car.title = detail.get("title") or car.title
-    if authoritative_price is not None:
-        car.current_price = authoritative_price
     car.fingerprint = detail.get("fingerprint")
     car.details = detail
     car.updated_at = now()
+    if not detail.get("sold"):
+        stored_images = {}
+        if images.get("MAIN"):
+            stored_images.update(persist_images(
+                db,
+                car,
+                {"MAIN": images["MAIN"]},
+                Path(settings.storage_root),
+                capture=(
+                    "SOURCE_DOWNLOAD"
+                    if detail.get("main_image_source_url")
+                    else "BROWSER_SCREENSHOT"
+                ),
+            ))
+        if images.get("SCREENSHOT"):
+            stored_images.update(persist_images(
+                db,
+                car,
+                {"SCREENSHOT": images["SCREENSHOT"]},
+                Path(settings.storage_root),
+            ))
+        detail.update(stored_images)
+        car.details = detail
 
     link = link or db.get(
         ProjectCar, {"project_id": project.id, "car_id": car.id}

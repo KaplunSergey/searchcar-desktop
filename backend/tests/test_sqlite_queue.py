@@ -72,9 +72,9 @@ def add_user(db: Session, username: str = "owner") -> User:
 def test_sqlite_migrations_are_versioned_and_idempotent(tmp_path: Path) -> None:
     engine = sqlite_engine(tmp_path)
 
-    assert migrate_sqlite(engine) == 7
-    assert migrate_sqlite(engine) == 7
-    assert sqlite_schema_version(engine) == 7
+    assert migrate_sqlite(engine) == 10
+    assert migrate_sqlite(engine) == 10
+    assert sqlite_schema_version(engine) == 10
 
     with engine.connect() as connection:
         columns = {
@@ -174,7 +174,7 @@ def test_pre_migration_desktop_database_is_adopted(tmp_path: Path) -> None:
             )
         )
 
-    assert migrate_sqlite(engine) == 7
+    assert migrate_sqlite(engine) == 10
     with engine.connect() as connection:
         row = connection.execute(
             text(
@@ -241,6 +241,32 @@ def test_two_workers_cannot_claim_jobs_at_the_same_time(tmp_path: Path) -> None:
         assert running.attempt_count == 1
         assert running.started_at is not None
         assert running.started_at.tzinfo == timezone.utc
+
+
+def test_active_job_blocks_queued_work_from_another_owner(tmp_path: Path) -> None:
+    """The desktop has one shared sequential queue, not one worker per owner."""
+
+    engine = sqlite_engine(tmp_path)
+    migrate_sqlite(engine)
+    with Session(engine) as db:
+        first_owner = add_user(db, "first-owner")
+        second_owner = add_user(db, "second-owner")
+        first = ScanRun(owner_id=first_owner.id, kind="PROJECTS", status="QUEUED")
+        second = ScanRun(owner_id=second_owner.id, kind="PROJECTS", status="QUEUED")
+        db.add_all([first, second])
+        db.commit()
+        first_id, second_id = first.id, second.id
+
+    assert claim_next_job(engine, "worker-a") == first_id
+    assert claim_next_job(engine, "worker-b") is None
+
+    with Session(engine) as db:
+        first = db.get(ScanRun, first_id)
+        first.status = "SUCCEEDED"
+        first.finished_at = datetime.now(timezone.utc)
+        db.commit()
+
+    assert claim_next_job(engine, "worker-b") == second_id
 
 
 def test_deleting_only_project_cancels_queued_job(tmp_path: Path) -> None:

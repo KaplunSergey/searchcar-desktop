@@ -1,9 +1,15 @@
 import enum
 from datetime import datetime
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, ForeignKey, ForeignKeyConstraint, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
 from .db_types import UTCDateTime
+
+
+def _encar_listing_id(context):
+    # Transitional default for existing Encar writers and legacy DB conversion.
+    # A displayed registration number or alias must never become the identity.
+    return context.get_current_parameters().get("canonical_encar_id")
 
 class ScanMode(str, enum.Enum): FAST="FAST"; ACCURATE="ACCURATE"
 class User(Base):
@@ -55,11 +61,13 @@ class AuditLog(Base):
 class Project(Base):
     __tablename__="projects"
     __table_args__=(
-        UniqueConstraint("owner_id","name_key",name="uq_projects_owner_name_key"),
-        UniqueConstraint("owner_id","search_url",name="uq_projects_owner_search_url"),
+        UniqueConstraint("owner_id","source_key","name_key",name="uq_projects_owner_source_name_key"),
+        UniqueConstraint("owner_id","source_key","search_url",name="uq_projects_owner_source_search_url"),
+        CheckConstraint("length(source_key) > 0", name="ck_projects_source_key"),
     )
     id: Mapped[int]=mapped_column(primary_key=True)
     owner_id: Mapped[int]=mapped_column(ForeignKey("users.id"), index=True)
+    source_key: Mapped[str]=mapped_column(String(32), default="encar", server_default="encar")
     name: Mapped[str]=mapped_column(String(140)); name_key: Mapped[str]=mapped_column(String(140))
     search_url: Mapped[str]=mapped_column(Text); telegram_url: Mapped[str|None]=mapped_column(Text)
     scan_mode: Mapped[str]=mapped_column(String(16), default="FAST"); search_page_mode: Mapped[str]=mapped_column(String(16), default="ALL_PAGES")
@@ -71,12 +79,37 @@ class Project(Base):
     auto_update: Mapped[bool]=mapped_column(Boolean, default=True); created_at: Mapped[datetime]=mapped_column(UTCDateTime(), server_default=func.now()); updated_at: Mapped[datetime]=mapped_column(UTCDateTime(), server_default=func.now(), onupdate=func.now())
 class Car(Base):
     __tablename__="cars"
-    id: Mapped[int]=mapped_column(primary_key=True); canonical_encar_id: Mapped[str]=mapped_column(String(40), unique=True)
+    __table_args__=(
+        UniqueConstraint("source_key", "source_listing_id", name="uq_cars_source_listing"),
+        UniqueConstraint("id", "source_key", name="uq_cars_id_source"),
+        CheckConstraint("length(source_key) > 0 AND length(source_listing_id) > 0", name="ck_cars_source_identity"),
+        CheckConstraint("(source_key = 'encar' AND canonical_encar_id IS NOT NULL AND canonical_encar_id = source_listing_id) OR (source_key != 'encar' AND canonical_encar_id IS NULL)", name="ck_cars_legacy_encar_identity"),
+    )
+    id: Mapped[int]=mapped_column(primary_key=True); canonical_encar_id: Mapped[str|None]=mapped_column(String(40))
+    source_key: Mapped[str]=mapped_column(String(32), default="encar", server_default="encar")
+    source_listing_id: Mapped[str]=mapped_column(String(128), default=_encar_listing_id)
     url: Mapped[str]=mapped_column(Text); title: Mapped[str|None]=mapped_column(Text); details: Mapped[dict|None]=mapped_column(JSON)
     current_price: Mapped[int|None]=mapped_column(BigInteger); status: Mapped[str]=mapped_column(String(40), default="NEW")
     fingerprint: Mapped[str|None]=mapped_column(String(64)); comment: Mapped[str|None]=mapped_column(Text); rating: Mapped[int|None]=mapped_column(Integer)
     integrity_status: Mapped[str]=mapped_column(String(30), default="VALID"); integrity_reason: Mapped[str|None]=mapped_column(Text)
     excluded: Mapped[bool]=mapped_column(Boolean, default=False); created_at: Mapped[datetime]=mapped_column(UTCDateTime(), server_default=func.now()); updated_at: Mapped[datetime]=mapped_column(UTCDateTime(), server_default=func.now(), onupdate=func.now())
+class CarMoneyValue(Base):
+    __tablename__ = "car_money_values"
+    __table_args__ = (
+        CheckConstraint("currency IN ('KRW', 'USD')", name="ck_money_currency"),
+        CheckConstraint("meaning IN ('SALE_TOTAL', 'RENT_MONTHLY', 'LEASE_MONTHLY', 'CURRENT_BID', 'BUY_NOW', 'ESTIMATED_RETAIL', 'UNKNOWN')", name="ck_money_meaning"),
+        CheckConstraint("(state = 'KNOWN' AND amount_minor IS NOT NULL AND amount_minor >= 0) OR (state IN ('UNKNOWN', 'ON_REQUEST') AND amount_minor IS NULL)", name="ck_money_amount_state"),
+        CheckConstraint("meaning != 'UNKNOWN' OR state = 'UNKNOWN'", name="ck_money_unknown_meaning"),
+        CheckConstraint("auction_round IS NULL OR (meaning = 'CURRENT_BID' AND length(auction_round) > 0)", name="ck_money_auction_round"),
+    )
+    car_id: Mapped[int] = mapped_column(ForeignKey("cars.id", ondelete="CASCADE"), primary_key=True)
+    meaning: Mapped[str] = mapped_column(String(32), primary_key=True)
+    currency: Mapped[str] = mapped_column(String(3), primary_key=True)
+    # Integer minor units: KRW has no fraction; USD uses cents. No conversion.
+    amount_minor: Mapped[int | None] = mapped_column(BigInteger)
+    state: Mapped[str] = mapped_column(String(16))
+    auction_round: Mapped[str | None] = mapped_column(String(128))
+
 class ProjectCar(Base):
     __tablename__="project_cars"
     project_id: Mapped[int]=mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True); car_id: Mapped[int]=mapped_column(ForeignKey("cars.id"), primary_key=True)
@@ -98,7 +131,14 @@ class UserCarState(Base):
     created_at: Mapped[datetime]=mapped_column(UTCDateTime(), server_default=func.now())
     updated_at: Mapped[datetime]=mapped_column(UTCDateTime(), server_default=func.now(), onupdate=func.now())
 class CarAlias(Base):
-    __tablename__="car_aliases"; id: Mapped[int]=mapped_column(primary_key=True); car_id: Mapped[int]=mapped_column(ForeignKey("cars.id", ondelete="CASCADE")); alias_id: Mapped[str]=mapped_column(String(40), unique=True); created_at: Mapped[datetime]=mapped_column(UTCDateTime(), server_default=func.now())
+    __tablename__="car_aliases"
+    __table_args__=(
+        UniqueConstraint("source_key", "alias_id", name="uq_car_aliases_source_alias"),
+        ForeignKeyConstraint(["car_id", "source_key"], ["cars.id", "cars.source_key"], ondelete="CASCADE", name="fk_car_aliases_car_source"),
+        CheckConstraint("length(source_key) > 0", name="ck_car_aliases_source_key"),
+    )
+    id: Mapped[int]=mapped_column(primary_key=True); car_id: Mapped[int]=mapped_column(Integer); alias_id: Mapped[str]=mapped_column(String(40)); created_at: Mapped[datetime]=mapped_column(UTCDateTime(), server_default=func.now())
+    source_key: Mapped[str]=mapped_column(String(32), default="encar", server_default="encar")
 class CarRecord(Base):
     __abstract__=True; id: Mapped[int]=mapped_column(primary_key=True); car_id: Mapped[int]=mapped_column(ForeignKey("cars.id", ondelete="CASCADE")); kind: Mapped[str|None]=mapped_column(String(40)); payload: Mapped[dict|None]=mapped_column(JSON); integrity_status: Mapped[str]=mapped_column(String(30), default="VALID"); integrity_reason: Mapped[str|None]=mapped_column(Text); created_at: Mapped[datetime]=mapped_column(UTCDateTime(), server_default=func.now())
 class CarSnapshot(CarRecord): __tablename__="car_snapshots"

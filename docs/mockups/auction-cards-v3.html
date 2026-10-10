@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SearchCar — единая карточка аукционов</title>
+<style>
+:root{--blue:#2563eb;--ink:#111a2d;--muted:#52627b;--line:#dbe3ef;--bg:#f3f6fa}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:1380px;margin:auto;padding:30px}h1{font-size:28px;margin:0 0 8px}p{color:var(--muted)}.list{display:grid;gap:18px}.card{background:white;border:1px solid var(--line);border-left:4px solid #acc6f4;border-radius:14px;padding:24px;display:grid;grid-template-columns:150px minmax(0,1fr) 234px;gap:24px}.photo{height:150px;border:1px dashed #c6d2e3;border-radius:11px;background:#eef3fa;color:var(--muted);display:grid;place-content:center;text-align:center;font-size:12px}.photo b{font-size:36px;color:#8ca2be}.info{min-width:0}h2{font-size:22px;line-height:1.3;margin:0 0 8px;overflow-wrap:anywhere}.subtitle{font-size:13px;margin:0}.facts{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:22px 0 18px}.facts>div+div{border-left:1px solid var(--line);padding-left:18px}.label{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}.mileage{font-size:30px;font-weight:750;line-height:1.2}.unit{font-size:15px;font-weight:500;color:var(--muted)}.secondary{font-size:13px;color:var(--muted);margin-top:6px}.damage{font-size:20px;font-weight:700;line-height:1.3}.warning{color:#a04a08}.condition{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.chip{background:#e7f5ec;color:#166534;padding:7px 10px;border-radius:7px;font-weight:700;font-size:13px}.chip.neutral{background:#eef2f7;color:var(--muted)}.condition small{color:var(--muted)}.auction{border-left:1px solid var(--line);padding-left:24px}.date{font-size:16px;font-weight:650}.clock{font-size:42px;font-weight:750;line-height:1.3}.countdown{display:inline-block;margin:14px 0 8px;padding:9px 12px;border-radius:8px;color:#1c4cb0;background:#edf3ff;font-weight:700}.zone{font-size:12px;color:var(--muted)}.source-link{display:inline-block;margin-top:12px;color:var(--blue);text-decoration:none;font-weight:650}.source-link:focus-visible{outline:3px solid var(--blue);outline-offset:4px}.notice{font-size:12px;background:#eef3fa;padding:12px 16px;border-radius:8px;margin:20px 0}.section-title{margin:32px 0 14px;font-size:18px}
+@media(max-width:1000px){.card{grid-template-columns:110px minmax(0,1fr) 200px;gap:18px;padding:20px}.photo{height:120px}.auction{padding-left:18px}h2{font-size:19px}.mileage{font-size:26px}.damage{font-size:18px}}
+@media(max-width:800px){main{padding:20px}.card{grid-template-columns:90px minmax(0,1fr)}.auction{grid-column:2;border-left:0;border-top:1px solid var(--line);padding:14px 0 0}.clock{font-size:32px}.photo{height:100px}}
+@media(max-width:500px){main{padding:14px}.card{padding:16px;gap:14px;grid-template-columns:70px minmax(0,1fr)}.photo{height:80px}.facts{grid-template-columns:1fr;gap:12px}.facts>div+div{border-left:0;border-top:1px solid var(--line);padding:12px 0 0}.auction{grid-column:1/3}h2{font-size:18px}}
+</style>
+<main><h1>Единая карточка аукционов</h1><p>Один компонент для IAA и Copart. Пробег, повреждения и время торгов — на первом плане.</p><div class="notice">Дизайн-макет v3. Все значения демонстрационные, таймер зафиксирован на 7 октября 2026, 12:37 Europe/Warsaw. Фото не загружаются. Ссылки ведут на поиски, а не на демонстрационные автомобили.</div><div class="list" id="examples"></div><h3 class="section-title">Другие состояния той же карточки</h3><div class="list" id="states"></div></main>
+<template id="auction-card"><article class="card"><div class="photo"><b aria-hidden="true">◇</b><span>Место для фото</span></div><div class="info"><h2></h2><p class="subtitle"></p><div class="facts"><div><span class="label">Показание одометра</span><div class="mileage"></div><div class="secondary odometer-note"></div></div><div><span class="label">Повреждения</span><div class="damage"></div><div class="secondary damage-note"></div></div></div><div class="condition"><span class="chip"></span><small></small></div></div><div class="auction"><span class="label event-label"></span><div class="date"></div><div class="clock"></div><div class="countdown"></div><div class="zone">Время компьютера · Europe/Warsaw · UTC+2</div><a class="source-link" target="_blank" rel="noopener noreferrer"></a></div></article></template>
+<script>
+// Only fixture data: no network, storage, live clock or source parsing.
+const examples = [
+ {source:'IAA',name:'2020 Mercedes-Benz GLE 350 4MATIC',spec:'2,0 л · бензин · № 46271057',miles:'103 743',odometer:'≈ 166 958 км · фактический',damage:'Обычный износ',start:'Run & Drive',detail:'Ключи есть · документ Clear',event:'Начало аукциона',date:'Сегодня, 7 октября',time:'15:30',timer:'Через 2 ч 53 мин'},
+ {source:'Copart',name:'2023 Audi A5 Prestige 45',spec:'2,0 л · бензин · демонстрационный лот',miles:'41 138',odometer:'≈ 66 206 км · фактический',damage:'Передняя часть',start:'Run & Drive',detail:'Ключи есть · документ Salvage',event:'Начало аукциона',date:'Сегодня, 7 октября',time:'16:00',timer:'Через 3 ч 23 мин'}
+];
+const states = [
+ {source:'IAA',name:'2021 Toyota Sienna LE',spec:'2,5 л · гибрид · № 46264116',miles:'51 353',odometer:'⚠ Не фактический пробег',damage:'Механические',damageNote:'Дополнительно: Other',start:'Stationary',detail:'Ключи — нет данных · документ Clear',event:'Начало аукциона',date:'Сегодня, 7 октября',time:'12:00',timer:'Начался по расписанию',neutral:true},
+ {source:'IAA',name:'2026 Toyota Camry Nightshade',spec:'2,5 л · гибрид · демонстрационный Timed Auction',miles:'7 483',odometer:'≈ 12 043 км · фактический',damage:'Передняя часть',start:'Starts',detail:'Ключи есть · документ Salvage',event:'Timed Auction · окончание¹',date:'Завтра, 8 октября',time:'03:10',timer:'До окончания 14 ч 33 мин',neutral:true}
+];
+function renderCard(data){
+ const card=document.getElementById('auction-card').content.cloneNode(true);
+ const set=(selector,text)=>{card.querySelector(selector).textContent=text||'';};
+ set('h2',data.name);set('.subtitle',data.source+' · '+data.spec);set('.mileage',data.miles+' mi');set('.odometer-note',data.odometer);set('.damage',data.damage);set('.damage-note',data.damageNote);set('.chip',data.start);set('.condition small',data.detail);set('.event-label',data.event);set('.date',data.date);set('.clock',data.time);set('.countdown',data.timer);
+ if(data.neutral)card.querySelector('.chip').classList.add('neutral');
+ if(data.odometer.startsWith('⚠'))card.querySelector('.odometer-note').classList.add('warning');
+ if(data.damage!=='Обычный износ')card.querySelector('.damage').classList.add('warning');
+ const link=card.querySelector('a');link.textContent='Поиск на '+data.source+' ↗';link.href=data.source==='IAA'?'https://www.iaai.com/Search?url=TJVcN0Pg055OgM3rLyqqqhE9kuXpUANoF4BPsJ0C8WM%3d':'https://www.copart.com/lotSearchResults';
+ return card;
+}
+for(const data of examples)document.getElementById('examples').append(renderCard(data));
+for(const data of states)document.getElementById('states').append(renderCard(data));
+</script>
+<main class="notice">¹ Вариант подписи для Timed Auction: на публичном списке видны BID NOW и отсчёт до вечернего времени. Семантику этого времени для IAA US ещё нужно подтвердить; это не утверждение о реальном лоте. Run & Drive — метка источника, не гарантия исправности. Пустое поле не означает отрицательное состояние.</main>
+</html>

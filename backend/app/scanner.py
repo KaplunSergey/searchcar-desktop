@@ -1,4 +1,3 @@
-import hashlib
 import json
 import math
 import re
@@ -10,6 +9,8 @@ from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsp
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
+from .sources.contracts import ScanError, SearchCollection
+from .current_images import image_format
 
 from .parser import (
     ACCIDENT_TERMS,
@@ -54,10 +55,6 @@ NO_RESULTS_MARKERS = (
     "등록된 차량이 없습니다",
     "검색된 차량이 없습니다",
 )
-
-
-class ScanError(RuntimeError):
-    code = "READ_ERROR"
 
 
 class CaptchaError(ScanError):
@@ -274,14 +271,6 @@ class SearchPage:
     total_pages: int
     total_results: int | None
     has_next: bool
-
-
-@dataclass(frozen=True)
-class SearchCollection:
-    rows: dict[str, dict]
-    pages_visited: int
-    total_pages: int
-    total_results: int | None
 
 
 def _fragment_state(url: str) -> dict | None:
@@ -537,6 +526,63 @@ def _pagination_metadata(page, body_text: str, requested_page: int, limit: int) 
     return total_pages, total_results, has_next
 
 
+def _trusted_encar_image_url(value: str | None) -> str | None:
+    try:
+        parsed = urlsplit(str(value or "").strip())
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or not parsed.hostname.endswith(".encar.com")
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port not in {None, 443}
+        ):
+            return None
+    except ValueError:
+        return None
+    return parsed.geturl()
+
+
+def download_detail_main_image(page) -> tuple[bytes, str] | None:
+    """Download a verified Encar photo; never fall back to a browser crop."""
+    candidates = []
+    try:
+        og = page.locator('meta[property="og:image"]')
+        if og.count():
+            candidates.append(og.first.get_attribute("content"))
+    except PlaywrightError:
+        pass
+    try:
+        candidates.extend(
+            item.get("src")
+            for item in page.locator("img").evaluate_all(
+                """images => images.map(img => {
+                  const rect = img.getBoundingClientRect();
+                  return {
+                    src: img.currentSrc || img.src || '',
+                    width: img.naturalWidth || rect.width,
+                    height: img.naturalHeight || rect.height
+                  };
+                }).filter(item => item.src && item.width >= 480 && item.height >= 260)
+                  .sort((a, b) => (b.width * b.height) - (a.width * a.height))"""
+            )
+        )
+    except PlaywrightError:
+        pass
+    for value in dict.fromkeys(candidates):
+        image_url = _trusted_encar_image_url(value)
+        if image_url is None:
+            continue
+        try:
+            response = page.request.get(image_url, timeout=20_000)
+            content = response.body() if response.ok else None
+            if image_format(content):
+                return content, image_url
+        except PlaywrightError:
+            continue
+    return None
+
+
 def _collect_search_page(
     page,
     url: str,
@@ -555,9 +601,10 @@ def _collect_search_page(
     if _has_captcha(body_text):
         raise CaptchaError("Encar CAPTCHA detected")
 
-    anchors = page.locator(
+    listing_anchors = page.locator(
         '#rySch_result [data-role="list_container"] a[href]'
-    ).evaluate_all(
+    )
+    anchors = listing_anchors.evaluate_all(
         """els => els.map(a => {
           const style = window.getComputedStyle(a);
           const rect = a.getBoundingClientRect();
@@ -569,8 +616,7 @@ def _collect_search_page(
           return {
             href: a.href || '',
             text: a.innerText || '',
-            closestText: closest ? (closest.innerText || '') : '',
-            outerHTML: a.outerHTML || ''
+            closestText: closest ? (closest.innerText || '') : ''
           };
         }).filter(Boolean)"""
     )
@@ -785,16 +831,8 @@ def _relevant_lines(text: str, terms: list[str], limit: int = 60) -> list[str]:
     return result
 
 
-def _replace_file(path: Path, content: bytes) -> tuple[str, str]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_bytes(content)
-    temporary.replace(path)
-    return str(path), hashlib.sha256(content).hexdigest()
-
-
 def read_detail(page, item: dict, storage: Path) -> dict:
-    """Read one detail page and persist only the current screenshot/main image."""
+    """Read a detail; optional screenshot bytes are committed by the coordinator."""
     body_text = ""
     try:
         for attempt in range(2):
@@ -911,64 +949,17 @@ def read_detail(page, item: dict, storage: Path) -> dict:
         "sold": sold,
         "unavailable": False,
     }
-    car_dir = storage / "cars" / canonical
-    screenshot_path = car_dir / "screenshot.png"
-    screenshot_bytes = page.screenshot(full_page=True)
-    data["screenshot_path"], data["screenshot_checksum"] = _replace_file(
-        screenshot_path, screenshot_bytes
-    )
-
-    og_image = None
-    og = page.locator('meta[property="og:image"]')
-    if og.count():
-        og_image = og.first.get_attribute("content")
-    image_candidates = page.locator("img").evaluate_all(
-        """images => images.map((img, index) => {
-          const rect = img.getBoundingClientRect();
-          return {
-            index,
-            src: img.currentSrc || img.src || '',
-            width: img.naturalWidth || rect.width,
-            height: img.naturalHeight || rect.height,
-            visibleWidth: rect.width,
-            visibleHeight: rect.height
-          };
-        }).filter(item => item.src && item.width >= 480 && item.height >= 260)
-          .sort((a, b) => (b.width * b.height) - (a.width * a.height))"""
-    )
-    candidate_urls = list(
-        dict.fromkeys(
-            [
-                value
-                for value in [og_image, *[item.get("src") for item in image_candidates]]
-                if value and not str(value).startswith("data:")
-            ]
-        )
-    )
-    for image_url in candidate_urls:
-        try:
-            response = page.request.get(image_url, timeout=20_000)
-            if response.ok:
-                image_path = car_dir / "main-image.jpg"
-                data["main_image_path"], data["main_image_checksum"] = _replace_file(
-                    image_path, response.body()
-                )
-                data["main_image_source_url"] = image_url
-                break
-        except Exception:
-            continue
-
-    if not data.get("main_image_path") and image_candidates:
-        try:
-            locator = page.locator("img").nth(image_candidates[0]["index"])
-            image_bytes = locator.screenshot(type="jpeg", quality=88)
-            image_path = car_dir / "main-image.jpg"
-            data["main_image_path"], data["main_image_checksum"] = _replace_file(
-                image_path, image_bytes
-            )
-            data["main_image_source_url"] = "browser-crop"
-        except Exception:
-            data["main_image_source_url"] = og_image
+    downloaded = download_detail_main_image(page)
+    if downloaded:
+        content, source_url = downloaded
+        data["_images"] = {"MAIN": content}
+        data["main_image_source_url"] = source_url
+    try:
+        screenshot = page.screenshot(full_page=True, type="png", timeout=2000, animations="disabled")
+        if image_format(screenshot) == "png":
+            data["_images"] = {**data.get("_images", {}), "SCREENSHOT": screenshot}
+    except PlaywrightError:
+        pass  # Keep the previous screenshot; image failure is not a search failure.
 
     data["fingerprint"] = fingerprint_listing(data)
     return data

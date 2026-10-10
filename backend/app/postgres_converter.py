@@ -257,6 +257,12 @@ def convert_to_backup(
                     target_engine,
                     source_storage_root,
                 )
+                # The empty target was migrated before copying legacy rows.
+                # Enrich only the copy; never mutate the read-only source.
+                from .money_migration import backfill_money_v1
+
+                with target_engine.begin() as connection:
+                    backfill_money_v1(connection)
             finally:
                 target_engine.dispose()
             prepare_portable_database(target_database)

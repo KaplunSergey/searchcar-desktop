@@ -1,6 +1,5 @@
 import os
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,16 +26,9 @@ from .models import (
     SchedulerSetting,
     User,
 )
-from .parser import detail_read_kind, fingerprint_listing, material_changes
-from .scanner import (
-    PriceConfirmationError,
-    ScanError,
-    apply_price_filter,
-    collect_search_pages,
-    parse_list_row,
-    read_detail,
-    read_price_status,
-)
+from .sources.contracts import ScanError
+from .sources.registry import get_source, get_source_descriptor
+from .version import APP_VERSION
 from .services import (
     TrackingDisabledError,
     mark_absent,
@@ -45,6 +37,7 @@ from .services import (
     upsert_price_status,
 )
 from .reporting import dedupe_report
+from .money import comparable_money, encar_money_values, payload_money_values
 
 
 class ScanCancelled(Exception):
@@ -260,7 +253,7 @@ def _publish_project_results(
 
 
 def _material_changes(old: dict, new: dict) -> list[dict]:
-    return material_changes(old, new)
+    return get_source("encar").material_changes(old, new)
 
 
 def _failure_detail(
@@ -303,7 +296,7 @@ def _known_car(db, source_id: str) -> Car | None:
     # A search result id identifies one Encar listing. Legacy aliases are kept
     # for user lookup only; using them during scans caused two database rows to
     # be compared as if they were the same listing.
-    return db.scalar(select(Car).where(Car.canonical_encar_id == source_id))
+    return db.scalar(select(Car).where(Car.source_key == "encar", Car.source_listing_id == source_id))
 
 
 def _should_refresh_missing_car(
@@ -387,7 +380,7 @@ def _price_filter_needs_baseline(project: Project) -> bool:
 def _effective_search_url(project: Project) -> str:
     mode = getattr(project, "price_filter_mode", "LINK")
     if mode == "CUSTOM":
-        return apply_price_filter(
+        return get_source("encar").apply_price_filter(
             project.search_url,
             getattr(project, "price_min_krw", None),
             getattr(project, "price_max_krw", None),
@@ -469,7 +462,7 @@ def _previous_state(
         fingerprint=(
             relation.last_observed_fingerprint
             if relation.last_observed_at is not None
-            else fingerprint_listing(previous_details)
+            else get_source("encar").fingerprint_listing(previous_details)
         ),
         status=previous_status,
         details=previous_details,
@@ -499,7 +492,9 @@ def _remember_observation(
 ) -> None:
     relation.last_observed_snapshot_id = snapshot_id
     relation.last_observed_price = car.current_price
-    relation.last_observed_fingerprint = fingerprint_listing(car.details or {})
+    relation.last_observed_fingerprint = get_source("encar").fingerprint_listing(
+        car.details or {}
+    )
     relation.last_observed_status = car.status
     relation.last_observed_at = datetime.now(timezone.utc)
 
@@ -512,59 +507,11 @@ def _read_verified_detail(
     *,
     read_kind: str = "FULL",
 ) -> dict:
-    """Read a detail and confirm a price change without sharing ORM state."""
-
-    known_price = getattr(known_price, "current_price", known_price)
-    read_once = (
-        (lambda: read_detail(page, row, storage))
-        if read_kind == "FULL"
-        else (lambda: read_price_status(page, row))
+    """Compatibility entry point; source readers receive scalar values, not ORM."""
+    return get_source("encar").read_verified_detail(
+        page, row, storage, getattr(known_price, "current_price", known_price),
+        read_kind=read_kind,
     )
-    detail = read_once()
-    new_price = detail.get("price_krw")
-    if (
-        known_price
-        and new_price
-        and new_price != known_price
-        and not detail.get("sold")
-    ):
-        confirmation = read_once()
-        if (
-            confirmation.get("canonical_car_id") != detail.get("canonical_car_id")
-            or confirmation.get("price_krw") != new_price
-        ):
-            raise PriceConfirmationError(
-                "Encar returned inconsistent listing identity or price on confirmation"
-            )
-        detail = confirmation
-    return detail
-
-
-@contextmanager
-def _encar_detail_reader(storage: Path):
-    """Create one Playwright browser owned by one detail-worker thread."""
-
-    with desktop_playwright() as playwright:
-        executable_path = os.environ.get("SEARCHCAR_CHROMIUM_EXECUTABLE")
-        browser = playwright.chromium.launch(
-            headless=settings.playwright_headless,
-            executable_path=executable_path or None,
-        )
-        context = browser.new_context(
-            viewport={"width": 1440, "height": 1200}, locale="ko-KR"
-        )
-        page = context.new_page()
-        try:
-            yield lambda row, known_price: _read_verified_detail(
-                page,
-                row,
-                storage,
-                known_price,
-                read_kind=row.get("_searchcar_read_kind", "FULL"),
-            )
-        finally:
-            context.close()
-            browser.close()
 
 
 def _change_report(
@@ -575,6 +522,14 @@ def _change_report(
     search_status: str | None = None,
     after_snapshot_id: int | None = None,
 ) -> dict | None:
+    details = car.details or {}
+    current_money = (payload_money_values(details, getattr(car, "source_key", "encar"))
+                     if "money_values" in details else encar_money_values(details, car.current_price))
+    previous_money = []
+    if previous:
+        previous_money = (payload_money_values(previous.details or {}, getattr(car, "source_key", "encar"))
+                          if "money_values" in (previous.details or {})
+                          else encar_money_values(previous.details or {}, previous.price))
     if previous is None:
         change = "NEW"
         old_price = None
@@ -598,6 +553,12 @@ def _change_report(
         elif previous_offer_type != current_offer_type:
             change = "MATERIAL_UPDATE"
             changes = _material_changes(previous.details, car.details or {})
+        elif old_price != car.current_price and not (
+            len(previous_money) == len(current_money) == 1
+            and comparable_money(previous_money[0], current_money[0])
+        ):
+            change = "MATERIAL_UPDATE"
+            changes = [{"field": "money_values", "old": previous_money, "new": current_money}]
         elif old_price != car.current_price:
             change = "PRICE_DROP" if (old_price or 0) > (car.current_price or 0) else "PRICE_INCREASE"
             changes = [{"field": "price", "old": old_price, "new": car.current_price}]
@@ -638,6 +599,8 @@ def _change_report(
         "changes": changes,
         "old_price": old_price,
         "price": car.current_price,
+        "money_values": current_money,
+        "previous_money_values": previous_money,
         "offer_type": (car.details or {}).get("offer_type") or "SALE",
         "rental_term_months": (car.details or {}).get("rental_term_months"),
         "lease_term_months": (car.details or {}).get("lease_term_months"),
@@ -700,15 +663,29 @@ def process_job(job_id: int) -> None:
         try:
             from .desktop_license import require_search_entitlement
 
-            require_search_entitlement("encar")
+            descriptor = get_source_descriptor("encar")
+            job.payload = {
+                **(job.payload or payload),
+                "execution_versions": {
+                    "app": APP_VERSION,
+                    "sources": {
+                        descriptor.key: {
+                            "adapter": descriptor.adapter_version,
+                            "contract": descriptor.contract_version,
+                        },
+                    },
+                },
+            }
+            db.commit()
+            source = get_source("encar")  # Existing DB projects remain Encar until MSA-05.
+            require_search_entitlement(source.descriptor.key)
             with desktop_playwright() as playwright:
                 executable_path = os.environ.get("SEARCHCAR_CHROMIUM_EXECUTABLE")
-                browser = playwright.chromium.launch(
+                browser, context, page = source.open_browser(
+                    playwright,
                     headless=settings.playwright_headless,
                     executable_path=executable_path or None,
                 )
-                context = browser.new_context(viewport={"width": 1440, "height": 1200}, locale="ko-KR")
-                page = context.new_page()
                 _raise_if_cancelled(db, job)
 
                 for project_id in project_ids:
@@ -795,7 +772,7 @@ def process_job(job_id: int) -> None:
                             db.commit()
                             publish_scan_update(job.owner_id, job.id)
 
-                        collection = collect_search_pages(
+                        collection = source.collect_search_pages(
                             page,
                             effective_search_url,
                             project.name,
@@ -860,8 +837,8 @@ def process_job(job_id: int) -> None:
                                 # exclude this project car from the missing pass.
                                 search_found_ids.add(known.canonical_encar_id)
                             previous = _previous_state(db, known, known_relation)
-                            list_data = parse_list_row(row)
-                            read_kind = detail_read_kind(
+                            list_data = source.parse_list_row(row)
+                            read_kind = source.detail_read_kind(
                                 scan_mode,
                                 is_new=known is None,
                                 list_price_changed=bool(
@@ -881,7 +858,7 @@ def process_job(job_id: int) -> None:
                                 detail_tasks.append(
                                     DetailTask(
                                         key=f"{project.id}:{source_id}:{row_index}",
-                                        source_key="encar",
+                                        source_key=source.descriptor.key,
                                         row={
                                             **row,
                                             "_searchcar_read_kind": read_kind,
@@ -941,12 +918,11 @@ def process_job(job_id: int) -> None:
                             detail_tasks.append(
                                 DetailTask(
                                     key=f"{project.id}:missing:{missing_car.id}:{missing_index}",
-                                    source_key="encar",
+                                    source_key=source.descriptor.key,
                                     row={
                                         "url": missing_car.url
-                                        or (
-                                            "https://fem.encar.com/cars/detail/"
-                                            f"{missing_car.canonical_encar_id}"
+                                        or source.listing_url(
+                                            missing_car.canonical_encar_id
                                         ),
                                         "source_car_id": missing_car.canonical_encar_id,
                                         "source": project.name,
@@ -1023,8 +999,10 @@ def process_job(job_id: int) -> None:
 
                                 publish_detail_progress()
                                 with DetailWorkerPool(
-                                    lambda: _encar_detail_reader(
-                                        Path(settings.storage_root)
+                                    lambda: source.detail_reader(
+                                        Path(settings.storage_root),
+                                        headless=settings.playwright_headless,
+                                        executable_path=executable_path or None,
                                     ),
                                     workers=detail_workers_count,
                                 ) as detail_workers:
@@ -1167,15 +1145,11 @@ def process_job(job_id: int) -> None:
                                         publish_detail_progress()
                                         _raise_if_cancelled(db, job)
                             finally:
-                                browser = playwright.chromium.launch(
+                                browser, context, page = source.open_browser(
+                                    playwright,
                                     headless=settings.playwright_headless,
                                     executable_path=executable_path or None,
                                 )
-                                context = browser.new_context(
-                                    viewport={"width": 1440, "height": 1200},
-                                    locale="ko-KR",
-                                )
-                                page = context.new_page()
                         _raise_if_cancelled(db, job)
                         if (
                             not price_filter_needs_baseline

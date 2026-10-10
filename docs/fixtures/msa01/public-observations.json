@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "kind": "sanitized_visible_dom_observations_not_api_or_parser_fixtures",
+  "observed_window_utc": ["2026-10-06T09:26:00Z", "2026-10-06T09:34:00Z"],
+  "environment": {"os": "macOS", "browser": "Codex In-app Browser", "authenticated": false, "windows_tested": false},
+  "copart": {
+    "input_url": "https://www.copart.com/lotSearchResults?free=false&searchCriteria=%7B%22query%22:%5B%22*%22%5D,%22filter%22:%7B%22ODM%22:%5B%22odometer_reading_received:%5B0%20TO%209999999%5D%22%5D,%22YEAR%22:%5B%22lot_year:%5B2021%20TO%202027%5D%22%5D,%22MISC%22:%5B%22%23VehicleTypeCode:VEHTYPE_V%22,%22%23MakeCode:AUDI%20OR%20%23MakeDesc:Audi%22,%22%23LotModel:%5C%22A5%5C%22%22%5D%7D,%22searchName%22:%22%22,%22watchListOnly%22:false,%22freeFormSearch%22:false%7D%20&displayStr=AUTOMOBILE,%5B0%20TO%209999999%5D,%5B2021%20TO%202027%5D,Audi,A5&from=%2FvehicleFinder&fromSource=widget&searchOrigin=vehicleFinder&qId=b1fdede6-0a53-4bda-9311-6db11e52b90c-1791228674103",
+    "reported_total": 82,
+    "page_ids_in_numeric_order": [
+      ["65259596","66478966","65507986","66249746","66767466","65477026","62441396","67675706","62253796","63183746","70790766","66809366","85976615","60859616","56876256","61232226","66171006","67015326","67136456","57587576"],
+      ["63436796","66091506","64783376","68238666","67818396","49239606","62596876","69064546","69686306","56354736","68664906","45425194","47508096","48437676","51294796","53746306","55961966","56676956","58436916","59577826"],
+      ["60249366","60898416","63291596","63582456","63602356","63893376","63968176","64696406","64751476","64951436","65171086","65349566","65627066","65738406","65908896","66338536","66535086","66642886","66667376","66998546"],
+      ["67008776","67282366","67300096","67351676","67430446","67619976","68149686","68195516","68240876","68659016","68745046","68913856","68927906","69213966","69572866","69900256","70671596","70825676","71097446","74815745"],
+      ["93421335","98426345"]
+    ],
+    "detail": {
+      "url": "https://www.copart.com/lot/65507986/salvage-2023-audi-a5-prestige-45-mi-detroit",
+      "raw_selected_fields": {"lot_number":"65507986","title":"2023 AUDI A5 PRESTIGE 45","odometer":"41,138 mi Actual","estimated_retail_value":"$31,313.00USD","current_bid":"$3,850","sale_condition":"Pure sale","schedule":"Tue. Oct 06, 2026 04:00 PM GMT+2","location":"MI - DETROIT","lane_item":"B/2273","primary_damage":"Front End","secondary_damage":"Side","vin_masked":"WAUEACF5XPA******"},
+      "photo_observed_loaded": true,
+      "thumbnail_src": "https://cs.copart.com/v1/AUTH_svc.pdoc00001/ids-c-prod-lpp/0826/09a53adca113407c8760b78919d203f9_thb.jpg",
+      "locale_cycle_observed": ["USA + English","USA + Русский","USA + English"],
+      "russian_detail_url": "https://www.copart.com/ru/lot/65507986/salvage-2023-audi-a5-prestige-45-mi-detroit"
+    },
+    "undated_search_example": {"id":"93421335","raw_schedule":"Upcoming lot"}
+  },
+  "iaa": {
+    "input_url": "https://www.iaai.com/Search?url=9mLQwLfAiBNExg%2ftJe6bPtY3NaEegjBGIALcDcXYM9g%3d",
+    "reported_total": 74,
+    "filters_after_reopening_original_url": ["Automobiles","A4","2020-2027","Audi"],
+    "page_ids_in_numeric_order": [
+      ["46628754~US","46461355~US","46371604~US","46053766~US","46735114~US","46518166~US","46570906~US","46560600~US","46482672~US","46025031~US","46560885~US","45806647~US","46282875~US","46747692~US","46734510~US","46732729~US","46717739~US","46714410~US","46704370~US","46692399~US","46690951~US","46685143~US","46677387~US","46674232~US","46670851~US"],
+      ["46661969~US","46646967~US","46644159~US","46627394~US","46625770~US","46621613~US","46615816~US","46604331~US","46597947~US","46595330~US","46583388~US","46576720~US","46566201~US","46537806~US","46535043~US","46533060~US","46524315~US","46523966~US","46515700~US","46515154~US","46504001~US","46501883~US","46498657~US","46497482~US","46475365~US"],
+      ["46475116~US","46439885~US","46420418~US","46391629~US","46333421~US","46332774~US","46329002~US","46313500~US","46311918~US","46288303~US","46226196~US","46208557~US","46184224~US","46174213~US","46139340~US","46120710~US","46075606~US","46036871~US","46005036~US","45929011~US","45645241~US","45610799~US","45606356~US","Imp_3000092~CA"]
+    ],
+    "detail": {
+      "url": "https://www.iaai.com/VehicleDetail/46628754~US",
+      "raw_selected_fields": {"url_key":"46628754~US","stock_number":"46129034","title":"2020 AUDI A4 PREMIUM PLUS 45 TFSI QUATTRO S TRONIC","odometer":"75,713 mi (Actual)","actual_cash_value":"$18,065 USD","current_bid_visibility":"You are not logged in","schedule":"Tue Oct 6, 8:30am (CDT)","vin_masked":"WAUENAF4XLN******"},
+      "sale_list_url": "https://www.iaai.com/SalesList/613~US/10062026",
+      "photo": {"loaded":true,"width":845,"height":633,"src":"https://vis.iaai.com/resizer?imageKeys=46628754~SID~B613~S0~I1~RW2576~H1932~TH0&width=845&height=633"},
+      "unrelated_component_error": "There was a problem getting similar vehicles."
+    },
+    "undated_search_example": {"url_key":"46661969~US","raw_schedule":"Auction Not Assigned"},
+    "out_of_scope_search_example": {"url_key":"Imp_3000092~CA","stock_number":"12602538","market":"IAA Canada","raw_amount":"$28,363 CAD","raw_odometer":"45,377 Km","raw_schedule":"Thu Oct 29, 12pm CDT"}
+  },
+  "unobserved_scenarios": ["verified_empty_result","captcha_or_access_block","confirmed_reschedule","clean_profile_restart","copart_russian_search_to_english_preserving_filters","windows_installed_app"],
+  "production_transport": "not_approved_pending_data_access_and_reuse_permissions"
+}

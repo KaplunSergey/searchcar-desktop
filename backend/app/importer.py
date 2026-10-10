@@ -1,5 +1,4 @@
 import argparse
-import hashlib
 import json
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -20,6 +19,13 @@ from .models import (
     User,
 )
 from .parser import extract_car_id, fingerprint_listing
+from .money import encar_money_values, payload_money_values, store_money_values
+
+
+def _price_identity(payload: dict) -> tuple:
+    quotes = payload_money_values(payload, "encar")
+    return (*((value["currency"], value["meaning"], value["state"], value["amount_minor"], value["auction_round"])
+              for value in quotes), payload.get("price_krw"))
 
 HISTORY_FILES = (
     "search_debug.json",
@@ -133,6 +139,7 @@ def _unique_name(db, owner_id: int, name: str, url: str) -> str:
         existing = db.scalar(
             select(Project).where(
                 Project.owner_id == owner_id,
+                Project.source_key == "encar",
                 Project.name_key == candidate.casefold(),
             )
         )
@@ -158,6 +165,7 @@ def _project_for(
     project = db.scalar(
         select(Project).where(
             Project.owner_id == owner_id,
+            Project.source_key == "encar",
             Project.search_url == url,
         )
     )
@@ -197,19 +205,18 @@ def _resolve_screenshot(root: Path, raw_path: Any) -> Path | None:
     return max(matches, key=lambda path: path.stat().st_mtime) if matches else None
 
 
-def _copy_current_screenshot(root: Path, row: dict, car: Car) -> bool:
+def _copy_current_screenshot(db, root: Path, row: dict, car: Car) -> dict:
+    from .current_images import MAX_IMAGE_BYTES, persist_images
     source = _resolve_screenshot(root, row.get("screenshot") or row.get("screenshot_path"))
     if not source:
-        return False
-    content = source.read_bytes()
-    checksum = hashlib.sha256(content).hexdigest()
-    destination = Path(settings.storage_root) / "cars" / car.canonical_encar_id / "screenshot.png"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if not destination.exists() or hashlib.sha256(destination.read_bytes()).hexdigest() != checksum:
-        temporary = destination.with_suffix(".tmp")
-        temporary.write_bytes(content)
-        temporary.replace(destination)
-    return True
+        return {}
+    try:
+        if source.stat().st_size > MAX_IMAGE_BYTES:
+            return {}
+        content = source.read_bytes()
+    except OSError:
+        return {}
+    return persist_images(db, car, {"SCREENSHOT": content}, Path(settings.storage_root), capture="LEGACY_COPY")
 
 
 def run(
@@ -307,18 +314,19 @@ def run(
             (image.payload or {}).get("checksum")
             for image in db.scalars(select(CarImage).where(CarImage.kind == "SCREENSHOT"))
         }
-        price_signatures: dict[int, set[tuple[int, str]]] = defaultdict(set)
-        price_values: dict[int, set[int]] = defaultdict(set)
-        for history in db.scalars(select(PriceHistory)):
+        price_signatures: dict[int, set[tuple]] = defaultdict(set)
+        price_values: dict[int, set[tuple]] = defaultdict(set)
+        for history in db.scalars(select(PriceHistory).join(Car).where(Car.source_key == "encar")):
             payload = history.payload or {}
             price = payload.get("price_krw")
             checked = payload.get("checked_at") or history.created_at.isoformat()
             if price:
-                price_signatures[history.car_id].add((int(price), str(checked)))
-                price_values[history.car_id].add(int(price))
+                identity = _price_identity(payload)
+                price_signatures[history.car_id].add((identity, str(checked)))
+                price_values[history.car_id].add(identity)
 
         newest_screenshot: dict[int, tuple[datetime, dict]] = {}
-        last_imported_price: dict[int, int] = {}
+        last_imported_price: dict[int, tuple] = {}
         for timestamp, source_file, index, row in records:
             canonical = str(
                 row.get("canonical_car_id")
@@ -338,13 +346,13 @@ def run(
                 )
                 if value
             }
-            car = db.scalar(select(Car).where(Car.canonical_encar_id == canonical))
+            car = db.scalar(select(Car).where(Car.source_key == "encar", Car.source_listing_id == canonical))
             if not car:
                 for alias in alias_ids:
                     car = db.scalar(
                         select(Car)
                         .join(CarAlias, CarAlias.car_id == Car.id)
-                        .where(CarAlias.alias_id == alias)
+                        .where(CarAlias.source_key == "encar", Car.source_key == "encar", CarAlias.alias_id == alias)
                     )
                     if car:
                         break
@@ -370,16 +378,19 @@ def run(
                     car.details = row
                 car.fingerprint = row.get("fingerprint") or car.fingerprint
 
+            money = store_money_values(db, car, encar_money_values(car.details or {}, car.current_price),
+                                       record_history=False)
+            car.details = {**(car.details or {}), "money_values": money}
             for alias in alias_ids:
                 if alias == car.canonical_encar_id:
                     continue
                 if db.scalar(
-                    select(Car.id).where(Car.canonical_encar_id == alias)
+                    select(Car.id).where(Car.source_key == "encar", Car.source_listing_id == alias)
                 ):
                     # One external Encar listing id must never identify two
                     # database cars. Keep the canonical record authoritative.
                     continue
-                existing_alias = db.scalar(select(CarAlias).where(CarAlias.alias_id == alias))
+                existing_alias = db.scalar(select(CarAlias).where(CarAlias.source_key == "encar", CarAlias.alias_id == alias))
                 if not existing_alias:
                     db.add(CarAlias(car_id=car.id, alias_id=alias))
                     summary["aliases_created"] += 1
@@ -408,6 +419,7 @@ def run(
             legacy_key = f"{source_file}:{index}:{canonical}"
             if legacy_key not in snapshots:
                 snapshot = dict(row)
+                snapshot["money_values"] = encar_money_values(row, row.get("last_price_krw"))
                 snapshot["_legacy_key"] = legacy_key
                 snapshot["_source_file"] = source_file
                 db.add(CarSnapshot(car_id=car.id, kind="LEGACY_IMPORT", payload=snapshot))
@@ -422,6 +434,7 @@ def run(
                     *points,
                     {
                         "price_krw": row.get("price_krw") or row.get("last_price_krw"),
+                        "offer_type": row.get("offer_type") or "SALE",
                         "checked_at": row.get("checked_at") or row.get("last_seen_at"),
                     },
                 ]
@@ -430,23 +443,31 @@ def run(
                     continue
                 price = int(point["price_krw"])
                 checked = str(point.get("checked_at") or timestamp.isoformat())
-                signature = (price, checked)
-                if signature in price_signatures[car.id] or price in price_values[car.id]:
-                    last_imported_price[car.id] = price
+                offer_type = point.get("offer_type") or (
+                    "UNKNOWN" if row.get("offer_type") in {"RENT", "LEASE"} else "SALE"
+                )
+                payload = {
+                    "price_krw": price, "checked_at": checked, "offer_type": offer_type,
+                    "money_values": encar_money_values({**point, "price_krw": price, "offer_type": offer_type}),
+                }
+                identity = _price_identity(payload)
+                signature = (identity, checked)
+                if signature in price_signatures[car.id] or identity in price_values[car.id]:
+                    last_imported_price[car.id] = identity
                     continue
-                if last_imported_price.get(car.id) == price:
+                if last_imported_price.get(car.id) == identity:
                     continue
                 db.add(
                     PriceHistory(
                         car_id=car.id,
                         kind="LEGACY",
-                        payload={"price_krw": price, "checked_at": checked},
+                        payload=payload,
                         created_at=parse_time(checked) or timestamp,
                     )
                 )
                 price_signatures[car.id].add(signature)
-                price_values[car.id].add(price)
-                last_imported_price[car.id] = price
+                price_values[car.id].add(identity)
+                last_imported_price[car.id] = identity
                 summary["prices_created"] += 1
 
             if row.get("screenshot") or row.get("screenshot_path"):
@@ -456,38 +477,30 @@ def run(
 
         for car_id, (_, row) in newest_screenshot.items():
             car = db.get(Car, car_id)
-            if not car or not _copy_current_screenshot(root, row, car):
+            if not car:
                 continue
-            path = Path(settings.storage_root) / "cars" / car.canonical_encar_id / "screenshot.png"
-            checksum = hashlib.sha256(path.read_bytes()).hexdigest()
-            image = db.scalar(
-                select(CarImage).where(CarImage.car_id == car.id, CarImage.kind == "SCREENSHOT")
-            )
-            if image:
-                image.payload = {"path": str(path), "checksum": checksum}
-            else:
-                db.add(
-                    CarImage(
-                        car_id=car.id,
-                        kind="SCREENSHOT",
-                        payload={"path": str(path), "checksum": checksum},
-                    )
-                )
+            copied = _copy_current_screenshot(db, root, row, car)
+            if not copied:
+                continue
+            checksum = copied["screenshot_checksum"]
             if checksum not in image_checksums:
                 summary["images_copied"] += 1
                 image_checksums.add(checksum)
-        previous_price: dict[int, int] = {}
+        previous_price: dict[int, tuple] = {}
         for point in db.scalars(
-            select(PriceHistory).order_by(
+            select(PriceHistory).join(Car).where(Car.source_key == "encar").order_by(
                 PriceHistory.car_id, PriceHistory.created_at, PriceHistory.id
             )
         ):
-            price = int((point.payload or {}).get("price_krw") or 0)
-            if price and previous_price.get(point.car_id) == price:
+            payload = point.payload or {}
+            quotes = payload_money_values(payload, "encar")
+            identity = _price_identity(payload)
+            known = bool(quotes and all(value["state"] == "KNOWN" for value in quotes))
+            if known and previous_price.get(point.car_id) == identity:
                 db.delete(point)
                 summary["duplicate_prices_removed"] += 1
-            elif price:
-                previous_price[point.car_id] = price
+            else:
+                previous_price[point.car_id] = identity
         summary["projects_created"] = max(
             0,
             len(

@@ -1213,6 +1213,14 @@ def main() -> None:
                 db,
                 force_user_ids=recovered_owner_ids,
             )
+    from .current_images import maintain_image_storage
+    try:
+        image_maintenance = maintain_image_storage(engine, paths["storage"], paths["root"] / "backups")
+        logging.getLogger(__name__).info("Current image maintenance: %s", image_maintenance)
+    except Exception:
+        # The legacy file route remains compatible. Optional photo migration
+        # must not prevent opening the desktop; retry on the next idle startup.
+        logging.getLogger(__name__).exception("Current image migration deferred; keeping legacy copies")
     worker_stop = threading.Event()
     worker_thread = threading.Thread(
         target=run_worker,

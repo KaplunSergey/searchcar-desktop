@@ -33,6 +33,7 @@ from .auth import (
     verify_request_origin,
 )
 from .database import get_db, settings
+from .money import comparable_money, money_values_out, payload_money_values
 from .importer import inspect_source, run as run_import
 from .job_queue import detach_project_from_active_jobs
 from .models import (
@@ -54,7 +55,7 @@ from .models import (
     User,
     UserCarState,
 )
-from .storage_paths import resolve_storage_path
+from .current_images import image_storage_path
 from .parser import (
     extract_car_id,
     material_changes,
@@ -838,12 +839,14 @@ def image_payloads(car_id: int, db: Session) -> dict:
         select(CarImage).where(
             CarImage.car_id == car_id,
             CarImage.integrity_status == "VALID",
-        )
+        ).order_by(CarImage.created_at.desc(), CarImage.id.desc())
     ):
+        if image.kind in result:
+            continue
         payload = dict(image.payload or {})
         path = payload.get("path")
         if path:
-            resolved_path = resolve_storage_path(path, storage_path)
+            resolved_path = image_storage_path(path, storage_path)
             payload["url"] = (
                 f"/storage/{resolved_path.relative_to(storage_path.resolve()).as_posix()}"
                 if resolved_path is not None
@@ -877,24 +880,34 @@ def enriched_details(record: Car) -> dict:
 
 
 def latest_price_change(record: Car, db: Session) -> dict | None:
-    values: list[int] = []
-    if record.current_price:
-        values.append(record.current_price)
+    quotes = money_values_out(record, db)
+    # This legacy display is a single Encar price, never a bid/estimate widget.
+    if record.source_key != "encar" or len(quotes) != 1:
+        return None
+    current_quote = quotes[0]
+    if (current_quote["state"] != "KNOWN" or current_quote["amount_minor"] is None
+            or current_quote["currency"] != "KRW"
+            or current_quote["meaning"] not in {"SALE_TOTAL", "RENT_MONTHLY", "LEASE_MONTHLY"}):
+        return None
+    values = [current_quote["amount_minor"]]
     for point in db.scalars(
         select(PriceHistory)
         .where(
             PriceHistory.car_id == record.id,
             PriceHistory.integrity_status == "VALID",
         )
-        .order_by(PriceHistory.created_at.desc())
+        .order_by(PriceHistory.created_at.desc(), PriceHistory.id.desc())
         .limit(30)
     ):
-        value = int((point.payload or {}).get("price_krw") or 0)
-        if value and value not in values:
+        historical = payload_money_values(point.payload or {}, record.source_key)
+        if len(historical) != 1 or not comparable_money(historical[0], current_quote):
+            break  # Do not skip a change of basis to find an older unrelated price.
+        value = historical[0]["amount_minor"]
+        if value not in values:
             values.append(value)
         if len(values) == 2:
             break
-    if len(values) < 2 or values[0] == values[1]:
+    if len(values) < 2 or values[0] == values[1] or values[1] == 0:
         return None
     current, previous = values
     difference = current - previous
@@ -918,19 +931,23 @@ def storage_file(
     current: User = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> FileResponse:
-    requested = (storage_path / file_path).resolve()
+    requested = image_storage_path(file_path, storage_path)
     root = storage_path.resolve()
-    try:
-        relative = requested.relative_to(root)
-    except ValueError:
+    if requested is None:
         raise HTTPException(404, "file_not_found")
+    relative = requested.relative_to(root)
     if not requested.is_file() or len(relative.parts) < 3 or relative.parts[0] != "cars":
         raise HTTPException(404, "file_not_found")
-    encar_id = relative.parts[1]
-    car_id = db.scalar(
-        select(Car.id).where(Car.canonical_encar_id == encar_id)
-    )
+    if len(relative.parts) == 4 and relative.parts[1] == "by-id" and relative.parts[2].isdigit():
+        car_id = db.scalar(select(Car.id).where(Car.id == int(relative.parts[2])))
+    elif len(relative.parts) == 3:
+        car_id = db.scalar(select(Car.id).where(Car.source_key == "encar", Car.source_listing_id == relative.parts[1]))
+    else:
+        car_id = None
     if not car_id:
+        raise HTTPException(404, "file_not_found")
+    current_images = image_payloads(car_id, db)
+    if not any(payload.get("url") == f"/storage/{relative.as_posix()}" for payload in current_images.values()):
         raise HTTPException(404, "file_not_found")
     accessible_car_relation(
         car_id,
@@ -938,7 +955,12 @@ def storage_file(
         db,
         require_tracking=False,
     )
-    return FileResponse(requested)
+    image_types = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                   ".webp": "image/webp", ".gif": "image/gif"}
+    media_type = image_types.get(requested.suffix.lower())
+    if media_type is None:
+        raise HTTPException(404, "file_not_found")
+    return FileResponse(requested, media_type=media_type, headers={"X-Content-Type-Options": "nosniff"})
 
 
 @app.get("/api/projects")
@@ -1152,6 +1174,7 @@ def project_cars(
                 "url": car.url,
                 "title": car.title,
                 "price": car.current_price,
+                "money_values": money_values_out(car, db),
                 "status": effective_status(car, relation),
                 "details": details,
                 "favorite": relation.favorite,
@@ -1205,6 +1228,7 @@ def favorite_cars(
                 "url": car.url,
                 "title": car.title,
                 "price": car.current_price,
+                "money_values": money_values_out(car, db),
                 "status": effective_status(car, relation),
                 "details": enriched_details(car),
                 "favorite": relation.favorite,
@@ -1229,12 +1253,12 @@ def lookup_car(
     encar_id = extract_car_id(value) or (value if value.isdigit() and len(value) >= 6 else None)
     if not encar_id:
         return {"found": False, "reason": "invalid_encar_url"}
-    record = db.scalar(select(Car).where(Car.canonical_encar_id == encar_id))
+    record = db.scalar(select(Car).where(Car.source_key == "encar", Car.source_listing_id == encar_id))
     if not record:
         record = db.scalar(
             select(Car)
             .join(CarAlias, CarAlias.car_id == Car.id)
-            .where(CarAlias.alias_id == encar_id)
+            .where(CarAlias.source_key == "encar", Car.source_key == "encar", CarAlias.alias_id == encar_id)
         )
     if not record:
         return {"found": False, "encar_id": encar_id, "reason": "not_in_database"}
@@ -1271,6 +1295,7 @@ def lookup_car(
             "url": record.url,
             "title": record.title,
             "price": record.current_price,
+            "money_values": money_values_out(record, db),
             "status": effective_status(record, lookup_relation),
             "details": enriched_details(record),
             "image": (image_payloads(record.id, db).get("MAIN") or {}).get("url"),
@@ -1394,6 +1419,7 @@ def car(
         "url": record.url,
         "title": record.title,
         "price": record.current_price,
+        "money_values": money_values_out(record, db),
         "status": effective_status(record, project_car),
         "details": enriched_details(record),
         "comment": state.comment,
@@ -1550,11 +1576,13 @@ def events(
 
 
 def price_history_out(car_id: int, db: Session) -> list[dict]:
+    record = db.get(Car, car_id)
     return [
         {
-            "price": point.payload.get("price_krw"),
-            "offer_type": point.payload.get("offer_type") or "SALE",
-            "at": point.payload.get("checked_at") or point.created_at,
+            "price": (point.payload or {}).get("price_krw"),
+            "offer_type": (point.payload or {}).get("offer_type") or ("SALE" if record.source_key == "encar" else None),
+            "money_values": payload_money_values(point.payload or {}, record.source_key),
+            "at": (point.payload or {}).get("checked_at") or point.created_at,
         }
         for point in db.scalars(
             select(PriceHistory)
@@ -1562,7 +1590,7 @@ def price_history_out(car_id: int, db: Session) -> list[dict]:
                 PriceHistory.car_id == car_id,
                 PriceHistory.integrity_status == "VALID",
             )
-            .order_by(PriceHistory.created_at)
+            .order_by(PriceHistory.created_at, PriceHistory.id)
         )
     ]
 
@@ -1707,6 +1735,18 @@ def _legacy_project_error(
 def _report_change_details(item: dict, db: Session) -> dict:
     enriched = dict(item)
     car_id = enriched.get("car_id")
+    source_key = item.get("source_key") or "encar"
+    if "money_values" not in enriched:
+        enriched["money_values"] = payload_money_values(
+            {**item, "price_krw": item.get("price")}, source_key
+        )
+    if "previous_money_values" not in enriched:
+        before = db.get(CarSnapshot, item["before_snapshot_id"]) if item.get("before_snapshot_id") else None
+        enriched["previous_money_values"] = (
+            payload_money_values(before.payload or {}, source_key)
+            if before and before.car_id == car_id and before.integrity_status == "VALID"
+            else []  # Do not guess an old quote's currency/type from today's price.
+        )
     if enriched.get("change") != "MATERIAL_UPDATE" or enriched.get("changes"):
         return enriched
     before_id = enriched.get("before_snapshot_id")

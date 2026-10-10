@@ -461,12 +461,15 @@ def test_price_change_requires_two_identical_detail_reads(monkeypatch, tmp_path)
             },
         ]
     )
-    monkeypatch.setattr("app.worker.read_detail", lambda *_: next(reads))
+    monkeypatch.setattr("app.sources.encar.scanner.read_detail", lambda *_: next(reads))
     known = SimpleNamespace(current_price=26_890_000)
     with pytest.raises(Exception) as error:
         _read_verified_detail(
             object(),
-            {"source_car_id": "40586061"},
+            {
+                "source_car_id": "40586061",
+                "url": "https://fem.encar.com/cars/detail/40586061",
+            },
             tmp_path,
             known,
         )
@@ -476,7 +479,7 @@ def test_price_change_requires_two_identical_detail_reads(monkeypatch, tmp_path)
 def test_fast_price_status_read_never_calls_the_full_detail_reader(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(
-        "app.worker.read_price_status",
+        "app.sources.encar.scanner.read_price_status",
         lambda *_: calls.append("light") or {
             "canonical_car_id": "40586061",
             "price_krw": 25_890_000,
@@ -484,13 +487,16 @@ def test_fast_price_status_read_never_calls_the_full_detail_reader(monkeypatch, 
         },
     )
     monkeypatch.setattr(
-        "app.worker.read_detail",
+        "app.sources.encar.scanner.read_detail",
         lambda *_: pytest.fail("full detail reader must not run for FAST price/status"),
     )
 
     detail = _read_verified_detail(
         object(),
-        {"source_car_id": "40586061"},
+        {
+            "source_car_id": "40586061",
+            "url": "https://fem.encar.com/cars/detail/40586061",
+        },
         tmp_path,
         26_890_000,
         read_kind="PRICE_STATUS",

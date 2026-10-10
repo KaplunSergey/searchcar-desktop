@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SearchCar — состояния карточки аукциона</title>
+<link rel="stylesheet" href="auction-card-ui.css"><link rel="stylesheet" href="auction-controls.css"></head>
+<body><header class="top"><div class="brand">SearchCar</div><nav class="source-tabs" aria-label="Источники"><button class="inactive" disabled>Encar</button><button data-source="Copart" class="active">Copart</button><button data-source="IAA">IAA</button></nav><select id="language" aria-label="Язык / Мова"><option value="ru">Русский</option><option value="uk">Українська</option></select></header>
+<main class="workspace"><div class="breadcrumb" id="breadcrumb"></div><div class="heading"><div><h1 id="title"></h1><p id="intro"></p></div><div class="prototype"><span class="dot"></span><span id="prototype"></span></div></div><div class="notice" id="notice"></div>
+<div class="toolbar"><div class="tabs"><button class="active" data-view="normal" id="normal-tab"></button><button data-view="lab" id="lab-tab"></button><button data-view="catalog" id="catalog-tab"></button></div><span class="toolbar-right" id="local-time"></span></div>
+<div id="content" aria-live="polite"></div>
+<details class="lab" id="lab"><summary><b id="lab-title"></b><span id="lab-subtitle"></span></summary><div class="lab-body"><div class="controls" id="controls"></div><p class="lab-note" id="lab-note"></p></div></details>
+<section class="catalog" id="catalog" hidden><h2 id="catalog-title"></h2><p id="catalog-intro"></p><div class="catalog-groups" id="catalog-groups"></div></section>
+<p class="disclaimer" id="disclaimer"></p></main>
+<script type="module">
+import {ui, text, observed, scenarios, cardHTML} from './auction-card-ui.js';
+const now=Date.parse('2026-10-08T12:37:00+02:00');
+let source='Copart', lang='ru', view='normal';
+const choices={scenario:'scheduled',list:'ready',engine:'Run & Drive',odometer:'Actual',reading:'known',damage:'Front End',secondary:'',keys:'true',airbags:'',title:'Salvage Title',sale:'',loss:'',flags:'',price:'',action:''};
+const $=id=>document.getElementById(id), t=(ru,uk)=>text(ru,uk,lang), e=ui.escape;
+const names={engine:['Запуск / подготовка','Запуск / підготовка'],odometer:['Достоверность одометра','Достовірність одометра'],damage:['Основное повреждение','Основне пошкодження'],secondary:['Дополнительное повреждение','Додаткове пошкодження'],keys:['Ключи','Ключі'],airbags:['Подушки · IAA','Подушки · IAA'],title:['Документ','Документ'],sale:['Условие продажи · справочник','Умова продажу · довідник'],loss:['Тип потери · IAA','Тип втрати · IAA'],flags:['Дополнительный признак','Додаткова ознака'],price:['Доступная сумма','Доступна сума']};
+const listStates={ready:['Успешный поиск','Успішний пошук'],loading:['Поиск / загрузка','Пошук / завантаження'],empty:['Лотов сегодня нет','Лотів сьогодні немає'],partial:['Неполный поиск / лимит 1000+','Неповний пошук / ліміт 1000+'],error:['Ошибка · старые данные сохранены','Помилка · старі дані збережені'],cancelled:['Поиск отменён пользователем','Пошук скасований користувачем'],blocked:['Публичный доступ ограничен','Публічний доступ обмежений']};
+function options(values,group){return [['',t('Нет данных','Немає даних')],...values.map(v=>[String(v),ui.translate(group,v,lang)]),['New vendor value',t('Неизвестное значение','Невідоме значення')]];}
+function control(key,label,values){return `<label>${e(label)}<select data-control="${e(key)}">${values.map(([value,title])=>`<option value="${e(value)}" ${choices[key]===value?'selected':''}>${e(title)}</option>`).join('')}</select></label>`;}
+function controls(){
+  const src=observed[source];
+  $('controls').innerHTML=control('scenario',t('Этап / расписание','Етап / розклад'),Object.entries(scenarios).map(([key,s])=>[key,s[lang]]))+control('list',t('Состояние поиска','Стан пошуку'),Object.entries(listStates).map(([key,s])=>[key,s[lang==='uk'?1:0]]))+control('reading',t('Показание одометра','Показання одометра'),[['known','51 353 mi'],['zero','0 mi'],['unknown',t('Не доступно','Не доступне')]])+control('action',t('Метка источника · не этап','Мітка джерела · не етап'),options(src.actions,'actions'))+
+    ['engine','odometer','damage','secondary','keys','airbags','title','sale','loss','flags','price'].map(key=>{
+      const group=key==='secondary'?'damage':key;
+      let values=src[group] || [];
+      if(key==='sale')values=source==='Copart'?['Pure Sale','On Approval','Minimum Bid','On Reserve']:['If Bids'];
+      if(key==='price')return control(key,t(...names[key]),[['',t('Не доступна','Не доступна')],['bid',t('Текущая ставка','Поточна ставка')],['buy','Buy It Now']]);
+      if(key==='odometer')values=[...new Set(['Actual',...values,'Exempt'])];
+      return control(key,t(...names[key]),options(values,group));
+    }).join('');
+  for(const select of $('controls').querySelectorAll('select'))select.addEventListener('change',()=>{choices[select.dataset.control]=select.value;view='lab';render(false);});
+}
+function fixture(overrides={}){
+  return {source,id:'EXAMPLE',name:source==='IAA'?'2021 Toyota Sienna LE':'2026 Toyota Camry SE',spec:t('2,5 л · гибрид','2,5 л · гібрид'),odo:{value:choices.reading==='unknown'?null:choices.reading==='zero'?0:51353,unit:'mi',status:choices.odometer||null},damage:choices.damage||null,secondary:choices.secondary,engine:choices.engine||null,keys:choices.keys==='true'?true:choices.keys==='false'?false:choices.keys||null,airbags:choices.airbags||null,title:choices.title||null,sale:choices.sale||null,loss:choices.loss||null,flags:choices.flags?[choices.flags]:[],event:scenarios[choices.scenario].event,action:choices.action,price:choices.price?{kind:choices.price,value:choices.price==='bid'?6800:14900}:null,url:null,...overrides};
+}
+function banner(title,body){return `<div class="banner"><strong>⚠ ${e(title)}</strong>${e(body)}</div>`;}
+function renderContent(){
+  const list=choices.list, sc=scenarios[choices.scenario];
+  $('catalog').hidden=view!=='catalog'; $('lab').hidden=view==='catalog';
+  if(view==='catalog'){$('content').innerHTML='';return;}
+  if(list==='loading'){$('content').innerHTML=`<div class="banner" role="status"><strong>${e(t('Читаем выдачу…','Читаємо видачу…'))}</strong>${e(t('Страница 2 · найдено 100 · результат ещё не полный','Сторінка 2 · знайдено 100 · результат ще не повний'))}</div><div class="skeleton" aria-label="${e(t('Загрузка карточек','Завантаження карток'))}"><div class="bone photo"></div><div><div class="bone title"></div><div class="bone"></div><div class="bone big"></div><div class="bone"></div></div><div><div class="bone"></div><div class="bone big"></div></div></div>`;return;}
+  if(list==='empty'||list==='blocked'){
+    $('content').innerHTML=`<div class="empty"><div class="symbol" aria-hidden="true">${list==='empty'?'◷':'⊘'}</div><h2>${e(list==='empty'?t('Сегодня аукционов нет','Сьогодні аукціонів немає'):t('Не удалось прочитать публичную выдачу','Не вдалося прочитати публічну видачу'))}</h2><p>${e(list==='empty'?t('Будущие лоты остаются в проекте. Новые лоты без назначенной даты пропускаем.','Майбутні лоти залишаються в проєкті. Нові лоти без призначеної дати пропускаємо.'):t('Результат не считается пустым. Сохранённые автомобили не исключаем. Повторите проверку позже.','Результат не вважається порожнім. Збережені автомобілі не виключаємо. Повторіть перевірку пізніше.'))}</p><button id="demo-retry">${e(t('Вернуться к примеру','Повернутися до прикладу'))}</button></div>`;
+    $('demo-retry').onclick=()=>{choices.list='ready';render();};return;
+  }
+  let warning='';
+  if(list==='partial')warning=banner(t('Поиск выполнен частично · 1000+ совпадений','Пошук виконано частково · 1000+ збігів'),t('Пройдены доступные страницы, но сайт ограничивает выдачу. Отсутствие лота не подтверждено: старые записи не убираем.','Пройдені доступні сторінки, але сайт обмежує видачу. Відсутність лота не підтверджена: старі записи не прибираємо.'));
+  if(list==='error')warning=banner(t('Обновление не завершено','Оновлення не завершене'),t('Показываем последний успешный снимок · 7 октября, 18:20. Статусы и цены могут быть устаревшими.','Показуємо останній успішний знімок · 7 жовтня, 18:20. Статуси та ціни можуть бути застарілими.'));
+  if(list==='cancelled')warning=banner(t('Поиск остановлен пользователем','Пошук зупинений користувачем'),t('Охват не полный. Показываем прошлый снимок; отсутствие лота не подтверждено.','Охоплення не повне. Показуємо попередній знімок; відсутність лота не підтверджена.'));
+  if(view==='lab'){
+    warning=`<div class="lab-mode">${e(t('Проверка состояния — не активная подборка.','Перевірка стану — не активна добірка.'))} ${e(sc.design?t('Проектный сценарий, не наблюдаемая метка выдачи.','Проєктний сценарій, не спостережена мітка видачі.'):t('Сценарий составлен из найденных признаков; автомобиль демонстрационный.','Сценарій складено зі знайдених ознак; автомобіль демонстраційний.'))}</div>`+warning;
+    if(!ui.eligible(sc.event))warning+=banner(t('Нет подтверждённой даты','Немає підтвердженої дати'),sc.existing?t('Дата исчезла у сохранённого лота: требуется проверка, не назначаем продажу. Политика хранения ещё обсуждается.','Дата зникла у збереженого лота: потрібна перевірка, не призначаємо продаж. Політика зберігання ще обговорюється.'):t('Новый лот не добавляем в активный проект. Этот пример доступен только в лаборатории состояний / истории.','Новий лот не додаємо в активний проєкт. Цей приклад доступний лише в лабораторії станів / історії.'));
+    if(sc.event.state==='removed')warning+=banner(t('Отсутствие подтверждено полным поиском','Відсутність підтверджена повним пошуком'),t('Запись убрана из активного проекта и сохранена в истории. Это не статус «Продано».','Запис прибраний з активного проєкту та збережений в історії. Це не статус «Продано».'));
+  }
+  let data=view==='lab'?[fixture()]:[
+    fixture({engine:'Run & Drive',odo:{value:51353,unit:'mi',status:source==='Copart'?'Actual':null},keys:true,title:source==='Copart'?'Salvage Title':'Clear',event:scenarios.scheduled.event}),
+    fixture({name:'2026 Hyundai Tucson Hybrid Limited',engine:source==='IAA'?'Starts':'Engine Start',damage:'Mechanical',odo:{value:0,unit:'mi',status:'Not Actual'},keys:source==='IAA'?null:false,event:scenarios.live.event,price:source==='Copart'?{kind:'bid',value:6800}:null}),
+    fixture({name:'2025 Audi A5 Premium Plus',engine:source==='IAA'?'Stationary':'Enhanced',damage:'Front End',odo:{value:29456,unit:'mi',status:'Exceeds Mechanical Limits'},event:scenarios.elapsed.event})
+  ];
+  if(list==='error'||list==='cancelled')data=data.map(d=>({...d,event:{},price:null,note:t('Последний снимок — не подтверждение текущего состояния','Останній знімок — не підтвердження поточного стану')}));
+  $('content').innerHTML=warning+`<div class="list">${data.map(d=>cardHTML(d,now,lang)).join('')}</div>`;
+}
+function catalog(){
+  $('catalog-title').textContent=t('Все наблюдавшиеся значения','Усі спостережені значення');
+  $('catalog-intro').textContent=t('Каталог полного доступного прохода выдачи. Значения независимы и могут сочетаться. Перевод — подпись, не экспертная оценка состояния.','Каталог повного доступного проходу видачі. Значення незалежні й можуть поєднуватися. Переклад — підпис, не експертна оцінка стану.');
+  $('catalog-groups').innerHTML=Object.entries(observed[source]).filter(([,values])=>values.length).map(([group,values])=>`<div class="catalog-group ${group==='damage'?'wide':''}"><h3>${e(group==='actions'?t('Метки / действия торгов','Мітки / дії торгів'):t(...(names[group] || [group,group])))} · ${values.length}</h3><div class="catalog-items">${values.map(v=>`<div class="catalog-item">${e(ui.translate(group,v,lang))}<span>${e(v)}</span></div>`).join('')}</div></div>`).join('');
+}
+function render(rebuild=true){
+  document.documentElement.lang=lang;
+  $('breadcrumb').textContent=`${source} / ${t('Проекты / Аукционы','Проєкти / Аукціони')}`;
+  $('title').textContent=t('Аукционные автомобили','Аукціонні автомобілі');
+  $('intro').textContent=t('Пробег, состояние и время торгов — на первом плане','Пробіг, стан і час торгів — на першому плані');
+  $('prototype').textContent=t('UI-макет v4 · не живые данные','UI-макет v4 · не живі дані');
+  $('notice').textContent=t('Демо-данные · время зафиксировано: 8 октября 2026, 12:37 Europe/Warsaw. Один компонент для двух сайтов. Фото не загружаются, Вымышленные примеры без адреса лота не имеют активной ссылки. Настройки ниже меняют только макет.','Демо-дані · час зафіксований: 8 жовтня 2026, 12:37 Europe/Warsaw. Один компонент для двох сайтів. Фото не завантажуються, Вигадані приклади без адреси лота не мають активного посилання. Налаштування нижче змінюють лише макет.');
+  $('normal-tab').textContent=t('Пример списка','Приклад списку');$('lab-tab').textContent=t('Состояния карточки','Стани картки');$('catalog-tab').textContent=t('Каталог значений','Каталог значень');
+  $('local-time').textContent=t('Часовой пояс компьютера · Europe/Warsaw','Часовий пояс комп’ютера · Europe/Warsaw');
+  $('lab-title').textContent=t('Проверка состояний','Перевірка станів');$('lab-subtitle').textContent=t('Этап торгов и независимые характеристики','Етап торгів та незалежні характеристики');
+  $('lab-note').textContent=t('Enhanced не подтверждает запуск. Bid now — не подтверждение live. Exempt и условия продажи — справочные варианты, не найденные в этой выдаче. None, Unknown и пустое поле не взаимозаменяемы.','Enhanced не підтверджує запуск. Bid now — не підтвердження live. Exempt і умови продажу — довідкові варіанти, не знайдені в цій видачі. None, Unknown і порожнє поле не взаємозамінні.');
+  if(source==='IAA')$('lab-note').textContent+=' '+t('Actual и цены здесь — проектные примеры: гостевая ставка IAA пока не подтверждена.','Actual і ціни тут — проєктні приклади: гостьова ставка IAA поки не підтверджена.');
+  $('disclaimer').textContent=t('Run & Drive — метка источника на момент его проверки, не гарантия исправности. Повреждения не ранжируем по тяжести. Raw-документы и редкие флаги оставляем без юридической интерпретации. Неизвестные значения показываем текстом. Нижней панели с ACV, площадкой, избранным и раскрывающимися деталями нет.','Run & Drive — мітка джерела на момент його перевірки, не гарантія справності. Пошкодження не ранжуємо за тяжкістю. Raw-документи й рідкісні прапорці залишаємо без юридичної інтерпретації. Невідомі значення показуємо текстом. Нижньої панелі з ACV, майданчиком, обраним і деталями, що розгортаються, немає.');
+  document.querySelectorAll('[data-source]').forEach(b=>{b.classList.toggle('active',b.dataset.source===source);b.setAttribute('aria-pressed',String(b.dataset.source===source));});
+  document.querySelectorAll('[data-view]').forEach(b=>{b.classList.toggle('active',b.dataset.view===view);b.setAttribute('aria-pressed',String(b.dataset.view===view));});
+  if(rebuild)controls();catalog();renderContent();
+}
+document.querySelectorAll('[data-source]').forEach(b=>b.onclick=()=>{source=b.dataset.source;choices.title=source==='IAA'?'Clear':'Salvage Title';choices.engine='Run & Drive';choices.odometer=source==='IAA'?'':'Actual';choices.damage='Front End';choices.keys='true';choices.airbags='';choices.sale='';choices.loss='';choices.flags='';choices.secondary='';choices.price='';choices.action='';render();});
+document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{view=b.dataset.view;if(view==='lab')$('lab').open=true;render();});
+$('language').onchange=()=>{lang=$('language').value;render();};
+render();
+</script></body></html>
