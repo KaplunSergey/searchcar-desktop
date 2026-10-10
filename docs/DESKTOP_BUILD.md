@@ -213,7 +213,9 @@ on the affected Windows computer while SearchCar is open. It saves
 `SearchCar-installation-*.json` on the Desktop. Run it once after updater restart
 and once after launch through the problematic shortcut. The report contains
 process paths, registry locations, shortcut targets, executable versions and
-hashes, including local usernames in paths. It does not change installations
+hashes, including local usernames in paths. The `findings` section highlights
+multiple copies, different versions, stale shortcuts and registry/path conflicts.
+It does not change installations
 or collect database, license secrets or cookies.
 
 Compare the two reports before removing anything. A second backend extraction
