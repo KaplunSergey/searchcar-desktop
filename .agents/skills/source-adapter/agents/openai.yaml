@@ -1,0 +1,4 @@
+interface:
+  display_name: "SearchCar · Источники"
+  short_description: "Парсинг, нормализация и контракты модулей сайтов"
+  default_prompt: "Используй $source-adapter: проработай адаптер сайта по текущему контракту SearchCar и проверь его fixtures."

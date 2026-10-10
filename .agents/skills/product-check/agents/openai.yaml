@@ -1,0 +1,4 @@
+interface:
+  display_name: "Product · Проверка"
+  short_description: "Соразмерные проверки и честный итог готовности"
+  default_prompt: "Используй $product-check: проверь готовую правку и укажи, что прошло и что осталось непроверенным."

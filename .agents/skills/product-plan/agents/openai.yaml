@@ -1,0 +1,4 @@
+interface:
+  display_name: "Product · План"
+  short_description: "Требования, критерии и последовательные задачи"
+  default_prompt: "Используй $product-plan: составь план функции с критериями приёмки, пока без реализации."

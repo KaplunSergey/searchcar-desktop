@@ -1,0 +1,4 @@
+interface:
+  display_name: "Product · TDD"
+  short_description: "Проверенный RED, реализация и затронутая регрессия"
+  default_prompt: "Используй $product-tdd: реализуй поведение через RED/GREEN; сначала выясняй причину падения тестов."

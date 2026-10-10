@@ -1,0 +1,4 @@
+interface:
+  display_name: "SearchCar · Сборка и релиз"
+  short_description: "Сборки обеих ОС и выпуск по актуальному runbook"
+  default_prompt: "Используй $searchcar-release: выполни запрошенные этапы сборки или выпуска и покажи проверки."

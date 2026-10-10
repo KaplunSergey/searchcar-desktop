@@ -1,0 +1,4 @@
+interface:
+  display_name: "Product · Ревью"
+  short_description: "Доказанные дефекты, риски и пробелы в проверках"
+  default_prompt: "Используй $product-review: проверь diff на реальные дефекты и регрессии, не изменяя файлы."
