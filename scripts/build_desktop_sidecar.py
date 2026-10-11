@@ -123,6 +123,8 @@ def build(mode: str) -> dict[str, object]:
         "--include-package=argon2",
         "--include-package=_argon2_cffi_bindings",
         "--include-package=cryptography",
+        "--include-package=tzdata",
+        "--include-package-data=tzdata",
         "--include-module=_cffi_backend",
         "--include-package-data=alembic",
         "--include-distribution-metadata=playwright",

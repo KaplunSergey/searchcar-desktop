@@ -34,6 +34,8 @@ from .auth import (
 )
 from .database import get_db, settings
 from .money import comparable_money, money_values_out, payload_money_values
+from .auction_read import project_auction_view, single_auction_view
+from .auction_time import _timezone
 from .importer import inspect_source, run as run_import
 from .job_queue import SCAN_COMMAND_LOCK, detach_project_from_active_jobs, project_execution_order
 from .models import (
@@ -201,6 +203,14 @@ def owned_project(project_id: int, user: User, db: Session) -> Project:
     if not project:
         raise HTTPException(404, "project_not_found")
     return project
+
+
+def auction_computer_timezone(computer_timezone: str = Query(..., min_length=1, max_length=64)) -> str:
+    try:
+        _timezone(computer_timezone)
+    except ValueError as exc:
+        raise HTTPException(400, "invalid_computer_timezone") from exc
+    return computer_timezone
 
 
 def user_car_state(user_id: int, car_id: int, db: Session) -> UserCarState:
@@ -1195,6 +1205,23 @@ def project_cars(
     return group_vehicle_listings(result)
 
 
+@app.get("/api/projects/{project_id}/auction-lots")
+def project_auction_lots(
+    project_id: int,
+    computer_timezone: str = Depends(auction_computer_timezone),
+    today_only: bool = False,
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    project = owned_project(project_id, current, db)
+    if project.source_key not in {"copart", "iaa"}:
+        raise HTTPException(400, "not_an_auction_source")
+    result = project_auction_view(db, project, now=now_utc(), computer_timezone=computer_timezone, today_only=today_only)
+    for lot in result["lots"]:
+        lot["image"] = (image_payloads(lot["id"], db).get("MAIN") or {}).get("url")
+    return result
+
+
 @app.get("/api/favorites")
 def favorite_cars(
     current: User = Depends(require_user),
@@ -1451,6 +1478,25 @@ def car(
     }
 
 
+@app.get("/api/cars/{car_id}/auction")
+def car_auction(
+    car_id: int,
+    computer_timezone: str = Depends(auction_computer_timezone),
+    project_id: int | None = Query(None),
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    relation = accessible_car_relation(car_id, current, db, project_id, require_tracking=False)
+    record = get_car_or_404(car_id, db)
+    if record.source_key != db.get(Project, relation.project_id).source_key:
+        raise HTTPException(404, "project_car_not_found")
+    if record.source_key not in {"copart", "iaa"}:
+        raise HTTPException(400, "not_an_auction_source")
+    result = single_auction_view(db, car_id, now=now_utc(), computer_timezone=computer_timezone)
+    result["lot"]["image"] = (image_payloads(car_id, db).get("MAIN") or {}).get("url")
+    return result
+
+
 @app.patch("/api/cars/{car_id}/comment")
 def comment(
     car_id: int,
@@ -1667,6 +1713,20 @@ def _project_payload_subset(payload: dict, project_ids: list[int]) -> dict:
     return result
 
 
+def _busy_project_runs(db: Session, active_runs: list[ScanRun], project_ids: set[int]) -> dict[int, ScanRun]:
+    busy = {}
+    for active in active_runs:
+        payload = active.payload or {}
+        active_ids = set(payload.get("project_ids") or []) - set(payload.get("cancelled_project_ids") or [])
+        active_ids -= set(db.scalars(select(ProjectScanRun.project_id).where(
+            ProjectScanRun.scan_run_id == active.id,
+            ProjectScanRun.status.in_(["CANCELLED", "CANCEL_REQUESTED"]),
+        )))
+        for project_id in project_ids & active_ids:
+            busy.setdefault(project_id, active)
+    return busy
+
+
 def _enqueue_unlocked(kind: str, payload: dict, owner: User, db: Session) -> dict:
     from .maintenance import maintenance_active
     from .desktop_license import SearchEntitlementError, require_search_entitlement
@@ -1736,22 +1796,9 @@ def _enqueue_unlocked(kind: str, payload: dict, owner: User, db: Session) -> dic
             if active.status in {"QUEUED", "RUNNING", "CANCEL_REQUESTED"}
         ]
 
-    busy_projects: dict[int, ScanRun] = {}
+    busy_projects = _busy_project_runs(db, active_runs, requested_projects)
     for active in active_runs:
         active_payload = active.payload or {}
-        active_project_ids = set(active_payload.get("project_ids") or []) - set(
-            active_payload.get("cancelled_project_ids") or []
-        )
-        active_project_ids -= set(db.scalars(
-            select(ProjectScanRun.project_id).where(
-                ProjectScanRun.scan_run_id == active.id,
-                ProjectScanRun.status.in_(["CANCELLED", "CANCEL_REQUESTED"]),
-            )
-        ))
-        for project_id in requested_projects & set(
-            active_project_ids
-        ):
-            busy_projects.setdefault(project_id, active)
         if requested_cars & set(active_payload.get("car_ids") or []):
             raise HTTPException(409, "car_scan_already_active")
 
@@ -2174,6 +2221,14 @@ def scan_out(run: ScanRun, db: Session, source_key: str | None = None) -> dict:
         portions = list(db.scalars(select(ProjectScanRun).where(
             ProjectScanRun.scan_run_id == run.id, ProjectScanRun.project_id.in_(payload["project_ids"]))))
         project_statuses = {**payload["project_statuses"], **{str(portion.project_id): portion.status for portion in portions}}
+        # Legacy/interrupted jobs can retain unfinished project rows. They
+        # cannot make a terminal job active again, or hide whole-job cancellation.
+        active_statuses = {"QUEUED", "RUNNING", "CANCEL_REQUESTED"}
+        if run.status not in active_statuses or run.status == "CANCEL_REQUESTED":
+            project_statuses = {
+                key: run.status if status in active_statuses else status
+                for key, status in project_statuses.items()
+            }
         payload["project_statuses"] = project_statuses
         statuses = set(project_statuses.values())
         scope_status = next((status for status in ("CANCEL_REQUESTED", "RUNNING", "QUEUED") if status in statuses), None)
@@ -2187,6 +2242,65 @@ def scan_out(run: ScanRun, db: Session, source_key: str | None = None) -> dict:
                        "progress_kind": "PROJECT_COMPLETION" if project_statuses else "JOB",
                        "error": "; ".join(item.get("technical") or item.get("code") or "READ_ERROR" for item in failures) or None})
     return result
+
+
+@app.get("/api/scans/launch-options")
+def scan_launch_options(current: User = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+    """Read-only launch preview; POST still rechecks license, scope and duplicates."""
+    from .desktop_license import evaluate_search_entitlement
+    from .maintenance import maintenance_active
+    from .sources.registry import list_sources
+
+    decision = evaluate_search_entitlement(update_trusted_time=False)
+    maintenance = maintenance_active()
+    sources, adapters = {}, {}
+    for descriptor in list_sources():
+        reason = None
+        if "SEARCH" not in descriptor.capabilities:
+            reason = "SOURCE_SEARCH_UNSUPPORTED"
+        else:
+            try:
+                adapters[descriptor.key] = get_source(descriptor.key)
+            except (ValueError, SourceUnavailableError):
+                reason = "SOURCE_UNAVAILABLE"
+        if reason is None:
+            if maintenance:
+                reason = "DESKTOP_MAINTENANCE_ACTIVE"
+            elif not decision.can_search:
+                reason = decision.reason or "LICENSE_REQUIRED"
+            elif decision.mode == "required" and descriptor.key not in decision.sources:
+                reason = "LICENSE_SOURCE_NOT_ALLOWED"
+        sources[descriptor.key] = {"source_key": descriptor.key, "family": descriptor.family,
+                                   "can_search": reason is None, "reason": reason}
+    records = list(db.scalars(select(Project).where(Project.owner_id == current.id).order_by(Project.id)))
+    active_runs = list(db.scalars(select(ScanRun).where(
+        ScanRun.owner_id == current.id, ScanRun.status.in_(["QUEUED", "RUNNING", "CANCEL_REQUESTED"]))))
+    busy = _busy_project_runs(db, active_runs, {project.id for project in records})
+    projects = []
+    for project in records:
+        availability = sources.get(project.source_key, {"can_search": False, "reason": "SOURCE_NOT_CONNECTED"})
+        reason = availability["reason"]
+        if availability["can_search"]:
+            try:
+                adapters[project.source_key].validate_search_url(project.search_url)
+            except InvalidSourceUrlError:
+                reason = "INVALID_SOURCE_URL"
+        run = busy.get(project.id)
+        # A queued project in a running batch is not itself running yet.
+        active_status = None
+        if run:
+            payload = run.payload or {}
+            active_status = (payload.get("project_statuses") or {}).get(str(project.id))
+            if active_status and active_status not in {"QUEUED", "RUNNING", "CANCEL_REQUESTED"}:
+                active_status = "ALREADY_ACTIVE"
+            elif active_status is None:
+                active_status = run.status
+                if run.status == "RUNNING" and payload.get("current_project_id") not in (None, project.id):
+                    active_status = "QUEUED"
+        projects.append({"id": project.id, "name": project.name, "source_key": project.source_key,
+                         "can_search": reason is None, "reason": reason,
+                         "active_status": active_status, "scan_run_id": run.id if run else None})
+    return {"sources": list(sources.values()), "projects": projects}
 
 
 @app.post("/api/scans/projects", status_code=202)
@@ -2346,6 +2460,26 @@ def scans(
             continue
         if len(result) == 100:
             break
+    return result
+
+
+@app.get("/api/scans/active")
+def active_scans(current: User = Depends(require_user), db: Session = Depends(get_db)) -> list[dict]:
+    """Owner's complete active queue, not the 100-entry history window."""
+    runs = list(db.scalars(select(ScanRun).where(
+        ScanRun.owner_id == current.id,
+        ScanRun.status.in_(["QUEUED", "RUNNING", "CANCEL_REQUESTED"]),
+    ).order_by(ScanRun.created_at, ScanRun.id)))
+    portions = {}
+    for portion in db.scalars(select(ProjectScanRun).where(ProjectScanRun.scan_run_id.in_([run.id for run in runs]))):
+        portions.setdefault(portion.scan_run_id, {})[str(portion.project_id)] = portion.status
+    result = []
+    for run in runs:
+        item = scan_out(run, db)
+        item["payload"]["project_statuses"] = {
+            **item["payload"].get("project_statuses", {}), **portions.get(run.id, {}),
+        }
+        result.append(item)
     return result
 
 

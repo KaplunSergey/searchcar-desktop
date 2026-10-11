@@ -1,5 +1,7 @@
 "use client";
 
+import { ActivityDialog, cancellationBody, type CancellationTarget } from "./activity-dialog";
+
 import {
   QueryClient,
   QueryClientProvider,
@@ -21,15 +23,11 @@ import { dict, type Key, type Locale } from "./translations";
 import { filterReportItems, reportProjectIds } from "./report-filter";
 import { formatSeatCount, translateOptionCode, translateVehicleSpec } from "./vehicle-dictionary";
 import { APP_VERSION } from "./version";
+import { AUCTION_QUERY_KEY, watchAuctionClock, withAuctionTimeZone } from "./auction-time-client";
+import { initialWorkspace, normalizeRoute, sourceRead, workspaceUrl, SITE_NAMES, WORKSPACE_STORAGE_KEY, type SourceKey, type View, type WorkspaceRoute } from "./source-workspace";
+import { SourceNavigation, SourceUnavailable, SourceContextMismatch, SourceAvailabilityNotice, sourceAvailability } from "./source-navigation";
+import { LaunchDialog, launchSummary, reasonText, type LaunchOptions, type LaunchResult } from "./launch-dialog";
 
-type View =
-  | "projects"
-  | "project"
-  | "favorites"
-  | "car"
-  | "scans"
-  | "settings"
-  | "admin";
 type Translate = (key: Key) => string;
 type AuthUser = {
   id: number;
@@ -74,6 +72,7 @@ type LatestScan = {
 };
 type ProjectRecord = {
   id: number;
+  source_key: SourceKey;
   name: string;
   search_url: string;
   telegram_url?: string | null;
@@ -96,6 +95,7 @@ type PriceChange = {
 };
 type CarRecord = {
   id: number;
+  source_key: SourceKey;
   other_listings?: CarRecord[];
   project_id?: number;
   project_name?: string;
@@ -170,6 +170,10 @@ type ScanRecord = {
   progress: number;
   payload?: {
     project_ids?: number[];
+    project_id?: number;
+    source_keys?: string[];
+    cancelled_project_ids?: number[];
+    project_plans?: { project_id: number; source_key: string; name?: string }[];
     car_ids?: number[];
     report?: ScanReportItem[];
     failures?: ScanFailure[];
@@ -445,11 +449,11 @@ function licenseErrorMessage(error: unknown, t: Translate): string {
   return `${t(key)} (${code.toUpperCase()})`;
 }
 
-function scanActionErrorMessage(error: unknown, t: Translate): string {
+export function scanActionErrorMessage(error: unknown, t: Translate): string {
   const code = error instanceof ApiError ? error.code : undefined;
   return code?.startsWith("license_")
     ? licenseErrorMessage(error, t)
-    : t("scanAlreadyActive");
+    : t(code?.endsWith("_scan_already_active") ? "scanAlreadyActive" : "actionFailed");
 }
 
 function assetUrl(path?: string | null) {
@@ -470,7 +474,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const method = (options?.method || "GET").toUpperCase();
   const unsafe = !["GET", "HEAD", "OPTIONS"].includes(method);
   const currentCsrfToken = cookieValue(csrfCookieName) || csrfToken;
-  const response = await fetch(`${api}${path}`, {
+  const response = await fetch(`${api}${withAuctionTimeZone(path)}`, {
     ...options,
     credentials: "include",
     headers: {
@@ -500,10 +504,11 @@ async function openExternalUrl(url: string) {
   }
 }
 
-function useProjects() {
+function useProjects(source: SourceKey) {
+  const read = sourceRead("projects", source);
   return useQuery<ProjectRecord[]>({
-    queryKey: ["projects"],
-    queryFn: () => request("/projects"),
+    queryKey: read.queryKey,
+    queryFn: () => request(read.path),
     refetchInterval: 5000,
   });
 }
@@ -608,7 +613,7 @@ function carStatusText(status: string, t: Translate) {
   return keys[status] ? t(keys[status]) : t("updated");
 }
 
-function App({
+export function App({
   currentUser,
   onSessionChanged,
 }: {
@@ -616,15 +621,25 @@ function App({
   onSessionChanged: () => void;
 }) {
   const client = useQueryClient();
+  useEffect(() => watchAuctionClock(() => {
+    void client.invalidateQueries({ queryKey: AUCTION_QUERY_KEY });
+  }), [client]);
   const [locale, setLocale] = useState<Locale>(currentUser.preferred_locale || "ru");
-  const [view, setView] = useState<View>("projects");
+  const [route, setRoute] = useState(initialWorkspace);
+  const { source, view, projectId: activeProjectId, carId: activeCarId } = route;
+  const lastRoutes = useRef<Partial<Record<SourceKey, WorkspaceRoute>>>({ [source]: route });
   const [toast, setToast] = useState("");
-  const [activeProjectId, setActiveProjectId] = useState<number | null>(null);
-  const [activeCarId, setActiveCarId] = useState<number | null>(null);
-  const [selected, setSelected] = useState<number[]>([]);
+  const [selections, setSelections] = useState<Partial<Record<SourceKey, number[]>>>({});
+  const selected = selections[source] || [];
+  const setSelected = (value: number[] | ((previous: number[]) => number[])) =>
+    setSelections((previous) => ({ ...previous, [source]: typeof value === "function" ? value(previous[source] || []) : value }));
   const [formProject, setFormProject] = useState<ProjectRecord | "new" | null>(null);
   const [deleteProject, setDeleteProject] = useState<ProjectRecord | null>(null);
   const [showPassword, setShowPassword] = useState(currentUser.must_change_password);
+  const [showLaunch, setShowLaunch] = useState(false);
+  const launchTrigger = useRef<HTMLButtonElement>(null);
+  const [showActivity, setShowActivity] = useState(false);
+  const activityTrigger = useRef<HTMLButtonElement>(null);
   const t: Translate = (key) => dict[locale][key];
   const localeMutation = useMutation({
     mutationFn: (preferredLocale: Locale) =>
@@ -643,12 +658,31 @@ function App({
       notify(dict[previousLocale].actionFailed);
     },
   });
-  const projectsQuery = useProjects();
+  const projectsQuery = useProjects(source);
+  const allProjectsQuery = useQuery<ProjectRecord[]>({
+    queryKey: ["projects", "all"], queryFn: () => request("/projects"), enabled: view === "settings" || showActivity,
+  });
+  const scanRead = sourceRead("scans", source);
   const scansQuery = useQuery<ScanRecord[]>({
-    queryKey: ["scans"],
-    queryFn: () => request("/scans"),
+    queryKey: scanRead.queryKey,
+    queryFn: () => request(scanRead.path),
     refetchInterval: 30_000,
   });
+  const allScansQuery = useQuery<ScanRecord[]>({
+    queryKey: ["scans", "active"],
+    queryFn: () => request("/scans/active"),
+    refetchInterval: showActivity ? 5000 : 30_000,
+  });
+  const launchOptionsQuery = useQuery<LaunchOptions>({
+    queryKey: ["launch-options"], queryFn: () => request("/scans/launch-options"),
+    refetchInterval: showLaunch ? 5000 : 30_000,
+    refetchOnWindowFocus: true,
+    retry: false, staleTime: 0,
+  });
+  const searchAvailability = sourceAvailability(launchOptionsQuery.data, source, launchOptionsQuery.isError);
+  const projectAvailability = view === "project" ? launchOptionsQuery.data?.projects.find((project) => project.id === activeProjectId && project.source_key === source) : undefined;
+  const workspaceAvailability = searchAvailability.can_search && projectAvailability?.can_search === false ? projectAvailability : searchAvailability;
+  const retryAvailability = () => { void launchOptionsQuery.refetch(); };
   const schedulerQuery = useQuery<SchedulerRecord>({
     queryKey: ["scheduler"],
     queryFn: () => request("/settings"),
@@ -688,7 +722,10 @@ function App({
     const timer = window.setInterval(() => tickCountdown((value) => value + 1), 1000);
     return () => window.clearInterval(timer);
   }, []);
-  const activeScans = (scansQuery.data || []).filter((scan) =>
+  const activeScans = (allScansQuery.data || []).filter((scan) =>
+    ["QUEUED", "RUNNING", "CANCEL_REQUESTED"].includes(scan.status),
+  );
+  const sourceActiveScans = (scansQuery.data || []).filter((scan) =>
     ["QUEUED", "RUNNING", "CANCEL_REQUESTED"].includes(scan.status),
   );
 
@@ -701,6 +738,7 @@ function App({
         refreshTimer = undefined;
         void client.invalidateQueries({ queryKey: ["scans"] });
         void client.invalidateQueries({ queryKey: ["projects"] });
+        void client.invalidateQueries({ queryKey: ["launch-options"] });
       }, 100);
     };
     events.addEventListener("scan", refresh);
@@ -712,23 +750,23 @@ function App({
   }, [client]);
 
   useEffect(() => {
-    window.history.replaceState(
-      { view: "projects", projectId: null, carId: null },
-      "",
-      window.location.pathname,
-    );
+    const initial = initialWorkspace();
+    window.history.replaceState(initial, "", workspaceUrl(window.location.pathname, initial));
     const onPopState = (event: PopStateEvent) => {
-      const state = event.state || {};
-      setView(state.view || "projects");
-      setActiveProjectId(state.projectId || null);
-      setActiveCarId(state.carId || null);
+      setRoute(event.state ? normalizeRoute(event.state) : initialWorkspace());
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
-  const navigate = (next: View, projectId?: number | null, carId?: number | null) => {
+  useEffect(() => {
+    if (!["settings", "admin"].includes(view)) lastRoutes.current[source] = route;
+    try { window.localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(route)); } catch { /* Storage can be unavailable in a WebView. */ }
+  }, [route, source, view]);
+
+  const navigate = (next: View, projectId?: number | null, carId?: number | null, nextSource = source) => {
     const state = {
+      source: nextSource,
       view: next,
       projectId:
         projectId !== undefined
@@ -738,14 +776,12 @@ function App({
             : null,
       carId: carId !== undefined ? carId : next === "car" ? activeCarId : null,
     };
-    const params = new URLSearchParams();
-    if (next !== "projects") params.set("view", next);
-    if (state.projectId) params.set("project", String(state.projectId));
-    if (state.carId) params.set("car", String(state.carId));
-    window.history.pushState(state, "", `${window.location.pathname}${params.size ? `?${params}` : ""}`);
-    setView(next);
-    setActiveProjectId(state.projectId);
-    setActiveCarId(state.carId);
+    window.history.pushState(state, "", workspaceUrl(window.location.pathname, state));
+    setRoute(state);
+  };
+  const selectSource = (key: SourceKey) => {
+    const saved = lastRoutes.current[key] || normalizeRoute({ source: key });
+    navigate(saved.view, saved.projectId, saved.carId, key);
   };
 
   const notify = (message: string) => {
@@ -764,20 +800,25 @@ function App({
 
   const refreshMutation = useMutation({
     mutationFn: (projectIds: number[]) =>
-      request<{ id: number }>("/scans/projects", {
+      request<LaunchResult>("/scans/projects", {
         method: "POST",
         body: JSON.stringify({ project_ids: projectIds }),
       }),
-    onSuccess: () => {
-      notify(t("scanQueued"));
+    onSuccess: (result) => {
+      notify(launchSummary(result, locale));
       void client.invalidateQueries({ queryKey: ["scans"] });
+      void client.invalidateQueries({ queryKey: ["launch-options"] });
     },
-    onError: (error) => notify(scanActionErrorMessage(error, t)),
+    onError: (error) => {
+      notify(scanActionErrorMessage(error, t));
+      void client.invalidateQueries({ queryKey: ["launch-options"] });
+    },
   });
   const cancelScanMutation = useMutation({
-    mutationFn: (scanId: number) =>
+    mutationFn: ({ scanId, sourceKey, projectIds, kind }: { scanId: number; sourceKey: SourceKey; projectIds?: number[]; kind: string }) =>
       request<{ id: number; status: string }>(`/scans/${scanId}/cancel`, {
         method: "POST",
+        body: kind === "PROJECTS" ? JSON.stringify(projectIds ? { project_ids: projectIds } : { source_keys: [sourceKey] }) : undefined,
       }),
     onSuccess: () => {
       notify(t("scanCancelRequested"));
@@ -788,9 +829,21 @@ function App({
   });
   const cancelScan = (scanId: number) => {
     if (window.confirm(t("cancelUpdateConfirm"))) {
-      cancelScanMutation.mutate(scanId);
+      const scan = sourceActiveScans.find((item) => item.id === scanId);
+      if (!scan) return;
+      cancelScanMutation.mutate({ scanId, sourceKey: source, kind: scan.kind,
+        projectIds: view === "project" && activeProjectId ? [activeProjectId] : undefined });
     }
   };
+  const activityCancelMutation = useMutation({
+    mutationFn: (target: CancellationTarget) => request(`/scans/${target.scanId}/cancel`, {
+      method: "POST", body: JSON.stringify(cancellationBody(target)),
+    }),
+    onSuccess: async () => {
+      await Promise.all(["scans", "projects", "launch-options"].map((key) => client.invalidateQueries({ queryKey: [key] })));
+    },
+    onError: () => { void client.invalidateQueries({ queryKey: ["scans"] }); },
+  });
 
   const saveProjectMutation = useMutation({
     mutationFn: ({ form, id }: { form: ProjectForm; id?: number }) =>
@@ -799,10 +852,12 @@ function App({
         body: JSON.stringify(form),
       }),
     onSuccess: (savedProject, variables) => {
-      notify(variables.id ? t("projectEdited") : t("projectCreated"));
+      const availability = sourceAvailability(launchOptionsQuery.data, savedProject.source_key || "encar", launchOptionsQuery.isError);
+      notify(variables.id ? t("projectEdited") : `${t("projectCreated")}${availability.can_search ? "" : ` · ${reasonText(availability.reason, locale)}`}`);
       setFormProject(null);
       void client.invalidateQueries({ queryKey: ["projects"] });
-      if (!variables.id) {
+      void client.invalidateQueries({ queryKey: ["launch-options"] });
+      if (!variables.id && availability.can_search) {
         refreshMutation.mutate([savedProject.id]);
       }
     },
@@ -822,7 +877,9 @@ function App({
     mutationFn: (id: number) => request<void>(`/projects/${id}`, { method: "DELETE" }),
     onSuccess: (_, id) => {
       setDeleteProject(null);
-      setSelected((values) => values.filter((value) => value !== id));
+      setSelections((previous) => Object.fromEntries(Object.entries(previous).map(
+        ([key, values]) => [key, values.filter((value) => value !== id)],
+      )));
       if (activeProjectId === id) {
         navigate("projects");
       }
@@ -833,7 +890,7 @@ function App({
   });
 
   const openProject = (project: ProjectRecord) => {
-    navigate("project", project.id, null);
+    navigate("project", project.id, null, project.source_key || "encar");
   };
   const openCar = (car: CarRecord) => {
     navigate("car", activeProjectId, car.id);
@@ -849,25 +906,9 @@ function App({
           <span>S</span> SearchCar
         </button>
         <p className="eyebrow">{t("workspace")}</p>
-        <nav>
-          <button
-            className={["projects", "project", "favorites", "car"].includes(view) ? "active" : ""}
-            onClick={() => navigate("projects")}
-          >
-            <span className="nav-icon" aria-hidden="true">▣</span>
-            <span className="nav-label">{t("projects")}</span>
-          </button>
-          <button className={view === "scans" ? "active" : ""} onClick={() => navigate("scans")}>
-            <span className="nav-icon" aria-hidden="true">▷</span>
-            <span className="nav-label">{t("scans")}</span>
-          </button>
-          <button
-            className={view === "settings" ? "active" : ""}
-            onClick={() => navigate("settings")}
-          >
-            <span className="nav-icon" aria-hidden="true">⚙</span>
-            <span className="nav-label">{t("settings")}</span>
-          </button>
+        <SourceNavigation source={source} view={view} locale={locale} navigate={navigate} selectSource={selectSource}
+          options={launchOptionsQuery.data} failed={launchOptionsQuery.isError} />
+        <nav aria-label={locale === "uk" ? "Адміністрування" : "Администрирование"}>
           {localAdminEnabled ? (
             <button
               className={view === "admin" ? "active" : ""}
@@ -910,11 +951,12 @@ function App({
       <section className="workspace">
         <header>
           <div>
-            {t("workspace")}　/　{view === "admin"
+            {view === "settings" ? (locale === "uk" ? "Застосунок" : "Приложение") : SITE_NAMES[source]}　/　{view === "admin"
               ? locale === "uk" ? "Адміністрування" : "Администрирование"
-              : t(view === "car" ? "car" : view === "favorites" ? "favorites" : view === "settings" ? "settings" : view === "scans" ? "scans" : "projects")}
+              : t(view === "car" ? "car" : view === "favorites" ? "favorites" : view === "settings" || view === "source-settings" ? "settings" : view === "scans" ? "scans" : "projects")}
           </div>
           <div className="top-actions">
+            <button ref={launchTrigger} type="button" className="button shell-refresh" aria-haspopup="dialog" onClick={() => setShowLaunch(true)}>{locale === "uk" ? "Оновити дані" : "Обновить данные"}</button>
             {schedulerQuery.data?.enabled && schedulerQuery.data.next_run_at ? (
               <span className="next-update">
                 {schedulerQuery.data.paused ? t("schedulerTitle") : t("nextUpdateIn")}
@@ -925,10 +967,12 @@ function App({
                 </b>
               </span>
             ) : null}
-            <span>
+            <button type="button" ref={activityTrigger} className="activity-trigger" aria-haspopup="dialog"
+              aria-label={locale === "uk" ? "Активні запуски — відкрити чергу" : "Активные запуски — открыть очередь"}
+              onClick={() => setShowActivity(true)}>
               {t("activeScans")}
-              <b>{activeScans.length}</b>
-            </span>
+              <b>{allScansQuery.isError ? "?" : activeScans.length}</b>
+            </button>
             {!currentUser.passwordless_workspace ? (
               <span className="current-user">
                 {locale === "uk" ? "Користувач" : "Пользователь"}:
@@ -973,16 +1017,28 @@ function App({
           </div>
         </header>
         <main>
-          {view === "projects" && (
+          {source !== "encar" && !["settings", "admin"].includes(view) && <SourceUnavailable source={source} view={view} locale={locale}
+            availability={searchAvailability} retry={retryAvailability} settings={() => navigate("settings")} />}
+          {source === "encar" && !["settings", "admin"].includes(view) && <SourceAvailabilityNotice source={source}
+            availability={workspaceAvailability} locale={locale} retry={retryAvailability} settings={() => navigate("settings")} detailed={view === "source-settings"} />}
+          {source === "encar" && view === "source-settings" && <>
+            <div className="title-row source-title"><div><h1>{locale === "uk" ? "Налаштування Encar" : "Настройки Encar"}</h1><p>{locale === "uk" ? "Параметри цього сайту" : "Параметры этого сайта"}</p></div></div>
+            <section className="panel source-unavailable"><h2>{locale === "uk" ? "Параметри пошуку" : "Параметры поиска"}</h2>
+              <p>{locale === "uk" ? "Посилання, діапазон ціни, режим та охоплення налаштовуються в кожному проєкті. Швидкість пошуку, автооновлення, ліцензія та резервні копії — у налаштуваннях застосунку." : "Ссылка, диапазон цены, режим и охват настраиваются в каждом проекте. Скорость поиска, автообновление, лицензия и резервные копии — в настройках приложения."}</p>
+              <div className="source-settings-actions"><Button onClick={() => navigate("projects")}>{t("projects")}</Button><Button onClick={() => navigate("settings")}>{locale === "uk" ? "Налаштування застосунку" : "Настройки приложения"}</Button></div>
+            </section>
+          </>}
+          {source === "encar" && view === "projects" && (
             <Projects
               t={t}
               locale={locale}
               projects={projectsQuery.data || []}
               loading={projectsQuery.isLoading}
               error={projectsQuery.isError}
+              searchEnabled={searchAvailability.can_search}
               selected={selected}
               setSelected={setSelected}
-              activeScans={activeScans}
+              activeScans={sourceActiveScans}
               latestReport={(scansQuery.data || []).find(
                 (scan) =>
                   scan.payload?.project_ids?.length &&
@@ -1000,7 +1056,7 @@ function App({
               openFavorites={() => navigate("favorites")}
             />
           )}
-          {view === "favorites" && (
+          {source === "encar" && view === "favorites" && (
             <Favorites
               t={t}
               back={() => window.history.back()}
@@ -1010,15 +1066,16 @@ function App({
               notify={notify}
             />
           )}
-          {view === "project" && activeProjectId && (
+          {source === "encar" && view === "project" && activeProjectId && (
             <Project
               t={t}
               locale={locale}
               projectId={activeProjectId}
+              searchEnabled={workspaceAvailability.can_search}
               back={() => window.history.back()}
               openCar={openCar}
               refresh={() => refreshMutation.mutate([activeProjectId])}
-              activeScan={activeScans.find((scan) =>
+              activeScan={sourceActiveScans.find((scan) =>
                 scan.payload?.project_ids?.includes(activeProjectId),
               )}
               cancelScan={cancelScan}
@@ -1027,13 +1084,14 @@ function App({
               notify={notify}
             />
           )}
-          {view === "car" && activeCarId && (
+          {source === "encar" && view === "car" && activeCarId && (
             <Car
               t={t}
               locale={locale}
               carId={activeCarId}
+              searchEnabled={searchAvailability.can_search}
               projectId={activeProjectId}
-              activeScan={activeScans.find((scan) =>
+              activeScan={sourceActiveScans.find((scan) =>
                 scan.payload?.car_ids?.includes(activeCarId),
               )}
               cancelScan={cancelScan}
@@ -1041,7 +1099,9 @@ function App({
               notify={notify}
             />
           )}
-          {view === "scans" && (
+          {source === "encar" && view === "scans" && (
+            scansQuery.isLoading ? <div className="panel empty-state" role="status">{locale === "uk" ? "Завантаження запусків…" : "Загрузка запусков…"}</div> :
+            scansQuery.isError ? <section className="panel source-unavailable" role="alert"><p>{t("backendUnavailable")}</p><Button onClick={() => void scansQuery.refetch()}>{locale === "uk" ? "Повторити" : "Повторить"}</Button></section> :
             <Scans
               t={t}
               locale={locale}
@@ -1055,7 +1115,7 @@ function App({
             <Settings
               t={t}
               locale={locale}
-              projects={projectsQuery.data || []}
+              projects={allProjectsQuery.data || []}
               notify={notify}
               isAdmin={currentUser.role === "ADMIN"}
               canManageDesktopData={
@@ -1072,6 +1132,20 @@ function App({
           )}
         </main>
       </section>
+      {showLaunch && <LaunchDialog locale={locale} options={launchOptionsQuery.data}
+        returnFocus={launchTrigger}
+        loading={launchOptionsQuery.isFetching && !launchOptionsQuery.data}
+        failed={launchOptionsQuery.isError} retry={() => { void launchOptionsQuery.refetch(); }}
+        launch={(ids) => refreshMutation.mutateAsync(ids)} close={() => setShowLaunch(false)}
+        errorMessage={(error) => error instanceof ApiError && error.code?.startsWith("license_")
+          ? licenseErrorMessage(error, t)
+          : locale === "uk" ? "Не вдалося додати проєкти до черги. Перевірте доступність і повторіть." : "Не удалось добавить проекты в очередь. Проверьте доступность и повторите."} />}
+      {showActivity && <ActivityDialog locale={locale} runs={activeScans} projects={allProjectsQuery.data || []}
+        returnFocus={activityTrigger}
+        loading={allScansQuery.isFetching && !allScansQuery.data || allProjectsQuery.isFetching && !allProjectsQuery.data}
+        failed={allScansQuery.isError || allProjectsQuery.isError}
+        retry={() => { void allScansQuery.refetch(); void allProjectsQuery.refetch(); }}
+        cancel={(target) => activityCancelMutation.mutateAsync(target)} close={() => setShowActivity(false)} />}
       {formProject && (
         <ProjectModal
           t={t}
@@ -2239,6 +2313,7 @@ function Projects({
   projects,
   loading,
   error,
+  searchEnabled,
   selected,
   setSelected,
   activeScans,
@@ -2259,6 +2334,7 @@ function Projects({
   projects: ProjectRecord[];
   loading: boolean;
   error: boolean;
+  searchEnabled: boolean;
   selected: number[];
   setSelected: (ids: number[]) => void;
   activeScans: ScanRecord[];
@@ -2276,14 +2352,20 @@ function Projects({
 }) {
   const [grid, setGrid] = useState(() => {
     if (typeof window === "undefined") return false;
-    return window.localStorage.getItem("encar-projects-view") === "grid";
+    try { return window.localStorage.getItem("encar-projects-view") === "grid"; } catch { return false; }
   });
-  const [sort, setSort] = useState<"updated" | "name">("updated");
+  const [sort, setSort] = useState<"updated" | "name">(() => {
+    if (typeof window === "undefined") return "updated";
+    try { return window.localStorage.getItem("encar-project-list-sort") === "name" ? "name" : "updated"; } catch { return "updated"; }
+  });
   const [projectsCollapsed, setProjectsCollapsed] = useState(false);
   const [carSearch, setCarSearch] = useState("");
   useEffect(() => {
-    window.localStorage.setItem("encar-projects-view", grid ? "grid" : "list");
+    try { window.localStorage.setItem("encar-projects-view", grid ? "grid" : "list"); } catch { /* Use session state when storage is unavailable. */ }
   }, [grid]);
+  useEffect(() => {
+    try { window.localStorage.setItem("encar-project-list-sort", sort); } catch { /* Use session state when storage is unavailable. */ }
+  }, [sort]);
   const lookupMutation = useMutation({
     mutationFn: (value: string) =>
       request<CarLookupResult>(`/car-lookup?q=${encodeURIComponent(value.trim())}`),
@@ -2410,7 +2492,7 @@ function Projects({
             type="button"
             className="button projects-refresh-button"
             onClick={() => refresh(selected.length ? selected : projects.map((project) => project.id))}
-            disabled={!projects.length || Boolean(current)}
+            disabled={!searchEnabled || !projects.length || Boolean(current)}
           >
             ↻ {current
               ? `${t("updatingProject")}…`
@@ -2778,8 +2860,8 @@ function Favorites({
 }) {
   const client = useQueryClient();
   const favoritesQuery = useQuery<CarRecord[]>({
-    queryKey: ["favorites"],
-    queryFn: () => request("/favorites"),
+    queryKey: sourceRead("favorites", "encar").queryKey,
+    queryFn: () => request(sourceRead("favorites", "encar").path),
     refetchInterval: 5000,
   });
   const favoriteMutation = useMutation({
@@ -2838,6 +2920,7 @@ function Project({
   t,
   locale,
   projectId,
+  searchEnabled,
   back,
   openCar,
   refresh,
@@ -2850,6 +2933,7 @@ function Project({
   t: Translate;
   locale: Locale;
   projectId: number | null;
+  searchEnabled: boolean;
   back: () => void;
   openCar: (car: CarRecord) => void;
   refresh: () => void;
@@ -2953,6 +3037,7 @@ function Project({
     return sort === "price_asc" ? difference : -difference;
   });
   if (!project) return <div className="panel empty-state">{t("loadingProjects")}</div>;
+  if (project.source_key && project.source_key !== "encar") return <SourceContextMismatch source={project.source_key} projectId={project.id} locale={locale} />;
   return (
     <>
       <button className="back" onClick={back}>
@@ -2980,7 +3065,7 @@ function Project({
               {t(activeScan.status === "CANCEL_REQUESTED" ? "cancelling" : "cancelUpdate")}
             </Button>
           ) : (
-            <Button kind="primary" onClick={refresh}>
+            <Button kind="primary" disabled={!searchEnabled} onClick={refresh}>
               ↻ {t("refreshProject")}
             </Button>
           )}
@@ -3104,6 +3189,7 @@ function Car({
   t,
   locale,
   carId,
+  searchEnabled,
   projectId,
   activeScan,
   cancelScan,
@@ -3113,6 +3199,7 @@ function Car({
   t: Translate;
   locale: Locale;
   carId: number;
+  searchEnabled: boolean;
   projectId: number | null;
   activeScan?: ScanRecord;
   cancelScan: (scanId: number) => void;
@@ -3200,7 +3287,7 @@ function Car({
     onError: (error) => notify(scanActionErrorMessage(error, t)),
   });
   useEffect(() => {
-    if (!projectId) return;
+    if (!projectId || !carQuery.data || carQuery.data.source_key && carQuery.data.source_key !== "encar") return;
     let active = true;
     request<{ viewed: boolean }>(`/projects/${projectId}/cars/${carId}/viewed`, {
       method: "PATCH",
@@ -3219,7 +3306,7 @@ function Car({
     return () => {
       active = false;
     };
-  }, [carId, client, projectId]);
+  }, [carId, client, projectId, carQuery.data?.source_key, carQuery.isSuccess]);
   const copyPrompt = async () => {
     const data = await request<{ prompt: string }>(`/cars/${carId}/chatgpt-prompt`);
     await navigator.clipboard.writeText(data.prompt);
@@ -3227,6 +3314,7 @@ function Car({
   };
   const car = carQuery.data;
   if (!car) return <div className="panel empty-state">{t("loadingCars")}</div>;
+  if (car.source_key && car.source_key !== "encar") return <SourceContextMismatch source={car.source_key} projectId={projectId} carId={car.id} locale={locale} />;
   const l = (ru: string, uk: string) => locale === "uk" ? uk : ru;
   const details = car.details || {};
   const monthlyOffer = isMonthlyOffer(details);
@@ -3396,7 +3484,7 @@ function Car({
                 {t(activeScan.status === "CANCEL_REQUESTED" ? "cancelling" : "cancelUpdate")}
               </Button>
             ) : (
-              <Button kind="primary" onClick={() => refreshMutation.mutate()}>
+              <Button kind="primary" disabled={!searchEnabled} onClick={() => refreshMutation.mutate()}>
                 ↻ {t("refresh")}
               </Button>
             )
@@ -4003,6 +4091,7 @@ function Settings({
     onSuccess: (status) => {
       client.setQueryData(["desktop-license"], status);
       void client.invalidateQueries({ queryKey: ["desktop-license"] });
+      void client.invalidateQueries({ queryKey: ["launch-options"] });
       setActivationCode("");
       setLicenseError(null);
       notify(t("licenseActivated"));
@@ -4020,6 +4109,7 @@ function Settings({
     onSuccess: (status) => {
       client.setQueryData(["desktop-license"], status);
       void client.invalidateQueries({ queryKey: ["desktop-license"] });
+      void client.invalidateQueries({ queryKey: ["launch-options"] });
       setLicenseError(null);
       notify(t("licenseRefreshed"));
     },
@@ -4029,6 +4119,7 @@ function Settings({
       if (error instanceof ApiError && error.code === "license_deleted") {
         void client.invalidateQueries({ queryKey: ["desktop-license"] });
       }
+      void client.invalidateQueries({ queryKey: ["launch-options"] });
       notify(message);
     },
   });
@@ -4064,6 +4155,7 @@ function Settings({
     onSuccess: (status) => {
       client.setQueryData(["desktop-license"], status);
       void client.invalidateQueries({ queryKey: ["desktop-license"] });
+      void client.invalidateQueries({ queryKey: ["launch-options"] });
       setTransferRequest(null);
       setLicenseError(null);
       notify(t("licenseTransferred"));

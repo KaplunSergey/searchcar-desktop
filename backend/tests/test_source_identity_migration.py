@@ -329,14 +329,14 @@ def test_identity_survives_backup_restore_and_legacy_conversion(tmp_path, mode):
     else:
         export_backup(source_path, source_storage, archive)
     validation = validate_backup(archive)
-    assert validation.schema_version == (0 if mode == "legacy" else 10)
+    assert validation.schema_version == (0 if mode == "legacy" else 11)
     assert validation.table_counts["cars"] == (2 if mode == "converted" else 1)
     target_path = tmp_path / "restored" / "data.sqlite3"
     target_storage = tmp_path / "restored" / "storage"
     target_path.parent.mkdir()
     restore_backup(archive, target_path, target_storage, tmp_path / "backups")
     restored = create_database_engine(f"sqlite+pysqlite:///{target_path}")
-    assert migrate_sqlite(restored) == 10
+    assert migrate_sqlite(restored) == 11
     with Session(restored) as db:
         car = db.get(Car, 29)
         assert (car.source_key, car.source_listing_id) == ("encar", "42688672")

@@ -110,6 +110,51 @@ class CarMoneyValue(Base):
     state: Mapped[str] = mapped_column(String(16))
     auction_round: Mapped[str | None] = mapped_column(String(128))
 
+from .auction_migration import auction_tables_v1
+
+_auction_rounds, _auction_versions, _auction_observations = auction_tables_v1(Base.metadata)
+
+
+class AuctionRound(Base):
+    __table__ = _auction_rounds
+    id: Mapped[str]
+    car_id: Mapped[int]
+    evidence_kind: Mapped[str]
+    evidence_key: Mapped[str | None]
+    source_sale_id: Mapped[str | None]
+    is_current: Mapped[bool]
+    created_at: Mapped[datetime]
+    last_observed_at: Mapped[datetime]
+    source_updated_at: Mapped[datetime | None]
+
+
+class AuctionScheduleVersion(Base):
+    __table__ = _auction_versions
+    id: Mapped[str]
+    round_id: Mapped[str]
+    version: Mapped[int]
+    change_kind: Mapped[str]
+    event_kind: Mapped[str]
+    precision: Mapped[str]
+    utc_at: Mapped[datetime | None]
+    local_date: Mapped[str | None]
+    source_timezone: Mapped[str | None]
+    evidence: Mapped[dict]
+    observed_at: Mapped[datetime]
+
+
+class AuctionObservation(Base):
+    __table__ = _auction_observations
+    id: Mapped[str]
+    car_id: Mapped[int]
+    round_id: Mapped[str]
+    schedule_version_id: Mapped[str | None]
+    observation_key: Mapped[str]
+    observed_at: Mapped[datetime]
+    source_updated_at: Mapped[datetime | None]
+    applied: Mapped[bool]
+    payload: Mapped[dict]
+
 class ProjectCar(Base):
     __tablename__="project_cars"
     project_id: Mapped[int]=mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True); car_id: Mapped[int]=mapped_column(ForeignKey("cars.id"), primary_key=True)

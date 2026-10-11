@@ -21,6 +21,16 @@ It must not be launched from Nuitka's temporary onefile extraction directory:
 macOS application launches may reject that child executable even when direct
 terminal checks pass.
 
+Auction-time normalization uses the pinned `tzdata` package from
+`backend/requirements.txt` on both platforms rather than whichever IANA rules
+the host has installed. The sidecar builder explicitly includes its Python
+package and zoneinfo data. Source-level tests with `PYTHONTZPATH=""` verify the
+package without a system database. The UI now reads a fresh Intl computer
+timezone per auction request and refreshes auction queries after wake/focus or
+periodically while visible. Compiled timezone-data checks and installed-app
+timezone-change/wake checks on both platforms remain the MSA-07 platform gate;
+source/Node tests do not close it.
+
 ## Python environment
 
 Create a Python 3.12 virtual environment and install:

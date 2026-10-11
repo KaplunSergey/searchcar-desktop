@@ -43,6 +43,102 @@ def api(queue, monkeypatch):
         app.dependency_overrides.update(previous)
 
 
+def test_launch_options_are_owner_scoped_read_only_and_separate_license_from_busy(api, queue, monkeypatch):
+    from app.desktop_license import EntitlementDecision
+    monkeypatch.setattr("app.sources.registry.list_sources", lambda: tuple(queue.descriptors.values()))
+    monkeypatch.setattr("app.desktop_license.evaluate_search_entitlement", lambda **kwargs:
+        EntitlementDecision(mode="required", status="active", can_search=True, sources=("alpha", "charlie")))
+    running = queue.submit(["alpha1"])
+    with queue.factory() as db:
+        db.get(ScanRun, running["id"]).status = "RUNNING"
+        outsider = User(username="hidden", username_key="hidden", password_hash="test", role="USER", status="ACTIVE")
+        db.add(outsider)
+        db.flush()
+        db.add(Project(owner_id=outsider.id, source_key="alpha", name="Secret", name_key="secret", search_url="https://alpha.example/secret"))
+        db.add(Project(owner_id=queue.owner_id, source_key="unshipped", name="Saved only", name_key="saved only", search_url="https://unshipped.example/1"))
+        db.commit()
+        before = [(row.id, row.status) for row in db.scalars(select(ScanRun))]
+    response = api.get("/api/scans/launch-options")
+    assert response.status_code == 200, response.text
+    options = response.json()
+    assert {row["source_key"]: row["can_search"] for row in options["sources"]} == {"alpha": True, "bravo": False, "charlie": True}
+    projects = {row["name"]: row for row in options["projects"]}
+    assert "Secret" not in projects
+    assert projects["alpha1"]["active_status"] == "RUNNING"
+    assert projects["alpha1"]["scan_run_id"] == running["id"]
+    assert projects["alpha2"]["can_search"] is True
+    assert projects["bravo1"]["reason"] == "LICENSE_SOURCE_NOT_ALLOWED"
+    assert projects["Saved only"]["reason"] == "SOURCE_NOT_CONNECTED"
+    with queue.factory() as db:
+        assert [(row.id, row.status) for row in db.scalars(select(ScanRun))] == before
+
+
+def test_launch_options_failed_adapter_does_not_block_another_source(api, queue, monkeypatch):
+    from app.desktop_license import EntitlementDecision
+    from app.sources.contracts import SourceUnavailableError
+    monkeypatch.setattr("app.sources.registry.list_sources", lambda: tuple(queue.descriptors.values()))
+    monkeypatch.setattr("app.desktop_license.evaluate_search_entitlement", lambda **kwargs:
+        EntitlementDecision(mode="disabled", status="pilot", can_search=True))
+    def source(key):
+        if key == "alpha":
+            raise SourceUnavailableError("fixture load failed")
+        return queue.adapters[key]
+    monkeypatch.setattr("app.main.get_source", source)
+    response = api.get("/api/scans/launch-options")
+    assert response.status_code == 200, response.text
+    options = response.json()
+    sources = {row["source_key"]: row for row in options["sources"]}
+    assert sources["alpha"]["reason"] == "SOURCE_UNAVAILABLE"
+    assert sources["bravo"]["can_search"] is True
+    assert all(not row["can_search"] for row in options["projects"] if row["source_key"] == "alpha")
+
+
+def test_launch_options_distinguish_projects_inside_a_running_batch(api, queue, monkeypatch):
+    from app.desktop_license import EntitlementDecision
+    monkeypatch.setattr("app.sources.registry.list_sources", lambda: tuple(queue.descriptors.values()))
+    monkeypatch.setattr("app.desktop_license.evaluate_search_entitlement", lambda **kwargs:
+        EntitlementDecision(mode="disabled", status="pilot", can_search=True))
+    run_id = queue.submit(["alpha1", "alpha2", "alpha3"])["id"]
+    with queue.factory() as db:
+        run = db.get(ScanRun, run_id)
+        run.status = "RUNNING"
+        run.payload = {**run.payload, "current_project_id": queue.plans["alpha2"]["project_id"],
+                       "project_statuses": {str(queue.plans["alpha1"]["project_id"]): "SUCCEEDED"}}
+        db.commit()
+    rows = {row["name"]: row for row in api.get("/api/scans/launch-options").json()["projects"]}
+    assert rows["alpha1"]["active_status"] == "ALREADY_ACTIVE"
+    assert rows["alpha2"]["active_status"] == "RUNNING"
+    assert rows["alpha3"]["active_status"] == "QUEUED"
+
+
+@pytest.mark.parametrize("blocked", ["LICENSE_LEASE_EXPIRED", "DESKTOP_MAINTENANCE_ACTIVE", "INVALID_SOURCE_URL"])
+def test_launch_preview_disables_unlaunchable_projects_without_mutation(api, queue, monkeypatch, blocked):
+    from app.desktop_license import EntitlementDecision
+    from app.sources.contracts import InvalidSourceUrlError
+    monkeypatch.setattr("app.sources.registry.list_sources", lambda: tuple(queue.descriptors.values()))
+    def entitlement(**kwargs):
+        assert kwargs == {"update_trusted_time": False}
+        return EntitlementDecision(mode="required", status="blocked" if blocked.startswith("LICENSE") else "active",
+                                   can_search=not blocked.startswith("LICENSE"), reason=blocked if blocked.startswith("LICENSE") else None,
+                                   sources=tuple(queue.descriptors))
+    monkeypatch.setattr("app.desktop_license.evaluate_search_entitlement", entitlement)
+    monkeypatch.setattr("app.maintenance.maintenance_active", lambda: blocked == "DESKTOP_MAINTENANCE_ACTIVE")
+    if blocked == "INVALID_SOURCE_URL":
+        def invalid(_url):
+            raise InvalidSourceUrlError("fixture invalid URL")
+        queue.adapters["alpha"].validate_search_url = invalid
+    response = api.get("/api/scans/launch-options")
+    assert response.status_code == 200, response.text
+    for row in response.json()["projects"]:
+        if blocked == "INVALID_SOURCE_URL" and row["source_key"] != "alpha":
+            assert row["can_search"] is True
+        else:
+            assert row["can_search"] is False
+            assert row["reason"] == blocked
+    with queue.factory() as db:
+        assert db.scalar(select(ScanRun)) is None
+
+
 @pytest.mark.parametrize("outcome", ["success", "captcha", "cancel_site"])
 def test_http_mixed_launch_worker_history_and_owner_boundary(api, queue, outcome):
     with queue.factory() as db:
@@ -222,6 +318,84 @@ def test_mixed_history_projects_site_portion_without_mutating_shared_run(api, qu
         assert len(stored.payload["project_ids"]) == 2
         assert stored.payload["failures"][0]["source_key"] == "alpha"
         assert db.query(ScanRun).count() == 1
+
+
+@pytest.mark.parametrize("finished_status", ["FAILED", "SUCCEEDED", "PARTIAL", "CANCELLED", "INTERRUPTED_SLEEP"])
+@pytest.mark.parametrize("stale_status", ["QUEUED", "RUNNING", "CANCEL_REQUESTED"])
+def test_finished_legacy_run_never_reappears_as_active_in_site_history(api, queue, finished_status, stale_status):
+    project_id = queue.plans["alpha1"]["project_id"]
+    with queue.factory() as db:
+        run = ScanRun(owner_id=queue.owner_id, kind="PROJECTS", status=finished_status,
+                      progress=100, payload={"project_ids": [project_id],
+                                             "project_statuses": {str(project_id): stale_status}})
+        db.add(run)
+        db.flush()
+        run_id = run.id
+        db.add(ProjectScanRun(scan_run_id=run_id, project_id=project_id, status=stale_status))
+        db.commit()
+
+    for path in [f"/api/scans/{run_id}?source_key=alpha", f"/api/scans/{run_id}/progress?source_key=alpha"]:
+        view = api.get(path).json()
+        assert view["status"] == finished_status
+        assert view["payload"]["project_statuses"][str(project_id)] == finished_status
+        assert view["progress"] == 100
+    assert api.get("/api/scans?source_key=alpha").json()[0]["status"] == finished_status
+    assert api.post(f"/api/scans/{run_id}/cancel", json={"source_keys": ["alpha"]}).status_code == (202 if finished_status == "CANCELLED" else 409)
+    restart = api.post("/api/scans/projects", json={"project_ids": [project_id]}).json()
+    assert restart["created"] is True
+    assert restart["projects"][0]["status"] == "QUEUED"
+    with queue.factory() as db:
+        # Reading history must not silently migrate the customer's stored rows.
+        assert db.get(ScanRun, run_id).payload["project_statuses"][str(project_id)] == stale_status
+        assert db.scalar(select(ProjectScanRun).where(ProjectScanRun.scan_run_id == run_id)).status == stale_status
+
+
+def test_whole_running_job_cancellation_is_visible_in_site_history_until_worker_stops(api, queue):
+    result = queue.submit(["alpha1"])
+    run_id = result["id"]
+    project_id = queue.plans["alpha1"]["project_id"]
+    with queue.factory() as db:
+        run = db.get(ScanRun, run_id)
+        run.status = "RUNNING"
+        run.payload = {**run.payload, "project_statuses": {str(project_id): "RUNNING"}}
+        db.add(ProjectScanRun(scan_run_id=run_id, project_id=project_id, status="RUNNING"))
+        db.commit()
+    cancelled = api.post(f"/api/scans/{run_id}/cancel", json={"source_keys": ["alpha"]})
+    assert cancelled.json()["status"] == "CANCEL_REQUESTED"
+    view = api.get(f"/api/scans/{run_id}?source_key=alpha").json()
+    assert view["status"] == "CANCEL_REQUESTED"
+    assert view["payload"]["project_statuses"][str(project_id)] == "CANCEL_REQUESTED"
+
+
+def test_active_queue_is_owner_scoped_unlimited_and_read_only(api, queue):
+    from datetime import datetime, timedelta, timezone
+    with queue.factory() as db:
+        start = datetime(2026, 10, 10, tzinfo=timezone.utc)
+        running = ScanRun(owner_id=queue.owner_id, kind="PROJECTS", status="RUNNING", created_at=start,
+                          payload={"project_ids": [queue.plans["alpha1"]["project_id"]]})
+        db.add(running)
+        db.flush()
+        db.add(ProjectScanRun(scan_run_id=running.id, project_id=queue.plans["alpha1"]["project_id"], status="RUNNING"))
+        db.add_all([ScanRun(owner_id=queue.owner_id, kind="PROJECTS", status="QUEUED",
+                            created_at=start + timedelta(minutes=index + 1), payload={"project_ids": []})
+                    for index in range(105)])
+        other = User(username="other queue", username_key="other queue", password_hash="test", role="USER", status="ACTIVE")
+        db.add(other)
+        db.flush()
+        db.add(ScanRun(owner_id=other.id, kind="PROJECTS", status="QUEUED", payload={}))
+        db.add(ScanRun(owner_id=queue.owner_id, kind="PROJECTS", status="FAILED", payload={}))
+        db.commit()
+        running_id = running.id
+        before = [(row.id, row.status, row.payload) for row in db.scalars(select(ScanRun))]
+    response = api.get("/api/scans/active")
+    assert response.status_code == 200, response.text
+    rows = response.json()
+    assert len(rows) == 106
+    assert rows[0]["id"] == running_id
+    assert rows[0]["payload"]["project_statuses"] == {str(queue.plans["alpha1"]["project_id"]): "RUNNING"}
+    assert {row["status"] for row in rows} == {"RUNNING", "QUEUED"}
+    with queue.factory() as db:
+        assert [(row.id, row.status, row.payload) for row in db.scalars(select(ScanRun))] == before
 
 
 def test_site_history_filter_precedes_limit_and_reads_legacy_jobs(api, queue):

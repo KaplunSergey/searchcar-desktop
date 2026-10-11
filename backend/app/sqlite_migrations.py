@@ -296,6 +296,12 @@ def _typed_money_values(connection: Connection) -> None:
     migrate_money_v1(connection)
 
 
+def _auction_rounds(connection: Connection) -> None:
+    from .auction_migration import migrate_auctions_v1
+
+    migrate_auctions_v1(connection)
+
+
 MIGRATIONS = (
     SQLiteMigration(1, "current_web_schema_baseline", _baseline),
     SQLiteMigration(2, "durable_single_worker_scan_queue", _durable_scan_queue),
@@ -307,6 +313,7 @@ MIGRATIONS = (
     SQLiteMigration(8, "additive_source_identity", _source_identity),
     SQLiteMigration(9, "source_scoped_identity", _scoped_source_identity),
     SQLiteMigration(10, "typed_money_values", _typed_money_values),
+    SQLiteMigration(11, "auction_rounds_and_schedule_history", _auction_rounds),
 )
 
 

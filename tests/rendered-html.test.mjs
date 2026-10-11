@@ -59,7 +59,8 @@ test("ships required product surfaces and localization",async()=>{
   assert.match(page,/<>{t\("projects"\)}: \{projects\.length\} · \{t\("carsCountLabel"\)\}: \{totalCars\}<\/>/);
   assert.match(page,/t\("carsCountLabel"\).*totalCars/);
   assert.match(page,/className="button projects-refresh-button"/);
-  assert.match(page,/disabled=\{!projects\.length \|\| Boolean\(current\)\}/);
+  // Empty/busy refresh is verified against the actual React toolbar in
+  // source-workspace.test.mjs, including the new entitlement guard.
   assert.match(page,/`\$\{t\("refreshSelected"\)\} \(\$\{selected\.length\}\)`/);
   assert.match(page,/`\$\{t\("updatingProject"\)\}…`/);
   const projectToolbarAt=page.indexOf('className="projects-toolbar-controls"');

@@ -41,6 +41,8 @@ def old_database(tmp_path, monkeypatch):
 
 def test_v10_backfills_minor_units_and_history_without_guessing_or_changing_ids(tmp_path, monkeypatch):
     engine = old_database(tmp_path, monkeypatch)
+    # This is a historical v10 migration test, not a latest-version assertion.
+    monkeypatch.setattr(sqlite_migrations, "MIGRATIONS", sqlite_migrations.MIGRATIONS[:10])
     assert sqlite_migrations.migrate_sqlite(engine) == 10
     with Session(engine) as db:
         assert money_values_out(db.get(Car, 29), db) == [quote(360000, "RENT_MONTHLY")]
