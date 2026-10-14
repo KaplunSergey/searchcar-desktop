@@ -90,6 +90,10 @@ export interface LeasePayload {
     sources: string[];
   };
   app_version: string;
+  recovery?: {
+    request_id: string;
+    device_public_key: string;
+  };
 }
 
 export interface ApiEnvelope<T = unknown> {

@@ -100,6 +100,115 @@ def verify_device_request(body):
     )
 
 
+@pytest.mark.parametrize("broken", [b'{broken', b'[]', b'\xef\xbb\xbf{}', b'\xff\xfe{\x00}\x00'])
+def test_current_code_recovers_corrupt_trusted_time_without_extending_license(tmp_path, monkeypatch, broken):
+    worker_key = signing_state(monkeypatch)
+    now = datetime.now(timezone.utc)
+    expiry = (now + timedelta(days=3)).isoformat().replace("+00:00", "Z")
+    store = MemoryStore()
+
+    def handler(request):
+        body = json.loads(request.content)
+        lease = signed_lease(worker_key, body, license_id="same-license", device_id="same-device", now=now)
+        lease["payload"]["subscription_expires_at"] = expiry
+        lease["payload"]["recovery"] = {"request_id": body["request_id"], "device_public_key": body["device"]["public_key"]}
+        lease["signature"] = b64url(worker_key.sign((LEASE_MESSAGE_PREFIX + canonical_json(lease["payload"])).encode()))
+        return httpx.Response(200, json={"ok": True, "data": {"license_id": "same-license", "device_id": "same-device", "lease": lease}})
+
+    client = LicenseServiceClient(tmp_path, service_url="https://license.example.test", store=store, transport=httpx.MockTransport(handler))
+    directory = tmp_path / "license"
+    directory.mkdir(exist_ok=True)
+    trusted = directory / "trusted-time.json"
+    trusted.write_bytes(broken)
+    original_key = store.value
+    result = client.redeem("SC-AAAAA-BBBBB-CCCCC-DDDDD")
+    assert result["status"] == "active"
+    assert result["subscription_expires_at"] == expiry
+    assert store.value == original_key
+    backups = list(directory.glob("trusted-time.json.invalid-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == broken
+    assert json.loads(trusted.read_text())["license_id"] == "same-license"
+
+
+def test_recovery_nonce_mismatch_cannot_install_or_reset_state(tmp_path, monkeypatch):
+    worker_key = signing_state(monkeypatch)
+    now = datetime.now(timezone.utc)
+
+    def handler(request):
+        body = json.loads(request.content)
+        lease = signed_lease(worker_key, body, license_id="same-license", device_id="same-device", now=now)
+        lease["payload"]["recovery"] = {"request_id": "another-request", "device_public_key": body["device"]["public_key"]}
+        lease["signature"] = b64url(worker_key.sign((LEASE_MESSAGE_PREFIX + canonical_json(lease["payload"])).encode()))
+        return httpx.Response(200, json={"ok": True, "data": {"license_id": "same-license", "device_id": "same-device", "lease": lease}})
+
+    client = LicenseServiceClient(tmp_path, service_url="https://license.example.test", store=MemoryStore(), transport=httpx.MockTransport(handler))
+    directory = tmp_path / "license"
+    directory.mkdir(exist_ok=True)
+    trusted = directory / "trusted-time.json"
+    trusted.write_bytes(b'{broken')
+    with pytest.raises(LicenseClientError) as error:
+        client.redeem("SC-AAAAA-BBBBB-CCCCC-DDDDD")
+    assert error.value.code == "LICENSE_RECOVERY_PROOF_INVALID"
+    assert trusted.read_bytes() == b'{broken'
+    assert not (directory / "binding.json").exists()
+
+
+@pytest.mark.parametrize("case", ["invalid_signature", "stale", "healthy_guard", "read_error", "expired", "unsigned_flag"])
+def test_current_recovery_security_boundaries(tmp_path, monkeypatch, case):
+    from app import desktop_license, desktop_license_client
+
+    key = signing_state(monkeypatch)
+    now = datetime.now(timezone.utc)
+    server_time = now - timedelta(minutes=10) if case == "stale" else now
+    expiry = (now - timedelta(days=1) if case == "expired" else now + timedelta(days=3)).isoformat()
+
+    def handler(request):
+        body = json.loads(request.content)
+        lease = signed_lease(key, body, license_id="same-license", device_id="same-device", now=server_time)
+        lease["payload"]["subscription_expires_at"] = expiry
+        if case != "unsigned_flag":
+            lease["payload"]["recovery"] = {"request_id": body["request_id"], "device_public_key": body["device"]["public_key"]}
+        lease["signature"] = b64url(key.sign((LEASE_MESSAGE_PREFIX + canonical_json(lease["payload"])).encode()))
+        if case == "invalid_signature":
+            lease["signature"] = b64url(b"x" * 64)
+        return httpx.Response(200, json={"ok": True, "data": {
+            "license_id": "same-license", "device_id": "same-device", "lease": lease, "recovery": True}})
+
+    client = LicenseServiceClient(tmp_path, service_url="https://license.example.test", store=MemoryStore(), transport=httpx.MockTransport(handler))
+    directory = tmp_path / "license"
+    directory.mkdir(exist_ok=True)
+    trusted = directory / "trusted-time.json"
+    original = json.dumps({"server_time": now.isoformat(), "highest_observed_at": (now + timedelta(hours=1)).isoformat()}).encode() if case == "healthy_guard" else b'{broken'
+    trusted.write_bytes(original)
+    if case == "read_error":
+        real_read = desktop_license._read_json
+
+        def denied_read(path, **kwargs):
+            if path.name == "trusted-time.json":
+                try:
+                    raise PermissionError("fixture access denied")
+                except PermissionError as cause:
+                    raise desktop_license.LicenseStateError("LICENSE_STATE_INVALID") from cause
+            return real_read(path, **kwargs)
+
+        monkeypatch.setattr(desktop_license, "_read_json", denied_read)
+        monkeypatch.setattr(desktop_license_client, "_read_json", denied_read)
+    if case in {"invalid_signature", "stale"}:
+        with pytest.raises(LicenseClientError) as error:
+            client.redeem("SC-AAAAA-BBBBB-CCCCC-DDDDD")
+        assert error.value.code == ("LICENSE_SIGNATURE_INVALID" if case == "invalid_signature" else "LICENSE_RECOVERY_RESPONSE_STALE")
+        assert not (directory / "binding.json").exists()
+    else:
+        result = client.redeem("SC-AAAAA-BBBBB-CCCCC-DDDDD")
+        assert result["status"] == "blocked"
+        if case == "expired":
+            assert result["reason"] == "LICENSE_SUBSCRIPTION_EXPIRED"
+    if case != "expired":
+        assert trusted.read_bytes() == original
+        assert list(directory.glob("trusted-time.json.invalid-*")) == []
+
+
 def test_device_identity_is_stable_and_private_key_stays_in_store(tmp_path) -> None:
     store = MemoryStore()
 

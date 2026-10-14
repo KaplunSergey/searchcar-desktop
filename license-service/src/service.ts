@@ -24,6 +24,7 @@ interface LeaseSource {
   appVersion: string;
   now: Date;
   sourceKeys?: string[];
+  recoveryRequest?: SignedDeviceRequest;
 }
 
 const DEFAULT_SOURCE_KEY = "encar";
@@ -37,6 +38,8 @@ interface AdminCodeRow extends LicenseRow {
   code_expires_at: string | null;
   used_at: string | null;
   used_by_device_id: string | null;
+  is_recovery: number;
+  recovery_device_id: string | null;
 }
 
 async function findActivationCode(
@@ -47,10 +50,10 @@ async function findActivationCode(
     `SELECT
        ac.id AS activation_code_id, ac.license_id AS code_license_id, ac.duration_months,
        ac.makes_perpetual, ac.expires_at AS code_expires_at, ac.used_at,
-       ac.used_by_device_id,
+       ac.used_by_device_id, ac.is_recovery, ac.recovery_device_id,
        l.id, l.kind, l.status, l.started_at, l.expires_at, l.perpetual,
        l.activation_count, l.deleted_at, l.deleted_by
-     FROM activation_codes ac
+     FROM all_activation_codes ac
      JOIN licenses l ON l.id = ac.license_id
      WHERE ac.code_hash = ?`,
   )
@@ -89,7 +92,7 @@ export async function diagnoseAdminActivationCode(env: Env, value: unknown, now:
   const hint = code.slice(-5);
   const hinted = await env.LICENSE_DB.prepare(
     `SELECT id, used_at, expires_at, created_at
-       FROM activation_codes
+       FROM all_activation_codes
       WHERE code_hint = ?
       ORDER BY created_at DESC
       LIMIT 10`,
@@ -172,6 +175,10 @@ async function createLease(env: Env, source: LeaseSource) {
       sources: sourceKeys,
     },
     app_version: source.appVersion,
+    ...(source.recoveryRequest ? { recovery: {
+      request_id: source.recoveryRequest.request_id,
+      device_public_key: source.recoveryRequest.device.public_key,
+    } } : {}),
   };
   return signLease(env, payload);
 }
@@ -322,6 +329,7 @@ async function recoveredRedemptionResponse(
       device: usedDevice,
       appVersion: request.app_version,
       now,
+      recoveryRequest: row.is_recovery === 1 ? request : undefined,
     }),
   };
 }
@@ -495,12 +503,43 @@ export async function redeemActivationCode(
     throw new ApiError(409, "CODE_NOT_AVAILABLE", "The activation code cannot be used.");
   }
   if (
-    row.status !== "ACTIVE" ||
+    row.deleted_at || row.status !== "ACTIVE" ||
     (row.code_expires_at !== null && new Date(row.code_expires_at).getTime() <= now.getTime())
   ) {
     throw new ApiError(409, "CODE_NOT_AVAILABLE", "The activation code cannot be used.");
   }
   let device = await findActiveDevice(env, row.code_license_id);
+  if (row.is_recovery === 1) {
+    if (!device || device.id !== row.recovery_device_id) {
+      throw new ApiError(403, "LICENSE_NOT_AVAILABLE", "The recovery code is bound to the original device.");
+    }
+    assertDeviceMatches(device, body);
+    const lease = await createLease(env, { license: row, device, appVersion: body.app_version, now, recoveryRequest: body });
+    try {
+      await env.LICENSE_DB.batch([
+        env.LICENSE_DB.prepare(
+          `UPDATE license_recovery_codes SET used_at = ?, used_by_device_id = ?
+             WHERE id = ? AND used_at IS NULL`,
+        ).bind(now.toISOString(), device.id, row.activation_code_id),
+        auditStatement(env, {
+          id: crypto.randomUUID(), dedupeKey: `redeem:${row.activation_code_id}`,
+          actorType: "DEVICE", actorId: device.id, action: "LICENSE_RECOVERY_CODE_REDEEMED",
+          targetType: "LICENSE", targetId: row.id,
+          metadata: { code_id: row.activation_code_id }, createdAt: now.toISOString(),
+        }),
+      ]);
+    } catch (error) {
+      if (isConstraintError(error)) {
+        const current = await findActivationCodeForRedeem(env, code);
+        const recovered = current ? await recoveredRedemptionResponse(env, current, body, now) : null;
+        if (recovered) return recovered;
+        throw new ApiError(409, "CODE_NOT_AVAILABLE", "The recovery code cannot be used.");
+      }
+      throw error;
+    }
+    // Recovery neither rewrites the license nor creates a renewal.
+    return { license_id: row.id, device_id: device.id, lease };
+  }
   const newBinding = device === null;
   if (device) {
     assertDeviceMatches(device, body);
@@ -961,6 +1000,10 @@ export async function deleteAdminLicense(
             AND (expires_at IS NULL OR expires_at > ?)`,
       ).bind(nowIso, licenseId, nowIso),
       env.LICENSE_DB.prepare(
+        `UPDATE license_recovery_codes SET expires_at = ?
+          WHERE license_id = ? AND used_at IS NULL AND expires_at > ?`,
+      ).bind(nowIso, licenseId, nowIso),
+      env.LICENSE_DB.prepare(
         `UPDATE device_transfers SET status = 'REJECTED'
           WHERE license_id = ? AND status IN ('PENDING', 'APPROVED')`,
       ).bind(licenseId),
@@ -999,6 +1042,7 @@ export async function createAdminActivationCode(
   const licenseId = requireString(body, "license_id", { min: 36, max: 36 });
   const duration = requireString(body, "duration", { min: 3, max: 10 });
   const durationMap: Record<string, number | null> = {
+    CURRENT: null,
     P1M: 1,
     P3M: 3,
     P6M: 6,
@@ -1006,7 +1050,7 @@ export async function createAdminActivationCode(
     PERPETUAL: null,
   };
   if (!(duration in durationMap)) {
-    throw new ApiError(400, "INVALID_DURATION", "duration must be P1M, P3M, P6M, P12M or PERPETUAL.");
+    throw new ApiError(400, "INVALID_DURATION", "duration must be CURRENT, P1M, P3M, P6M, P12M or PERPETUAL.");
   }
   const license = await env.LICENSE_DB.prepare(
     "SELECT id, status, deleted_at FROM licenses WHERE id = ?",
@@ -1017,12 +1061,21 @@ export async function createAdminActivationCode(
   if (license.deleted_at || license.status !== "ACTIVE") {
     throw new ApiError(409, "LICENSE_NOT_ACTIVE", "The license is not active.");
   }
+  const recoveryDevice = duration === "CURRENT" ? await findActiveDevice(env, licenseId) : null;
+  if (duration === "CURRENT" && !recoveryDevice) {
+    throw new ApiError(409, "LICENSE_NOT_BOUND", "A current-term recovery requires an existing bound device.");
+  }
   const code = randomFriendlyCode("SC");
   const id = crypto.randomUUID();
   const nowIso = now.toISOString();
   const expiresAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
   await env.LICENSE_DB.batch([
-    env.LICENSE_DB.prepare(
+    recoveryDevice ? env.LICENSE_DB.prepare(
+      `INSERT INTO license_recovery_codes
+         (id, license_id, device_id, code_hash, code_hint, expires_at, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(id, licenseId, recoveryDevice.id, await activationCodeHash(code), code.slice(-5), expiresAt, actorId, nowIso)
+    : env.LICENSE_DB.prepare(
       `INSERT INTO activation_codes
          (id, license_id, code_hash, code_hint, duration_months, makes_perpetual,
           expires_at, created_by, created_at)

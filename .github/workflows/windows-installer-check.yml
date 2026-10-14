@@ -1,0 +1,39 @@
+name: Windows installer smoke probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        simulation: [Rename, Overwrite]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download checksum-verified published installer
+        shell: pwsh
+        run: |
+          $base = 'https://github.com/KaplunSergey/searchcar-desktop-releases/releases/download/v0.3.1'
+          $installer = Join-Path $env:RUNNER_TEMP 'SearchCar-Desktop-Windows-x64-setup.exe'
+          Invoke-WebRequest "$base/SearchCar-Desktop-Windows-x64-setup.exe" -OutFile $installer
+          $sums = (Invoke-WebRequest "$base/SHA256SUMS.txt").Content
+          $match = [regex]::Match($sums, '(?im)^([a-f0-9]{64})\s+SearchCar-Desktop-Windows-x64-setup\.exe\s*$')
+          if (-not $match.Success -or (Get-FileHash $installer -Algorithm SHA256).Hash -ne $match.Groups[1].Value) { throw 'Published installer checksum mismatch' }
+      - name: Probe file replacement and shortcut tracking
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'SearchCar-Desktop-Windows-x64-setup.exe'
+          $simulation = '${{ matrix.simulation }}'
+          try {
+            scripts/windows_installer_update_smoke.ps1 -Installer $installer -Simulation $simulation
+            Write-Host "RESULT: $simulation passed"
+          } catch {
+            if ($simulation -ne 'Rename' -or $_.Exception.Message -notlike 'Shortcut does not point to the updated application:*' -or $_.Exception.Message -notlike '*stage: updated;*' -or $_.Exception.Message -notlike '*actual: *.before-update;*') { throw }
+            Write-Host "RESULT: original Rename simulation reproduces shortcut failure: $($_.Exception.Message)"
+          }

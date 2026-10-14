@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
@@ -40,6 +40,9 @@ from .desktop_license import (
     _configured_public_keys,
     _license_paths,
     _read_json,
+    _iso,
+    _timestamp,
+    _TRUSTED_TIME_LOCK,
     _verify_lease_document,
     canonical_json,
     evaluate_search_entitlement,
@@ -737,6 +740,16 @@ class LicenseServiceClient:
         data = envelope.get("data")
         if not isinstance(data, dict):
             raise LicenseClientError("LICENSE_SERVICE_RESPONSE_INVALID", http_status=502)
+        lease = data.get("lease")
+        payload = lease.get("payload") if isinstance(lease, dict) else None
+        recovery = payload.get("recovery") if isinstance(payload, dict) else None
+        if recovery is not None and (
+            path != "/v1/licenses/redeem"
+            or not isinstance(recovery, dict)
+            or recovery.get("request_id") != body["request_id"]
+            or recovery.get("device_public_key") != self.identity.public_key
+        ):
+            raise LicenseClientError("LICENSE_RECOVERY_PROOF_INVALID", http_status=502)
         return data
 
     def _binding(self) -> tuple[str, str]:
@@ -772,17 +785,60 @@ class LicenseServiceClient:
             or payload.get("device_id") != device_id
         ):
             raise LicenseClientError("LICENSE_DEVICE_MISMATCH", http_status=502)
-        binding_path, lease_path, _ = _license_paths(self.data_dir)
+        recovery = payload.get("recovery")
+        if recovery is not None:
+            # The marker is inside the verified signature, never an unsigned
+            # envelope flag. _post also binds it to this request's nonce.
+            if not isinstance(recovery, dict) or recovery.get("device_public_key") != self.identity.public_key:
+                raise LicenseClientError("LICENSE_RECOVERY_PROOF_INVALID", http_status=502)
+            try:
+                server_time = _timestamp(payload.get("server_time"), "LICENSE_SERVER_TIME_INVALID")
+                issued_at = _timestamp(payload.get("issued_at"), "LICENSE_ISSUED_AT_INVALID")
+            except LicenseStateError as exc:
+                raise LicenseClientError(exc.code, http_status=502) from exc
+            if server_time != issued_at or abs(datetime.now(timezone.utc) - server_time) > timedelta(minutes=5):
+                raise LicenseClientError("LICENSE_RECOVERY_RESPONSE_STALE", http_status=502)
+        binding_path, lease_path, trusted_path = _license_paths(self.data_dir)
         _atomic_json(
             binding_path,
             {"protocol_version": 1, "license_id": license_id, "device_id": device_id},
         )
         _atomic_json(lease_path, lease)
+        if recovery is not None:
+            self._recover_corrupt_trusted_time(trusted_path, payload, server_time)
         return evaluate_search_entitlement(
             data_dir=self.data_dir,
             public_keys=public_keys,
             mode="required",
         ).as_dict()
+
+    def _recover_corrupt_trusted_time(self, path: Path, payload: dict[str, Any], server_time: datetime) -> None:
+        """Repair only unparsable state after explicit signed CURRENT consent."""
+        with _TRUSTED_TIME_LOCK:
+            try:
+                _read_json(path, required=False)
+                return  # Never reset a readable clock guard, including rollback.
+            except LicenseStateError as exc:
+                if exc.code != "LICENSE_STATE_INVALID" or (
+                    exc.__cause__ is not None
+                    and not isinstance(exc.__cause__, (UnicodeDecodeError, json.JSONDecodeError))
+                ):
+                    return  # Permission, locking, links and oversized files stay blocked.
+            try:
+                original = path.read_bytes()
+                if len(original) > 128 * 1024:
+                    return
+                backup = path.with_name(f"trusted-time.json.invalid-{uuid4().hex}")
+                _atomic_bytes(backup, original)
+                _atomic_json(path, {
+                    "protocol_version": 1,
+                    "license_id": payload["license_id"],
+                    "device_id": payload["device_id"],
+                    "server_time": _iso(server_time),
+                    "highest_observed_at": _iso(max(datetime.now(timezone.utc), server_time)),
+                })
+            except OSError as exc:
+                raise LicenseClientError("LICENSE_RECOVERY_STATE_WRITE_FAILED", http_status=500) from exc
 
     def activate_trial(self, subject: str) -> dict[str, Any]:
         normalized = subject.strip().casefold()
