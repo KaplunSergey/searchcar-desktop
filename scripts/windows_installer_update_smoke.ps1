@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Installer,
-    [ValidateSet('Overwrite', 'Rename')][string]$Simulation = 'Overwrite'
+    [ValidateSet('Overwrite', 'Rename')][string]$Simulation = 'Rename'
 )
 
 # This installs the real bundle and changes HKCU registration. Run ONLY on an
@@ -83,7 +83,7 @@ if ((Get-Item -LiteralPath $registry).GetValue('') -ne $installation) {
 # replace the binary launched by the existing shortcut, at its actual path.
 Set-Item -LiteralPath $registry -Value $otherDirectory
 if ($Simulation -eq 'Rename') {
-    # Diagnostic reproduction only: Windows link tracking can follow this move.
+    # Preserve the original missing-main-binary regression scenario.
     Move-Item -LiteralPath $executable -Destination ($executable + '.before-update')
 } else {
     # Keep the file identity/path used by the shortcuts. We test replacement,

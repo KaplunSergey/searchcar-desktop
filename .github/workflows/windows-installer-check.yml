@@ -35,10 +35,5 @@ jobs:
         run: |
           $installer = Join-Path $env:RUNNER_TEMP 'SearchCar-Desktop-Windows-x64-setup.exe'
           $simulation = '${{ matrix.simulation }}'
-          try {
-            scripts/windows_installer_update_smoke.ps1 -Installer $installer -Simulation $simulation
-            Write-Host "RESULT: $simulation passed"
-          } catch {
-            if ($simulation -ne 'Rename' -or $_.Exception.Message -notlike 'Shortcut does not point to the updated application:*' -or $_.Exception.Message -notlike '*stage: updated;*' -or $_.Exception.Message -notlike '*actual: *.before-update;*') { throw }
-            Write-Host "RESULT: original Rename simulation reproduces shortcut failure: $($_.Exception.Message)"
-          }
+          scripts/windows_installer_update_smoke.ps1 -Installer $installer -Simulation $simulation
+          Write-Host "RESULT: $simulation passed"

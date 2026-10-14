@@ -18,19 +18,21 @@ macOS/Windows installers and clean-machine smoke before public publication.
 After installing, the owner supplies a CURRENT code for the existing license.
 
 Windows run36739028851 failed after executable/directory/registry checks passed.
-Its simulation renamed the linked executable to .before-update. Windows shell
-link tracking may follow the rename, which is not an in-place app update. The
-candidate overwrites the placeholder contents without moving the target and
-logs both shortcut paths/targets at initial and updated stages. A separate
-ephemeral Windows probe must confirm the rename hypothesis before it is
-reported as the cause; assertions about both real shortcuts remain mandatory.
+Probe38589559241 established a test-reader defect: WScript.Shell reports '?' in
+place of the Cyrillic 'Т', whereas IShellLinkW reads the correct shortcut target.
+Both real Desktop/Start Menu shortcuts, registry and executable hash passed
+before/after update in Rename and Overwrite scenarios on Windows. The rename
+hypothesis was not reproduced. Preserve Rename as the default regression and
+use the Unicode Windows API; log the legacy reader only for diagnosis. Both
+probe scenarios are strict (no accepted shortcut failures).
 
 Local evidence: recovery regressions RED on main (7 fail,4pass), then45 license
 tests GREEN; full backend224pass. Worker/D1 recovery and existing invariants:
 16pass. No production mutation is implied by these local checks.
 
 Frontend20pass after generating the production web bundle; desktop frontend
-build and typechecks passed. Rust `cargo check --offline --locked` passed with
+build and typechecks passed. Two Rust updater tests passed. Rust
+`cargo check --offline --locked` passed with
 packaging-only resources excluded from that compile check (not an installer
 smoke). Lint has no errors and six pre-existing image warnings.
 
@@ -39,3 +41,7 @@ encrypted D1 but upload failed with GitHub Actions artifact storage quota.
 The database has not been migrated and the Worker has not been deployed.
 Do not count this failed run as a retained backup or publish until the backup,
 native builds and installed-machine checks pass.
+
+Server CI38588806437 passed against the hotfix implementation. This is a check,
+not a production deployment. The Windows probe used the checksum-verified
+published0.3.1 installer; the0.4.1 installer still needs its native build/smoke.
