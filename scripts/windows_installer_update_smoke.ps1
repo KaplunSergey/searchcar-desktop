@@ -35,12 +35,40 @@ $executable = Join-Path $installation 'searchcar-desktop.exe'
 if (-not (Test-Path -LiteralPath $executable)) { throw 'Initial install is missing the main executable.' }
 $expectedHash = (Get-FileHash -LiteralPath $executable).Hash
 $shell = New-Object -ComObject WScript.Shell
+# Read the Unicode Shell link API directly. WScript's legacy automation path
+# can replace characters outside the runner's ANSI code page with '?'.
+Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+public static class SearchCarShortcut {
+    [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+    private class ShellLink {}
+    [ComImport, Guid("000214F9-0000-0000-C000-000000000046"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IShellLinkW {
+        void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder path,
+                     int capacity, IntPtr findData, uint flags);
+    }
+    public static string Target(string file) {
+        object link = new ShellLink();
+        try {
+            ((IPersistFile)link).Load(file, 0);
+            var path = new StringBuilder(32768);
+            ((IShellLinkW)link).GetPath(path, path.Capacity, IntPtr.Zero, 0);
+            return path.ToString();
+        } finally { Marshal.ReleaseComObject(link); }
+    }
+}
+'@
 function Assert-Shortcuts([string]$Stage) {
     foreach ($folder in @('Desktop', 'Programs')) {
         $shortcut = Join-Path ([Environment]::GetFolderPath($folder)) 'SearchCar Desktop.lnk'
         $present = Test-Path -LiteralPath $shortcut
-        $target = if ($present) { $shell.CreateShortcut($shortcut).TargetPath } else { $null }
-        [ordered]@{ stage = $Stage; shortcut = $shortcut; present = $present; target = $target; expected = $executable } | ConvertTo-Json -Compress | Write-Host
+        $legacyTarget = if ($present) { $shell.CreateShortcut($shortcut).TargetPath } else { $null }
+        $target = if ($present) { [SearchCarShortcut]::Target($shortcut) } else { $null }
+        [ordered]@{ stage = $Stage; shortcut = $shortcut; present = $present; target = $target; legacyTarget = $legacyTarget; expected = $executable } | ConvertTo-Json -Compress | Write-Host
         if (-not $present -or $target -ne $executable) {
             throw "Shortcut does not point to the updated application: $shortcut (stage: $Stage; actual: $target; expected: $executable)"
         }
