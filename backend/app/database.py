@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, model_validator
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
@@ -17,8 +18,16 @@ class Settings(BaseSettings):
     auth_session_days: int = 7
     auth_hash_secret: str = "localhost-only-change-me"
     registration_enabled: bool = False
+    source_test_mode: bool = Field(default=False, validation_alias="SEARCHCAR_SOURCE_TEST_MODE")
+    source_test_max_pages: int = Field(default=50, ge=1, le=1000, validation_alias="SEARCHCAR_SOURCE_TEST_MAX_PAGES")
     allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @model_validator(mode="after")
+    def require_isolated_source_test_profile(self):
+        from .source_test_profile import validate_source_test_isolation
+        validate_source_test_isolation(self)
+        return self
 
 settings = Settings()
 

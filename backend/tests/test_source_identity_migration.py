@@ -6,14 +6,14 @@ import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, text, select
 from sqlalchemy.orm import Session
 
 from app.database import Base, create_database_engine
 from app.desktop_backup import export_backup, restore_backup, validate_backup
 from app.models import Car, CarAlias, CarEvent, CarImage, CarSnapshot, PriceHistory, Project, ProjectCar, ProjectScanRun, ScanRun, ScheduledProject, SchedulerSetting, User, UserCarState
 from app.postgres_converter import convert_to_backup
-from app.sqlite_migrations import migrate_sqlite
+from app.sqlite_migrations import migrate_sqlite, MIGRATIONS
 
 
 @pytest.mark.parametrize("schema", ["fresh", "legacy"])
@@ -267,7 +267,7 @@ def test_alembic_identity_step_preserves_the_same_legacy_rows(tmp_path):
     with Session(engine) as db:
         assert db.get(Car, 29).source_listing_id == "42688672"
         assert db.get(CarAlias, 41).source_key == "encar"
-        assert db.get(Project, 17).source_key == "encar"
+        assert db.scalar(select(Project.source_key).where(Project.id == 17)) == "encar"
         assert db.get(CarSnapshot, 51).payload["offer_type"] == "RENT"
     with engine.begin() as connection:
         with Operations.context(MigrationContext.configure(connection)):
@@ -329,14 +329,14 @@ def test_identity_survives_backup_restore_and_legacy_conversion(tmp_path, mode):
     else:
         export_backup(source_path, source_storage, archive)
     validation = validate_backup(archive)
-    assert validation.schema_version == (0 if mode == "legacy" else 11)
+    assert validation.schema_version == (0 if mode == "legacy" else MIGRATIONS[-1].version)
     assert validation.table_counts["cars"] == (2 if mode == "converted" else 1)
     target_path = tmp_path / "restored" / "data.sqlite3"
     target_storage = tmp_path / "restored" / "storage"
     target_path.parent.mkdir()
     restore_backup(archive, target_path, target_storage, tmp_path / "backups")
     restored = create_database_engine(f"sqlite+pysqlite:///{target_path}")
-    assert migrate_sqlite(restored) == 11
+    assert migrate_sqlite(restored) == MIGRATIONS[-1].version
     with Session(restored) as db:
         car = db.get(Car, 29)
         assert (car.source_key, car.source_listing_id) == ("encar", "42688672")

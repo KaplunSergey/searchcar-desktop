@@ -38,6 +38,7 @@ from app.models import (
 )
 from app.sqlite_migrations import (
     _project_car_new_status,
+    MIGRATIONS,
     migrate_sqlite,
     sqlite_schema_version,
 )
@@ -72,9 +73,9 @@ def add_user(db: Session, username: str = "owner") -> User:
 def test_sqlite_migrations_are_versioned_and_idempotent(tmp_path: Path) -> None:
     engine = sqlite_engine(tmp_path)
 
-    assert migrate_sqlite(engine) == 11
-    assert migrate_sqlite(engine) == 11
-    assert sqlite_schema_version(engine) == 11
+    assert migrate_sqlite(engine) == MIGRATIONS[-1].version
+    assert migrate_sqlite(engine) == MIGRATIONS[-1].version
+    assert sqlite_schema_version(engine) == MIGRATIONS[-1].version
 
     with engine.connect() as connection:
         columns = {
@@ -174,7 +175,7 @@ def test_pre_migration_desktop_database_is_adopted(tmp_path: Path) -> None:
             )
         )
 
-    assert migrate_sqlite(engine) == 11
+    assert migrate_sqlite(engine) == MIGRATIONS[-1].version
     with engine.connect() as connection:
         row = connection.execute(
             text(

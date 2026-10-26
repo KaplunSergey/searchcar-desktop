@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
+import { useQueries } from "@tanstack/react-query";
+import type { ActivityProject, ActivityRun } from "./activity-dialog";
+import { latestProjectUpdate, ProjectUpdateStatus, updateActive } from "./scan-progress";
 import type { Locale } from "./translations";
-import { SITE_NAMES, type SourceKey } from "./source-workspace";
+import { SOURCE_CATALOG, sourceDefinition, sourceName, sourceGroups, useSourceCatalog, type SourceCatalog } from "./source-catalog";
 
 export type LaunchProject = {
   id: number; name: string; source_key: string; can_search: boolean;
@@ -15,9 +18,10 @@ export type LaunchResult = {
   projects: { project_id: number; status: "QUEUED" | "ALREADY_ACTIVE"; scan_run_id: number }[];
 };
 
-export function launchableProjects(options?: LaunchOptions) {
+export function launchableProjects(options?: LaunchOptions, catalog = SOURCE_CATALOG) {
   return options?.projects.filter((project) => project.can_search && !project.active_status
-    && Object.hasOwn(SITE_NAMES, project.source_key)) || [];
+    && sourceDefinition(project.source_key, catalog)
+    && options.sources.some((site) => site.source_key === project.source_key && site.can_search)) || [];
 }
 
 export function launchSummary(result: LaunchResult, locale: Locale) {
@@ -42,13 +46,53 @@ export function reasonText(reason: string | null | undefined, locale: Locale) {
   }
 }
 
-export function LaunchDialog({ locale, options, loading, failed, retry, launch, close, errorMessage, returnFocus }: {
+export function LaunchProgress({ result, projects, locale, read, onSuccess }: {
+  result: Pick<LaunchResult, "projects">; projects: ActivityProject[]; locale: Locale; read: <T>(path: string) => Promise<T>;
+  onSuccess?: () => void;
+}) {
+  const uk = locale === "uk", catalog = useSourceCatalog();
+  const ids = [...new Set(result.projects.map((item) => item.scan_run_id))];
+  const queries = useQueries({ queries: ids.map((id) => ({
+    queryKey: ["scans", "launch", id], queryFn: () => read<ActivityRun>(`/scans/${id}`), retry: false,
+    refetchInterval: (query: { state: { data: ActivityRun | undefined } }) =>
+      !query.state.data || updateActive(query.state.data.status) ? 2000 : false as const,
+  })) });
+  const rows = result.projects.map((item) => {
+    const query = queries[ids.indexOf(item.scan_run_id)];
+    const project = projects.find((row) => row.id === item.project_id);
+    return { id: item.project_id, name: project?.name || `#${item.project_id}`, source: project?.source_key || "",
+      status: query.isError ? "UNKNOWN" : query.data
+        ? latestProjectUpdate([query.data], item.project_id, projects)?.status || "UNKNOWN" : "PENDING" };
+  });
+  const count = (statuses: string[]) => rows.filter((row) => statuses.includes(row.status)).length;
+  const succeeded = rows.length > 0 && rows.every((row) => row.status === "SUCCEEDED");
+  useEffect(() => {
+    if (!succeeded || !onSuccess) return;
+    const timer = window.setTimeout(onSuccess, 4500);
+    return () => window.clearTimeout(timer);
+  }, [succeeded, onSuccess]);
+  return <div className="launch-progress">
+    <p className="launch-progress-summary" role="status">{uk ? "У черзі" : "В очереди"}: {count(["QUEUED"])} · {uk ? "Оновлюється" : "Обновляется"}: {count(["RUNNING"])} · {uk ? "Очікує дії" : "Ожидает действия"}: {count(["WAITING_FOR_USER", "CANCEL_REQUESTED"])} · {uk ? "Завершено" : "Завершено"}: {count(["SUCCEEDED"])} · {uk ? "Частково" : "Частично"}: {count(["PARTIAL"])} · {uk ? "З помилкою" : "С ошибкой"}: {count(["FAILED", "INTERRUPTED", "INTERRUPTED_SLEEP"])} · {uk ? "Скасовано" : "Отменено"}: {count(["CANCELLED"])}</p>
+    {queries.some((query) => query.isError) && <p role="alert">{uk ? "Не вдалося оновити стан. Це не означає завершення пошуку." : "Не удалось обновить состояние. Это не означает завершения поиска."}
+      <button type="button" className="button" onClick={() => { queries.forEach((query) => { void query.refetch(); }); }}>{uk ? "Повторити" : "Повторить"}</button></p>}
+    {!!count(["PENDING", "UNKNOWN"]) && <p>{uk ? "Стан уточнюється" : "Состояние уточняется"}: {count(["PENDING", "UNKNOWN"])}</p>}
+    <ul>{rows.map((row) => <li key={row.id}><span>{sourceName(row.source, catalog)} · {row.name}</span>
+      {row.status === "PENDING" ? <span>{uk ? "Уточнюємо стан…" : "Уточняем состояние…"}</span> : <ProjectUpdateStatus projectId={row.id} status={row.status} locale={locale} />}
+    </li>)}</ul>
+  </div>;
+}
+
+export function LaunchDialog({ locale, options, loading, failed, retry, launch, close, errorMessage, returnFocus, read, catalog: providedCatalog }: {
   locale: Locale; options?: LaunchOptions; loading: boolean; failed: boolean;
   retry: () => void; launch: (ids: number[]) => Promise<LaunchResult>; close: () => void;
   errorMessage: (error: unknown) => string;
   returnFocus?: RefObject<HTMLButtonElement | null>;
+  catalog?: SourceCatalog;
+  read: <T>(path: string) => Promise<T>;
 }) {
   const uk = locale === "uk";
+  const inheritedCatalog = useSourceCatalog();
+  const catalog = providedCatalog ?? inheritedCatalog;
   const dialog = useRef<HTMLDialogElement>(null);
   const resultHeading = useRef<HTMLHeadingElement>(null);
   const errorNotice = useRef<HTMLParagraphElement>(null);
@@ -66,7 +110,7 @@ export function LaunchDialog({ locale, options, loading, failed, retry, launch, 
     node?.showModal();
     return () => { node?.close(); returnFocus?.current?.focus(); };
   }, [returnFocus]);
-  const ready = launchableProjects(options);
+  const ready = launchableProjects(options, catalog);
   const chosen = ready.filter((project) => selected.includes(project.id));
   const toggle = (ids: number[], checked: boolean) => setSelected((previous) => checked
     ? [...new Set([...previous, ...ids])] : previous.filter((id) => !ids.includes(id)));
@@ -93,14 +137,9 @@ export function LaunchDialog({ locale, options, loading, failed, retry, launch, 
     <p id="launch-description">{uk ? "Оберіть проєкти одного або кількох сайтів. Запуск — лише після підтвердження." : "Выберите проекты одного или нескольких сайтов. Запуск — только после подтверждения."}</p>
     {error && <p ref={errorNotice} tabIndex={-1} className="launch-error" role="alert">{error}</p>}
     <div className="launch-content">
-    {result ? <section className="launch-result" role="status">
-      <h3 ref={resultHeading} tabIndex={-1}>{launchSummary(result, locale)}</h3>
-      <p>{uk ? "Повторно активні проєкти не додаються." : "Уже активные проекты повторно не добавляются."}</p>
-      <ul>{result.projects.map((item) => <li key={item.project_id}>
-        <span>{(() => { const project = submitted.find((row) => row.id === item.project_id); return project
-          ? `${SITE_NAMES[project.source_key as SourceKey]} · ${project.name}` : `#${item.project_id}`; })()}</span>
-        <b>{item.status === "QUEUED" ? (uk ? "У черзі" : "В очереди") : (uk ? "Уже активний" : "Уже активен")}</b>
-      </li>)}</ul>
+    {result ? <section className="launch-result">
+      <h3 ref={resultHeading} tabIndex={-1}>{uk ? "Хід оновлення" : "Ход обновления"}</h3>
+      <LaunchProgress result={result} projects={submitted} locale={locale} read={read} />
     </section> : <>
       {loading && <p role="status">{uk ? "Завантаження доступних проєктів…" : "Загрузка доступных проектов…"}</p>}
       {failed ? <div role="alert" className="launch-error"><p>{uk ? "Не вдалося перевірити доступність. Запуск недоступний." : "Не удалось проверить доступность. Запуск недоступен."}</p>
@@ -109,38 +148,38 @@ export function LaunchDialog({ locale, options, loading, failed, retry, launch, 
           <button type="button" className="button" disabled={!ready.length || pending} onClick={() => setSelected(ready.map((project) => project.id))}>{uk ? "Обрати всі доступні" : "Выбрать все доступные"}</button>
           <button type="button" className="button" disabled={!selected.length || pending} onClick={() => setSelected([])}>{uk ? "Скинути вибір" : "Сбросить выбор"}</button>
         </div>
-        {([{ title: uk ? "Майданчики" : "Площадки", keys: ["encar"] },
-          { title: uk ? "Аукціони" : "Аукционы", keys: ["copart", "iaa"] }] as {title: string; keys: SourceKey[]}[]).map((family) =>
-          <section className="launch-family" key={family.keys[0]}><h3>{family.title}</h3>
-            {family.keys.map((key) => {
+        {sourceGroups(catalog).map((group) =>
+          <section className="launch-family" key={group.family}><h3>{group.family === "MARKETPLACE" ? (uk ? "Майданчики" : "Площадки") : (uk ? "Аукціони" : "Аукционы")}</h3>
+            {group.sites.map(({ key, name }) => {
               const site = options.sources.find((item) => item.source_key === key);
               const projects = options.projects.filter((project) => project.source_key === key);
               const available = ready.filter((project) => project.source_key === key).map((project) => project.id);
               const count = available.filter((id) => selected.includes(id)).length;
               return <fieldset key={key} className="launch-site" disabled={pending}>
-                <legend>{SITE_NAMES[key]}</legend>
+                <legend>{name}</legend>
                 <label className="launch-site-toggle"><input type="checkbox" checked={available.length > 0 && count === available.length}
                   ref={(node) => { if (node) node.indeterminate = count > 0 && count < available.length; }}
                   disabled={!available.length} onChange={(event) => toggle(available, event.target.checked)}
-                  aria-label={`${uk ? "Обрати всі проєкти" : "Выбрать все проекты"} ${SITE_NAMES[key]}`} />
+                  aria-label={`${uk ? "Обрати всі проєкти" : "Выбрать все проекты"} ${name}`} />
                   <b>{uk ? "Усі доступні проєкти сайту" : "Все доступные проекты сайта"}</b><small>{count} / {available.length}</small></label>
                 {!site?.can_search && <p className="launch-site-reason">{reasonText(site?.reason, locale)}</p>}
                 {!projects.length && <p className="launch-empty">{uk ? "Проєктів поки немає" : "Проектов пока нет"}</p>}
                 {projects.map((project) => <label key={project.id} className="launch-project">
-                  <input type="checkbox" checked={selected.includes(project.id)} disabled={!project.can_search || !!project.active_status}
+                  <input type="checkbox" checked={selected.includes(project.id)} disabled={!available.includes(project.id)}
                     onChange={(event) => toggle([project.id], event.target.checked)} />
                   <span><b>{project.name}</b><small>{!project.can_search ? reasonText(project.reason, locale)
                     : project.active_status === "QUEUED" ? (uk ? "Уже в черзі" : "Уже в очереди")
                     : project.active_status === "RUNNING" ? (uk ? "Оновлюється" : "Обновляется")
                     : project.active_status === "CANCEL_REQUESTED" ? (uk ? "Скасування запитано" : "Отмена запрошена")
                     : project.active_status ? (uk ? "Уже бере участь у запуску" : "Уже участвует в запуске")
+                    : !site?.can_search ? reasonText(site?.reason, locale)
                     : (uk ? "Готовий до запуску" : "Готов к запуску")}</small></span>
                 </label>)}
               </fieldset>;
             })}
           </section>)}
         <section className="launch-confirmation" aria-live="polite"><h3>{uk ? "До запуску" : "К запуску"}: {chosen.length}</h3>
-          {chosen.length ? <ul>{chosen.map((project) => <li key={project.id}>{SITE_NAMES[project.source_key as SourceKey]} · {project.name}</li>)}</ul>
+          {chosen.length ? <ul>{chosen.map((project) => <li key={project.id}>{sourceName(project.source_key, catalog)} · {project.name}</li>)}</ul>
             : <p>{uk ? "Оберіть хоча б один доступний проєкт." : "Выберите хотя бы один доступный проект."}</p>}
           {selected.length > chosen.length && <p>{uk ? "Частина вибору стала недоступною або вже активна й не буде запущена." : "Часть выбора стала недоступна или уже активна и не будет запущена."}</p>}
         </section>

@@ -18,7 +18,7 @@ def test_builtin_encar_has_a_versioned_marketplace_contract():
     assert "fem.encar.com" in source.descriptor.domains
 
 
-@pytest.mark.parametrize("key", ["copart", "iaai", "ENCAR", "app.scanner", ""])
+@pytest.mark.parametrize("key", ["copart", "iaa", "iaai", "ENCAR", "app.scanner", ""])
 def test_unshipped_or_untrusted_source_never_falls_back_to_encar(key):
     with pytest.raises(ValueError, match="Unsupported listing source"):
         get_source(key)

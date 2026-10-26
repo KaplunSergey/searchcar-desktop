@@ -73,6 +73,38 @@ def test_launch_options_are_owner_scoped_read_only_and_separate_license_from_bus
         assert [(row.id, row.status) for row in db.scalars(select(ScanRun))] == before
 
 
+@pytest.mark.parametrize("source", ["copart", "iaa"])
+def test_delete_auction_project_is_owner_scoped_preserves_shared_car_and_detaches_queue(api, queue, source):
+    with queue.factory() as db:
+        owner = db.get(User, queue.owner_id)
+        outsider = User(username="other", username_key="other", password_hash="test", role="USER", status="ACTIVE")
+        db.add(outsider)
+        db.flush()
+        projects = [Project(owner_id=user.id, source_key=source, name=name, name_key=name,
+                            search_url=f"https://{source}.example/{name}")
+                    for user, name in [(owner, "remove"), (owner, "keep"), (outsider, "private")]]
+        db.add_all(projects)
+        car = Car(source_key=source, source_listing_id="shared", url=f"https://{source}.example/lot/shared")
+        db.add(car)
+        db.flush()
+        target, keep, private = [p.id for p in projects]
+        db.add_all([ProjectCar(project_id=pid, car_id=car.id) for pid in (target, keep)])
+        job = ScanRun(owner_id=owner.id, kind="PROJECTS", status="QUEUED", payload={"project_ids": [target, keep]})
+        db.add(job)
+        db.commit()
+        car_id, job_id = car.id, job.id
+    assert api.delete(f"/api/projects/{private}").status_code == 404
+    assert api.delete(f"/api/projects/{target}").status_code == 204
+    assert api.delete(f"/api/projects/{target}").status_code == 404
+    with queue.factory() as db:
+        assert db.get(Project, target) is None
+        assert db.get(Project, keep) is not None and db.get(Project, private) is not None
+        assert db.get(ProjectCar, (target, car_id)) is None
+        assert db.get(ProjectCar, (keep, car_id)) is not None and db.get(Car, car_id) is not None
+        assert db.get(ScanRun, job_id).payload["project_ids"] == [keep]
+        assert db.get(ScanRun, job_id).status == "QUEUED"
+
+
 def test_launch_options_failed_adapter_does_not_block_another_source(api, queue, monkeypatch):
     from app.desktop_license import EntitlementDecision
     from app.sources.contracts import SourceUnavailableError

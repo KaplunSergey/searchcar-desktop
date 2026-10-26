@@ -123,7 +123,32 @@ def test_invalid_signed_source_policy_fails_closed(tmp_path, sources):
     assert decision(state, state["now"]).reason == "LICENSE_SOURCES_INVALID"
 
 
-def test_signed_source_access_changes_without_reinstall_and_keeps_expiry(tmp_path):
+@pytest.mark.parametrize('policy', [['encar'], ['copart'], []])
+@pytest.mark.parametrize('kind', ['TRIAL', 'SUBSCRIPTION', 'PERPETUAL'])
+def test_temporary_all_sites_for_valid_licenses_preserves_signed_state_and_expiry(tmp_path, monkeypatch, policy, kind):
+    from types import SimpleNamespace
+    from app.desktop_license import require_search_entitlement
+    state = license_state(tmp_path)
+    state['payload']['license_type'] = kind
+    if kind == 'PERPETUAL':
+        state['payload']['subscription_expires_at'] = None
+    install_sources(state, policy)
+    before = (state['directory'] / 'lease.json').read_bytes()
+    shipped = ('encar', 'copart', 'iaa', 'fourthsite')
+    monkeypatch.setattr('app.sources.registry.list_sources', lambda: tuple(SimpleNamespace(key=key) for key in shipped))
+    result = decision(state, state['now'])
+    assert result.can_search is True
+    assert result.sources == tuple(sorted(shipped))
+    assert result.lease_expires_at == '2026-08-12T10:00:00Z'
+    assert result.subscription_expires_at == state['payload']['subscription_expires_at']
+    for key in shipped:
+        require_search_entitlement(key, now=state['now'], data_dir=tmp_path,
+                                   public_keys=state['public_keys'], mode='required')
+    assert (state['directory'] / 'lease.json').read_bytes() == before
+    assert decision(state, state['now'] + timedelta(hours=49)).reason == 'LICENSE_LEASE_EXPIRED'
+
+
+def test_temporary_policy_changes_keep_shipped_access_without_extending_expiry(tmp_path):
     from app.desktop_license import require_search_entitlement, SearchEntitlementError
     state = license_state(tmp_path)
     kwargs = dict(now=state["now"], data_dir=tmp_path,
@@ -131,11 +156,11 @@ def test_signed_source_access_changes_without_reinstall_and_keeps_expiry(tmp_pat
     install_sources(state, ["*"])
     require_search_entitlement("encar", **kwargs)
     install_sources(state, ["copart"])
+    require_search_entitlement("encar", **kwargs)
     with pytest.raises(SearchEntitlementError, match="LICENSE_SOURCE_NOT_ALLOWED"):
-        require_search_entitlement("encar", **kwargs)
-    require_search_entitlement("copart", **kwargs)
+        require_search_entitlement("copart", **kwargs)  # Not connected in the normal profile.
     install_sources(state, [])
-    assert decision(state, state["now"]).can_search is False
+    assert decision(state, state["now"]).can_search is True
     install_sources(state, ["*"])
     require_search_entitlement("encar", **kwargs)
     assert decision(state, state["now"] + timedelta(hours=49)).reason == "LICENSE_LEASE_EXPIRED"
@@ -153,7 +178,7 @@ def test_valid_signed_lease_allows_offline_search(tmp_path) -> None:
     assert (state["directory"] / "trusted-time.json").is_file()
 
 
-def test_empty_source_list_keeps_verified_license_but_blocks_search(tmp_path) -> None:
+def test_disabled_search_remains_blocked_despite_temporary_all_sites(tmp_path) -> None:
     state = license_state(tmp_path)
     state["payload"]["entitlements"]["search"] = False
     state["payload"]["entitlements"]["sources"] = []
@@ -259,7 +284,7 @@ def test_pilot_mode_does_not_require_license_state(tmp_path) -> None:
     assert result.status == "pilot"
 
 
-def test_required_mode_blocks_a_source_not_granted_by_the_signed_lease(tmp_path) -> None:
+def test_required_mode_still_blocks_an_unshipped_source(tmp_path) -> None:
     state = license_state(tmp_path)
     from app.desktop_license import SearchEntitlementError, require_search_entitlement
 

@@ -116,6 +116,73 @@ GROUPED = ["alpha1", "alpha2", "alpha3", "bravo1", "bravo2", "charlie1"]
 INTERLEAVED = ["alpha1", "bravo1", "charlie1", "alpha2", "bravo2", "alpha3"]
 
 
+def test_worker_reuses_opt_in_browser_between_jobs_and_closes_it_on_shutdown(queue, monkeypatch):
+    from threading import Event
+    from app import worker
+    adapter = queue.adapters['alpha']
+    adapter.reuse_browser_session = True
+    original = adapter.open_browser
+    def open_browser(*args, **kwargs):
+        browser, context, page = original(*args, **kwargs)
+        page.is_closed = lambda: False
+        context.reuse_requested = lambda: True
+        context.park = lambda: None
+        return browser, context, page
+    monkeypatch.setattr(adapter, 'open_browser', open_browser)
+    queue.submit(['alpha1'])
+    queue.submit(['alpha2'])
+    stop = Event()
+    def claim(_engine, worker_id):
+        job_id = claim_next_job(queue.engine, worker_id)
+        if job_id is None:
+            stop.set()
+        return job_id
+    monkeypatch.setattr(worker, 'claim_next_job', claim)
+    monkeypatch.setattr(worker, 'enqueue_scheduled', lambda: None)
+    worker.run(stop)
+    assert [value for kind, value in queue.events if kind == 'collect'] == ['alpha1', 'alpha2']
+    assert queue.events.count(('open', 'alpha')) == 1
+    assert queue.events.count(('close', 'alpha')) == 1
+    assert not queue.active
+
+
+def test_scan_waits_for_selection_profile_without_starting_a_second_browser(queue, monkeypatch):
+    from app.sources.auction_lists import AuctionListError
+    adapter = queue.adapters['alpha']
+    original = adapter.open_browser
+    attempts = []
+    def reserved(*args, **kwargs):
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise AuctionListError('SOURCE_BROWSER_BUSY', 'Selection is active')
+        return original(*args, **kwargs)
+    monkeypatch.setattr(adapter, 'open_browser', reserved)
+    monkeypatch.setattr('app.worker.time.sleep', lambda *_: None)
+    run_id = queue.submit(['alpha1'])['id']
+    process_job(run_id)
+    with queue.factory() as db:
+        run = db.get(ScanRun, run_id)
+        assert run.status == 'SUCCEEDED', (run.error, run.payload.get('failures'))
+    assert len(attempts) == 2
+    assert queue.events.count(('open', 'alpha')) == 1
+
+
+def test_wait_for_selection_profile_is_cancellable(queue, monkeypatch):
+    from app.sources.auction_lists import AuctionListError
+    def reserved(*_args, **_kwargs):
+        raise AuctionListError('SOURCE_BROWSER_BUSY', 'Selection is active')
+    monkeypatch.setattr(queue.adapters['alpha'], 'open_browser', reserved)
+    run_id = queue.submit(['alpha1'])['id']
+    def cancel_wait(*_args):
+        with queue.factory() as db:
+            cancel_scan(run_id, CancelScanIn(all_projects=True), db.get(User, queue.owner_id), db)
+    monkeypatch.setattr('app.worker.time.sleep', cancel_wait)
+    process_job(run_id)
+    with queue.factory() as db:
+        assert db.get(ScanRun, run_id).status == 'CANCELLED'
+    assert not any(event[0] == 'open' for event in queue.events)
+
+
 def test_scheduler_runs_only_allowed_sites_without_losing_schedule(queue, monkeypatch):
     from datetime import datetime, timedelta, timezone
     from app.models import SchedulerSetting, ScheduledProject
@@ -164,9 +231,10 @@ def test_legacy_manual_enqueue_checks_real_project_source(queue, monkeypatch):
         assert db.scalar(select(ScanRun)) is None
 
 
-def test_queued_job_rechecks_changed_signed_policy_and_preserves_other_sites(queue, tmp_path, monkeypatch):
+def test_queued_job_keeps_all_shipped_sites_during_temporary_client_policy(queue, tmp_path, monkeypatch):
     from test_desktop_license import license_state, install_sources
     state = license_state(tmp_path)
+    monkeypatch.setattr('app.sources.registry.list_sources', lambda: tuple(queue.descriptors.values()))
     install_sources(state, ["alpha", "bravo"])
     monkeypatch.setattr("app.desktop_license.require_search_entitlement", lambda key=None:
         signed_search_entitlement(key, now=state["now"], data_dir=tmp_path,
@@ -176,15 +244,14 @@ def test_queued_job_rechecks_changed_signed_policy_and_preserves_other_sites(que
     process_job(run_id)
     with queue.factory() as db:
         run = db.get(ScanRun, run_id)
-        assert run.payload["failures"][0]["code"] == "LICENSE_SOURCE_NOT_ALLOWED"
-        assert run.payload["failures"][0]["source_key"] == "alpha"
+        assert not run.payload.get("failures")
         assert db.get(Project, queue.plans["alpha1"]["project_id"]) is not None
         rows = list(db.scalars(select(ProjectScanRun).where(ProjectScanRun.scan_run_id == run_id)))
         assert {row.project_id: row.status for row in rows} == {
-            queue.plans["alpha1"]["project_id"]: "FAILED",
+            queue.plans["alpha1"]["project_id"]: "SUCCEEDED",
             queue.plans["bravo1"]["project_id"]: "SUCCEEDED",
         }
-    assert ("open", "alpha") not in queue.events
+    assert ("collect", "alpha1") in queue.events
     assert ("collect", "bravo1") in queue.events
 
 

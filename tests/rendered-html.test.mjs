@@ -52,7 +52,8 @@ test("ships required product surfaces and localization",async()=>{
   assert.match(page,/request<AuthUser>\("\/auth\/profile"/);
   assert.match(page,/newListingsCount > 0/);
   assert.match(page,/new EventSource\(`\$\{api\}\/events`, \{ withCredentials: true \}\)/);
-  assert.match(page,/refetchInterval: 30_000/);
+  // Poll behavior (fast active / quiet idle) is exercised through QueryClient
+  // in source-workspace.test.mjs, not pinned to a source-code spelling here.
   assert.match(page,/const displayedReport = current \|\| latestReport/);
   assert.match(page,/currentUpdateReport/);
   assert.match(page,/className="projects-collapsible-content"/);
@@ -361,7 +362,8 @@ test("local desktop launchers keep macOS and Windows builds reproducible", async
   assert.doesNotMatch(windowsSmoke, /-NoProxy/);
   assert.match(windowsSmoke, /Stop-CompiledSidecarTree/);
   assert.match(windowsSmoke, /-WindowStyle Hidden/);
-  assert.match(sidecarBuild, /--onefile-cache-mode=cached/);
+  // Platform cache policy is exercised against captured commands in
+  // backend/tests/test_source_catalog_build.py, not a literal source spelling.
   assert.match(sidecarBuild, /if mode == "onefile":/);
   assert.doesNotMatch(sidecarBuild, /mode == "onefile" and platform\.system\(\) == "Windows"/);
   assert.match(sidecarBuild, /--onefile-no-compression/);

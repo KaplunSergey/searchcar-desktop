@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { Locale } from "./translations";
-import { SITE_NAMES, type SourceKey } from "./source-workspace";
+import { sourceName, useSourceCatalog } from "./source-catalog";
 
 export type ActivityRun = {
   id: number; kind: string; status: string; progress: number;
@@ -8,7 +8,17 @@ export type ActivityRun = {
     project_ids?: number[]; project_id?: number; car_ids?: number[];
     current_project_id?: number | null; cancelled_project_ids?: number[];
     project_statuses?: Record<string, string>;
+    trigger?: string;
+    report?: { car_id: number; project_id: number; project_ids?: number[]; after_snapshot_id?: number; source_key?: string; source_listing_id?: string; title?: string | null; change: string;
+      changes?: { field: string; old?: unknown; new?: unknown }[] }[];
+    failures?: { project_id?: number | null; code: string }[];
     project_plans?: { project_id: number; source_key: string; name?: string }[];
+    pagination?: Record<string, {
+      mode?: string; pages_visited?: number; total_pages?: number; expected_pages?: number; ads_seen?: number; complete?: boolean; stop_reason?: string;
+      browser_notice?: string | null;
+      read_summary?: { dated: number; exact_time: number; without_date: number; unrecognized_schedule: number; unsupported_market: number };
+      interaction?: { state: string; source_key?: string; reason?: string; expires_at?: string } | null;
+    }>;
   };
 };
 export type ActivityProject = { id: number; name: string; source_key: string };
@@ -16,7 +26,23 @@ export type CancellationTarget = { scanId: number } & (
   { scope: "RUN" } | { scope: "SITE"; sourceKey: string } | { scope: "PROJECT"; projectId: number }
 );
 const active = (status: string) => status === "RUNNING" || status === "QUEUED";
-const siteName = (key: string) => SITE_NAMES[key as SourceKey] || key;
+
+export function SiteVerificationNotice({ run, projectId, locale }: { run: Pick<ActivityRun, "status" | "payload">; projectId: number; locale: Locale }) {
+  const interaction = run.payload?.pagination?.[String(projectId)]?.interaction;
+  if (run.status !== "RUNNING" || run.payload?.current_project_id !== projectId
+    || run.payload?.cancelled_project_ids?.includes(projectId)
+    || run.payload?.project_statuses?.[String(projectId)] === "CANCEL_REQUESTED"
+    || interaction?.state !== "WAITING_FOR_USER") return null;
+  const uk = locale === "uk";
+  const expires = interaction.expires_at ? new Date(interaction.expires_at) : null;
+  return <section className="activity-notice" role="status">
+    <b>{interaction.reason === "COOKIE_CONSENT" ? (uk ? "Потрібна дія у браузері" : "Требуется действие в браузере") : (uk ? "Очікується перевірка сайту" : "Ожидается проверка сайта")}</b>
+    {interaction.reason === "COOKIE_CONSENT" && <p>{uk ? "Закрийте вікно налаштувань cookies на сайті, вибравши бажаний варіант." : "Закройте окно настроек cookies на сайте, выбрав желаемый вариант."}</p>}
+    <p>{uk ? "У відкритому вікні браузера пройдіть запропоновану сайтом перевірку. Якщо сторінка не завантажилася, оновіть її вручну. Після появи видачі пошук продовжиться; його можна скасувати в активних запусках."
+      : "В открытом окне браузера пройдите предложенную сайтом проверку. Если страница не загрузилась, обновите её вручную. После появления выдачи поиск продолжится; его можно отменить в активных запусках."}</p>
+    {expires && Number.isFinite(expires.getTime()) && <small>{uk ? "Очікування до" : "Ожидание до"} {expires.toLocaleTimeString(uk ? "uk-UA" : "ru-RU", { hour: "2-digit", minute: "2-digit" })}</small>}
+  </section>;
+}
 
 export function cancellationBody(target: CancellationTarget) {
   if (target.scope === "PROJECT") return { project_ids: [target.projectId] };
@@ -37,13 +63,15 @@ export function activityProjects(run: ActivityRun, projects: ActivityProject[]) 
   });
 }
 
-function statusLabel(status: string, uk: boolean) {
+export function statusLabel(status: string, uk: boolean) {
   const labels: Record<string, string> = {
     QUEUED: uk ? "У черзі" : "В очереди", RUNNING: uk ? "Оновлюється" : "Обновляется",
     CANCEL_REQUESTED: uk ? "Скасування запитано" : "Отмена запрошена", CANCELLED: uk ? "Скасовано" : "Отменено",
     SUCCEEDED: uk ? "Завершено" : "Завершено", PARTIAL: uk ? "Частковий результат" : "Частичный результат",
     FAILED: uk ? "Помилка" : "Ошибка", INTERRUPTED: uk ? "Перервано" : "Прервано",
     INTERRUPTED_SLEEP: uk ? "Перервано через сон" : "Прервано из-за сна",
+    WAITING_FOR_USER: uk ? "Очікується перевірка сайту" : "Ожидается проверка сайта",
+    ACTIVE: uk ? "Запуск активний" : "Запуск активен",
   };
   return labels[status] || (uk ? "Стан невідомий" : "Состояние неизвестно");
 }
@@ -54,6 +82,8 @@ export function ActivityDialog({ locale, runs, projects, loading, failed, retry,
   returnFocus?: RefObject<HTMLButtonElement | null>;
 }) {
   const uk = locale === "uk";
+  const catalog = useSourceCatalog();
+  const siteName = (key: string) => sourceName(key, catalog);
   const dialog = useRef<HTMLDialogElement>(null);
   const notice = useRef<HTMLParagraphElement>(null);
   const confirmationHeading = useRef<HTMLHeadingElement>(null);
@@ -122,6 +152,7 @@ export function ActivityDialog({ locale, runs, projects, loading, failed, retry,
           return <section className="activity-run" key={run.id}>
             <div className="activity-run-heading"><h3>{uk ? "Запуск" : "Запуск"} #{run.id}</h3><span className="badge outline">{statusLabel(run.status, uk)}</span></div>
             <p>{run.kind === "CARS" ? (uk ? `Оновлення автомобілів: ${run.payload?.car_ids?.length || 0}` : `Обновление автомобилей: ${run.payload?.car_ids?.length || 0}`) : (uk ? `Проєктів: ${portions.length}` : `Проектов: ${portions.length}`)} · {uk ? "Загальний прогрес" : "Общий прогресс"}: {run.progress}%</p>
+            {run.payload?.current_project_id != null && <SiteVerificationNotice run={run} projectId={run.payload.current_project_id} locale={locale} />}
             {sites.map((sourceKey) => <section className="activity-site" key={sourceKey}><div className="activity-run-heading"><b>{siteName(sourceKey)}</b>
               {run.kind === "PROJECTS" && <button className="button" disabled={pending || failed || !active(run.status) || !portions.some((project) => project.source_key === sourceKey && active(project.status))}
                 onClick={() => choose({ scanId: run.id, scope: "SITE", sourceKey }, `${siteName(sourceKey)} · ${uk ? "запуск" : "запуск"} #${run.id}`)}>{uk ? "Скасувати сайт" : "Отменить сайт"}</button>}</div>

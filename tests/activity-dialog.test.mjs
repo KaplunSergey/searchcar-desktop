@@ -60,3 +60,13 @@ test("manual car refresh allows only whole-job cancellation", () => {
   assert.match(html, /Отменить весь запуск/);
   assert.doesNotMatch(html, /Отменить сайт|Отменить проект/);
 });
+
+test("manual site verification stays cancellable and is explained in Russian and Ukrainian", () => {
+  const waiting={...run,payload:{...run.payload,pagination:{1:{interaction:{state:'WAITING_FOR_USER',source_key:'encar',reason:'CAPTCHA',expires_at:'2026-10-12T12:03:00Z'}}}}};
+  const html=render({runs:[waiting]});
+  assert.match(html,/Ожидается проверка сайта/);
+  assert.match(html,/открытом окне браузера/);
+  assert.match(html,/Отменить проект/);
+  assert.match(render({locale:'uk',runs:[waiting]}),/Очікується перевірка сайту/);
+  assert.doesNotMatch(render({runs:[{...waiting,status:'FAILED'}]}),/Ожидается проверка сайта/);
+});

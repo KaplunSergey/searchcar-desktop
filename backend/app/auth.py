@@ -3,14 +3,17 @@ import getpass
 import hashlib
 import hmac
 import secrets
+import sqlite3
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, HTTPException, Request, Response
 from pwdlib import PasswordHash
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
 from .database import SessionLocal, get_db, settings
 from .models import AuditLog, AuthSession, User
@@ -86,6 +89,29 @@ class AuthContext:
     session: AuthSession
 
 
+def _record_activity(db: Session, session_id: int, user_id: int, current: datetime) -> bool:
+    # Activity is telemetry, not a condition for accessing an otherwise valid session.
+    with db.get_bind().connect() as connection:
+        sqlite = connection.dialect.name == "sqlite"
+        timeout = connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one() if sqlite else None
+        try:
+            if sqlite:
+                connection.exec_driver_sql("PRAGMA busy_timeout=0")
+            connection.execute(update(AuthSession).where(AuthSession.id == session_id).values(last_seen_at=current))
+            connection.execute(update(User).where(User.id == user_id).values(last_activity_at=current))
+            connection.commit()
+            return True
+        except OperationalError as error:
+            connection.rollback()
+            code = getattr(error.orig, "sqlite_errorcode", 0) & 0xff
+            if not sqlite or code not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise
+            return False
+        finally:
+            if sqlite:
+                connection.exec_driver_sql(f"PRAGMA busy_timeout={int(timeout)}")
+
+
 def get_auth_context(
     request: Request,
     db: Session = Depends(get_db),
@@ -110,9 +136,12 @@ def get_auth_context(
         not session.last_seen_at
         or session.last_seen_at < current - timedelta(minutes=5)
     ):
-        session.last_seen_at = current
-        user.last_activity_at = current
+        session_id, user_id = session.id, user.id
+        # End the read snapshot before the optional, independently scoped write.
         db.commit()
+        if _record_activity(db, session_id, user_id, current):
+            set_committed_value(session, "last_seen_at", current)
+            set_committed_value(user, "last_activity_at", current)
     return AuthContext(user=user, session=session)
 
 

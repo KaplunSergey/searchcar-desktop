@@ -1,0 +1,21 @@
+[
+  {
+    "key": "encar", "name": "Encar", "family": "MARKETPLACE", "ui": "encar",
+    "domains": ["encar.com", "www.encar.com", "fem.encar.com", "m.encar.com"],
+    "capabilities": ["SEARCH", "DIRECT_LISTING", "PRICE_FILTER", "PRICE_STATUS", "MAIN_IMAGE"]
+  },
+  {
+    "key": "copart", "name": "Copart", "family": "AUCTION", "ui": "auction",
+    "search_url_example": "https://www.copart.com/lotSearchResults?searchCriteria=…",
+    "search_selection_help": {
+      "ru": "Выберите фильтры и откройте результаты. Copart сохраняется по ссылке из адресной строки: изменения, не отражённые в ней, не сохраняются. Сам поиск и переходы по страницам выполняются скрыто; окно появится только при необходимости ручного подтверждения.",
+      "uk": "Виберіть фільтри та відкрийте результати. Copart зберігається за посиланням з адресного рядка: зміни, не відображені в ньому, не зберігаються. Сам пошук і переходи сторінками виконуються приховано; вікно з’явиться лише за потреби ручного підтвердження."
+    },
+    "domains": ["www.copart.com"], "image_domains": ["cs.copart.com"], "capabilities": []
+  },
+  {
+    "key": "iaa", "name": "IAA", "family": "AUCTION", "ui": "auction",
+    "search_url_example": "https://www.iaai.com/Search?url=…",
+    "domains": ["www.iaai.com"], "image_domains": ["vis.iaai.com"], "capabilities": []
+  }
+]

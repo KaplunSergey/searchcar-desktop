@@ -21,6 +21,7 @@ BROWSER_MANIFEST_NAME = "searchcar-browser-manifest.json"
 PLAYWRIGHT_DRIVER_MANIFEST_NAME = "searchcar-playwright-driver-manifest.json"
 BUNDLED_CHROMIUM_ENV = "SEARCHCAR_CHROMIUM_EXECUTABLE"
 GRACEFUL_SHUTDOWN_SECONDS = 35
+HTTP_DRAIN_SECONDS = 2
 INSTANCE_LOCK_WAIT_SECONDS = 60
 PARENT_WATCH_INTERVAL_SECONDS = 2.0
 desktop_correlation_id: ContextVar[str] = ContextVar(
@@ -444,6 +445,14 @@ def configure_playwright_driver(driver_dir: Path) -> Path:
 
     _driver.compute_driver_executable = bundled_driver_executable
     _transport.compute_driver_executable = bundled_driver_executable
+    def bundled_driver_environment() -> dict:
+        environment = _driver.get_driver_env()
+        # Pinned Playwright opt-in: attach to Chrome's windowless "other" target.
+        # Never change the global process environment or normal-profile drivers.
+        if os.environ.get("SEARCHCAR_SOURCE_TEST_MODE") == "1":
+            environment["PW_CHROMIUM_ATTACH_TO_OTHER"] = "1"
+        return environment
+    _transport.get_driver_env = bundled_driver_environment
     os.environ["PLAYWRIGHT_NODEJS_PATH"] = str(executable)
     return driver_dir
 
@@ -472,6 +481,8 @@ def configure_desktop_environment(
     playwright_driver_dir: Path | None = None,
 ) -> dict[str, Path]:
     data_dir = data_dir.expanduser().resolve()
+    from .source_test_profile import prepare_source_test_root
+    data_dir = prepare_source_test_root(data_dir)
     database_dir = data_dir / "data"
     storage_dir = data_dir / "storage"
     logs_dir = data_dir / "logs"
@@ -535,8 +546,10 @@ def apply_pending_restore(paths: dict[str, Path]) -> dict | None:
         initialize_database()
         from .database import engine
         from .desktop_backup import interrupt_unfinished_jobs, restore_backup
+        from .telegram_automatic import reset_after_restore
 
         interrupt_unfinished_jobs(engine, reason="BACKUP_RESTORE_REQUESTED")
+        reset_after_restore(paths['root'])
         engine.dispose()
         result = restore_backup(
             pending,
@@ -645,7 +658,7 @@ def create_desktop_app(
 
     from fastapi import HTTPException, Request
     from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
-    from starlette.middleware.base import BaseHTTPMiddleware
+    from .http_middleware import DesktopSessionMiddleware
     from starlette.staticfiles import StaticFiles
 
     from .main import app
@@ -654,32 +667,7 @@ def create_desktop_app(
     update_check_relay = DesktopUpdateCheckRelay()
     update_state_relay = DesktopUpdateStateRelay()
 
-    class DesktopSessionMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request: Request, call_next):
-            if request.url.path in {
-                "/api/health",
-                "/desktop/bootstrap",
-                "/desktop/shutdown",
-                "/desktop/tray-status",
-                "/desktop/scheduler/toggle",
-                "/desktop/scheduler/resumed",
-                "/desktop/update-check/consume",
-                "/desktop/update/status",
-                "/desktop/update/prepare",
-                "/desktop/update/abort",
-            }:
-                return await call_next(request)
-            supplied = request.cookies.get(DESKTOP_COOKIE_NAME, "")
-            if not hmac.compare_digest(supplied, expected_cookie):
-                return JSONResponse(
-                    status_code=403,
-                    content={"detail": "desktop_session_required"},
-                )
-            response = await call_next(request)
-            response.headers["Cache-Control"] = "no-store"
-            return response
-
-    app.add_middleware(DesktopSessionMiddleware)
+    app.add_middleware(DesktopSessionMiddleware, cookie_name=DESKTOP_COOKIE_NAME, expected_cookie=expected_cookie)
 
     @app.get("/desktop/bootstrap", include_in_schema=False)
     def desktop_bootstrap(token: str, request: Request):
@@ -797,9 +785,12 @@ def create_desktop_app(
 
     @app.get("/api/desktop/runtime", include_in_schema=False)
     def desktop_runtime_info():
+        from .database import settings
         return {
             "desktop": True,
-            "updater": True,
+            "updater": not settings.source_test_mode,
+            "source_test_mode": settings.source_test_mode,
+            "telegram_delivery_enabled": os.environ.get('SEARCHCAR_TELEGRAM_DELIVERY_ENABLED') == '1',
             "update_status": update_state_relay.snapshot(),
         }
 
@@ -874,6 +865,11 @@ class GracefulShutdownController:
                 return self.result
             self.requested = True
             self.worker_stop.set()
+            from .live_updates import live_updates
+
+            # The native window waits for us before exiting. Its SSE connection
+            # must finish here, not wait for that window to disconnect first.
+            live_updates.close()
             try:
                 from .database import engine
                 from .job_queue import request_shutdown_cancellation
@@ -1049,8 +1045,10 @@ def backup_validate(input_path: Path) -> dict:
 
 def backup_restore(data_dir: Path, input_path: Path, port: int) -> dict:
     from .desktop_backup import restore_backup
+    from .telegram_automatic import reset_after_restore
 
     paths = configure_desktop_environment(data_dir, port)
+    reset_after_restore(paths['root'])
     return restore_backup(
         input_path,
         paths["database"],
@@ -1118,6 +1116,8 @@ def parser() -> argparse.ArgumentParser:
     serve.add_argument("--browser-dir", type=Path)
     serve.add_argument("--playwright-driver-dir", type=Path)
     serve.add_argument("--allow-device-key-file-fallback", action="store_true")
+    serve.add_argument("--source-test-mode", action="store_true")
+    serve.add_argument("--telegram-delivery-preview", action="store_true")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, required=True)
     return result
@@ -1172,6 +1172,14 @@ def main() -> None:
         return
     if arguments.allow_device_key_file_fallback:
         os.environ["SEARCHCAR_ALLOW_DEVICE_KEY_FILE_FALLBACK"] = "1"
+    if arguments.source_test_mode:
+        os.environ["SEARCHCAR_SOURCE_TEST_MODE"] = "1"
+        # The native preview flag survives Finder and Nuitka; no bot secret is bundled.
+        os.environ["SEARCHCAR_TELEGRAM_RELAY_URL"] = "https://searchcar-telegram-relay-staging.mapatar23.workers.dev"
+        os.environ["SEARCHCAR_TELEGRAM_DELIVERY_ENABLED"] = "1" if arguments.telegram_delivery_preview else "0"
+        os.environ["SEARCHCAR_TELEGRAM_CHAT_PAIRING_ENABLED"] = "1"
+    elif arguments.telegram_delivery_preview:
+        parser().error("--telegram-delivery-preview requires --source-test-mode")
     paths = configure_desktop_environment(
         arguments.data_dir,
         arguments.port,
@@ -1252,6 +1260,9 @@ def main() -> None:
         host=arguments.host,
         port=arguments.port,
         access_log=False,
+        # Worker persistence has its separate grace period; idle HTTP requests
+        # must not consume the native shell's remaining 40-second exit budget.
+        timeout_graceful_shutdown=HTTP_DRAIN_SECONDS,
         log_level="info",
         log_config=None,
     )

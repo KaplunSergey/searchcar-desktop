@@ -1,5 +1,5 @@
 from typing import Literal
-from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
+from pydantic import BaseModel, Field, HttpUrl, ValidationInfo, field_validator, model_validator
 
 PRICE_FILTER_MODES = ("LINK", "CUSTOM")
 MAX_PROJECT_PRICE_KRW = 100_000_000
@@ -54,7 +54,10 @@ class AdminPasswordResetIn(BaseModel):
 
 class ProjectIn(BaseModel):
     name: str = Field(min_length=1,max_length=140)
+    source_key: str = Field(default='encar',min_length=1,max_length=32)
     search_url: str
+    search_selection_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
+    search_draft_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
     telegram_url: str|None=None
     scan_mode: Literal["FAST","ACCURATE"]="FAST"
     search_page_mode: Literal["FIRST_PAGE","ALL_PAGES"]="ALL_PAGES"
@@ -64,13 +67,28 @@ class ProjectIn(BaseModel):
     auto_update: bool=True
     @model_validator(mode="after")
     def price_filter_is_valid(self):
+        if self.search_draft_id is not None and self.search_selection_id is None:
+            raise ValueError('search_selection_required')
         validate_price_filter(
             self.price_filter_mode,
             self.price_min_krw,
             self.price_max_krw,
         )
+        if self.source_key!='encar':
+            from .sources.registry import get_source
+            source=get_source(self.source_key)
+            if 'LIST_ONLY' in source.descriptor.capabilities:
+                if self.price_filter_mode!='LINK' or self.telegram_url:
+                    raise ValueError('source_test_link_filters_only_no_telegram')
+                self.auto_update=False
         return self
     @field_validator("search_url")
+    @classmethod
+    def source_url(cls,v,info:ValidationInfo):
+        if info.data.get('source_key','encar')!='encar':
+            from .sources.registry import get_source
+            return get_source(info.data['source_key']).validate_search_url(v)
+        return cls.encar_url(v)
     @classmethod
     def encar_url(cls,v):
         from urllib.parse import urlparse
@@ -139,6 +157,20 @@ class DesktopMigrationIn(BaseModel):
 
 class ExternalUrlIn(BaseModel):
     url:str=Field(min_length=8,max_length=2048)
+
+
+class SearchSelectionIn(BaseModel):
+    model_config = {'extra': 'forbid'}
+    action: Literal['OPEN', 'CONFIRM', 'CANCEL']
+    selection_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
+    draft_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
+    project_id: int | None = Field(default=None, ge=1)
+
+class ProjectSearchSelectionIn(BaseModel):
+    model_config = {'extra': 'forbid'}
+    selection_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    draft_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    expected_revision: int = Field(ge=0)
 
 class DesktopLicenseTrialIn(BaseModel):
     subject:str=Field(min_length=3,max_length=254)

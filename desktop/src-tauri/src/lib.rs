@@ -68,6 +68,24 @@ enum StartupWait {
     TimedOut,
 }
 
+fn source_test_build() -> bool {
+    option_env!("SEARCHCAR_SOURCE_TEST_MODE") == Some("1")
+}
+
+fn desktop_profile(data_dir: &Path, source_test_mode: bool, delivery_preview: bool) -> (PathBuf, Vec<String>) {
+    let mut arguments = vec!["--data-dir".to_string(), data_dir.to_string_lossy().into_owned()];
+    let profile = if source_test_mode {
+        arguments.push("--source-test-mode".to_string());
+        if delivery_preview {
+            arguments.push("--telegram-delivery-preview".to_string());
+        }
+        data_dir.join("source-tests")
+    } else {
+        data_dir.to_path_buf()
+    };
+    (profile, arguments)
+}
+
 fn support_report_path(app: &tauri::AppHandle, name: &str) -> Result<PathBuf, String> {
     if Path::new(name).file_name().and_then(|value| value.to_str()) != Some(name)
         || !name.starts_with(SUPPORT_REPORT_PREFIX)
@@ -75,10 +93,11 @@ fn support_report_path(app: &tauri::AppHandle, name: &str) -> Result<PathBuf, St
     {
         return Err("Недопустимое имя отчёта.".to_string());
     }
-    let source = app
+    let data_dir = app
         .path()
         .app_data_dir()
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    let source = desktop_profile(&data_dir, source_test_build(), false).0
         .join("diagnostics")
         .join(&name);
     if !source.is_file() || source.is_symlink() {
@@ -906,6 +925,8 @@ pub fn run() {
                 .map(char::from)
                 .collect();
             let data_dir = app.path().app_data_dir()?;
+            let (profile_dir, profile_arguments) = desktop_profile(&data_dir, source_test_build(),
+                option_env!("SEARCHCAR_TELEGRAM_DELIVERY_PREVIEW") == Some("1"));
             let frontend_dir = app.path().resource_dir()?.join("desktop-ui");
             let browser_dir = app.path().resource_dir()?.join("browsers");
             let playwright_driver_dir = app
@@ -914,7 +935,7 @@ pub fn run() {
                 .join("playwright-driver");
             let license_config = app.path().resource_dir()?.join("license-service.json");
             std::fs::create_dir_all(&data_dir)?;
-            if let Err(error) = verify_required_lease(&license_config, &data_dir) {
+            if let Err(error) = verify_required_lease(&license_config, &profile_dir) {
                 show_startup_failure(
                     app.handle(),
                     &format!("Не удалось проверить локальную лицензию: {error}"),
@@ -928,8 +949,6 @@ pub fn run() {
                 "127.0.0.1".to_string(),
                 "--port".to_string(),
                 port.to_string(),
-                "--data-dir".to_string(),
-                data_dir.to_string_lossy().into_owned(),
                 "--frontend-dir".to_string(),
                 frontend_dir.to_string_lossy().into_owned(),
                 "--browser-dir".to_string(),
@@ -937,6 +956,7 @@ pub fn run() {
                 "--playwright-driver-dir".to_string(),
                 playwright_driver_dir.to_string_lossy().into_owned(),
             ];
+            sidecar_arguments.extend(profile_arguments);
             if option_env!("SEARCHCAR_MACOS_LOCAL_KEY_FALLBACK") == Some("1") {
                 // A command-line flag survives the onefile sidecar boundary
                 // even when a bundled macOS process drops a custom env var.
@@ -1210,6 +1230,23 @@ mod tests {
         fs,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn auction_preview_uses_same_profile_for_license_and_sidecar() {
+        let base = Path::new("SearchCar");
+        let (profile, arguments) = desktop_profile(base, true, false);
+        assert_eq!(profile, base.join("source-tests"));
+        assert_eq!(arguments, vec!["--data-dir", "SearchCar", "--source-test-mode"]);
+        let (profile, arguments) = desktop_profile(base, false, false);
+        assert_eq!(profile, base);
+        assert_eq!(arguments, vec!["--data-dir", "SearchCar"]);
+        let (profile, arguments) = desktop_profile(base, true, true);
+        assert_eq!(profile, base.join("source-tests"));
+        assert_eq!(arguments, vec!["--data-dir", "SearchCar", "--source-test-mode", "--telegram-delivery-preview"]);
+        let (profile, arguments) = desktop_profile(base, false, true);
+        assert_eq!(profile, base);
+        assert_eq!(arguments, vec!["--data-dir", "SearchCar"]);
+    }
 
     fn temporary_directory() -> std::path::PathBuf {
         let nonce = SystemTime::now()

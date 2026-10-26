@@ -119,6 +119,21 @@ jobs:
             "$RUNNER_TEMP/searchcar-compiled-smoke" \
             work/macos-smoke
 
+      - name: Verify compiled navigation and bundled auction time
+        run: python scripts/compiled_navigation_smoke.py --sidecar desktop/src-tauri/binaries/searchcar-core-aarch64-apple-darwin --report-dir work/macos-smoke
+
+      - name: Upload compiled navigation and auction-time evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-navigation-macos
+          path: |
+            work/macos-smoke/compiled-navigation.*
+            work/macos-smoke/compiled-auction-time.json
+            work/macos-smoke/navigation-*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Verify updater signing secrets
         shell: bash
         env:

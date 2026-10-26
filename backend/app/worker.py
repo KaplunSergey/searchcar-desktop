@@ -1,6 +1,7 @@
 import os
 import time
-from contextlib import ExitStack
+from copy import deepcopy
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from sqlalchemy import select, update
 
 from .database import SessionLocal, engine, settings
 from .desktop_runtime import desktop_playwright
+from .browser_runtime_pool import BrowserRuntimePool
 from .detail_workers import DetailTask, DetailWorkerPool
 from .external_links import validated_external_url
 from .job_queue import SCAN_COMMAND_LOCK, claim_next_job, project_execution_order
@@ -52,6 +54,10 @@ class ProjectScanCancelled(Exception):
 
 class SourceBlockedError(ScanError):
     code = "CAPTCHA"
+
+    def __init__(self, message, *, code="CAPTCHA"):
+        self.code = code
+        super().__init__(message)
 
 
 def _reanchor_scheduler_after_manual_projects(
@@ -177,6 +183,7 @@ def _project_for_execution(project: Project, payload: dict):
         source_key=plan["source_key"],
         name=plan["name"],
         search_url=plan["search_url"],
+        search_config=deepcopy(plan.get("search_config")),
         scan_mode=plan["scan_mode"],
         search_page_mode=plan["search_page_mode"],
         price_filter_mode=plan["price_filter_mode"],
@@ -339,6 +346,7 @@ def _failure_detail(
         "url": external_url,
         "code": code,
         "technical": technical[:4000],
+        **({"network_failures": exc.network_failures} if getattr(exc, "network_failures", None) else {}),
     }
 
 
@@ -676,7 +684,7 @@ def _change_report(
     }
 
 
-def process_job(job_id: int) -> None:
+def process_job(job_id: int, *, runtime_pool=None) -> None:
     with SessionLocal() as db:
         job = db.get(ScanRun, job_id)
         if not job or job.status not in {"QUEUED", "RUNNING"}:
@@ -733,10 +741,12 @@ def process_job(job_id: int) -> None:
         failure_details: list[dict] = []
         successes = 0
         report: list[dict] = []
-        blocked_sources: set[str] = set()
+        blocked_sources: dict[str, str] = {}
 
         try:
             from .desktop_license import require_search_entitlement
+            from .source_test_profile import validate_source_test_scan
+            validate_source_test_scan(settings, job.kind, job.payload or {}, database_url=db.get_bind().url)
 
             source_keys = list(
                 dict.fromkeys((job.payload or payload).get("source_keys") or ["encar"])
@@ -752,16 +762,20 @@ def process_job(job_id: int) -> None:
                 },
             }
             db.commit()
-            with desktop_playwright() as playwright, ExitStack() as runtime_cleanup:
+            driver_context = nullcontext(runtime_pool.driver()) if runtime_pool else desktop_playwright()
+            with driver_context as playwright, ExitStack() as runtime_cleanup:
                 executable_path = os.environ.get("SEARCHCAR_CHROMIUM_EXECUTABLE")
                 source = browser = context = page = None
                 active_source_key = None
 
                 def close_source_runtime() -> None:
                     nonlocal browser, context, page, source, active_source_key
-                    closing_context, closing_browser = context, browser
+                    closing_context, closing_browser, closing_source = context, browser, source
                     source = browser = context = page = None
                     active_source_key = None
+                    if runtime_pool and getattr(closing_source, 'reuse_browser_session', False):
+                        runtime_pool.release(closing_context)
+                        return
                     try:
                         if closing_context is not None:
                             closing_context.close()
@@ -789,11 +803,26 @@ def process_job(job_id: int) -> None:
                     }
                     job.payload = {**(job.payload or payload), "execution_versions": versions}
                     db.commit()
-                    next_browser, next_context, next_page = next_source.open_browser(
-                        playwright,
-                        headless=settings.playwright_headless,
-                        executable_path=executable_path or None,
-                    )
+                    while True:
+                        _raise_if_cancelled(db, job)
+                        db.commit()  # Release the heartbeat write before a browser/profile wait.
+                        try:
+                            options = dict(headless=settings.playwright_headless,
+                                           executable_path=executable_path or None)
+                            if runtime_pool and getattr(next_source, 'reuse_browser_session', False):
+                                next_browser, next_context, next_page = runtime_pool.acquire(
+                                    job.owner_id, next_source, **options)
+                            else:
+                                if runtime_pool:
+                                    runtime_pool.close_idle()  # Preserve the existing detail-worker browser budget.
+                                next_browser, next_context, next_page = next_source.open_browser(playwright, **options)
+                            break
+                        except ScanError as exc:
+                            if getattr(exc, 'code', None) != 'SOURCE_BROWSER_BUSY':
+                                raise
+                            # A selection window owns this same source profile.
+                            # Keep the queued scan cancellable, never launch a second Chrome.
+                            time.sleep(0.25)
                     source = next_source
                     browser, context, page = (
                         next_browser,
@@ -876,7 +905,8 @@ def process_job(job_id: int) -> None:
                     try:
                         if project.source_key in blocked_sources:
                             raise SourceBlockedError(
-                                "Source blocked earlier in this run"
+                                "Source blocked earlier in this run",
+                                code=blocked_sources[project.source_key],
                             )
                         source, page = activate_source(project.source_key)
                         scan_mode, page_mode = _project_scan_modes(
@@ -884,9 +914,14 @@ def process_job(job_id: int) -> None:
                             initial_full_scan,
                             price_filter_needs_baseline,
                         )
+                        list_only = 'LIST_ONLY' in source.descriptor.capabilities
+                        if list_only:
+                            page_mode = project.search_page_mode  # Do not apply Encar's initial full-scan policy.
+                            initial_full_scan = False
+                            price_filter_needs_baseline = False
                         effective_search_url = _effective_search_url(project, source)
 
-                        def update_page_progress(info: dict) -> None:
+                        def persist_page_progress(info: dict) -> None:
                             pagination = dict(
                                 (job.payload or {}).get("pagination") or {}
                             )
@@ -919,16 +954,85 @@ def process_job(job_id: int) -> None:
                             db.commit()
                             publish_scan_update(job.owner_id, job.id)
 
-                        collection = source.collect_search_pages(
-                            page,
-                            effective_search_url,
-                            project.name,
-                            all_pages=page_mode == "ALL_PAGES",
-                            checkpoint=lambda: _raise_if_project_cancelled(
-                                db, job, project.id
-                            ),
-                            progress=update_page_progress,
-                        )
+                        def collection_checkpoint() -> None:
+                            if runtime_pool:
+                                runtime_pool.reap()  # Yield another site's idle profile to filter selection.
+                            if not list_only:
+                                _raise_if_project_cancelled(db, job, project.id)
+                                return
+                            # A manual browser wait may last minutes. Never
+                            # retain its flushed heartbeat write transaction
+                            # while sleeping; serialize with the cancel API.
+                            with SCAN_COMMAND_LOCK:
+                                _raise_if_project_cancelled(db, job, project.id)
+                                db.commit()
+
+                        def update_page_progress(info: dict) -> None:
+                            if not list_only:
+                                persist_page_progress(info)
+                                return
+                            with SCAN_COMMAND_LOCK:
+                                _raise_if_project_cancelled(db, job, project.id)
+                                persist_page_progress(info)
+
+                        def persist_auction_collection(collection, *, complete):
+                            from .auction_storage import store_auction_row
+
+                            for row in collection.rows.values():
+                                if row.get('out_of_scope'):
+                                    continue
+                                item = store_auction_row(
+                                    db, project, row, scan_id=job.id, complete=complete
+                                )
+                                if item:
+                                    report.append(item)
+                            db.commit()
+
+                        try:
+                            collection = source.collect_search_pages(
+                                page,
+                                effective_search_url,
+                                project.name,
+                                all_pages=page_mode == "ALL_PAGES",
+                                checkpoint=collection_checkpoint,
+                                progress=update_page_progress,
+                                **({'search_config': project.search_config} if list_only and getattr(project, 'search_config', None) is not None else {}),
+                            )
+                        except Exception as exc:
+                            partial = getattr(exc, 'partial_collection', None)
+                            if list_only and partial and partial.rows:
+                                persist_auction_collection(partial, complete=False)
+                            raise
+                        if list_only:
+                            from .auction_storage import finish_auction_search
+                            # No network inside this final transaction. Cancellation
+                            # either wins before it or observes a completed project.
+                            with SCAN_COMMAND_LOCK:
+                                _raise_if_project_cancelled(db, job, project.id)
+                                persist_auction_collection(collection, complete=True)
+                                unchanged_conditions = db.scalar(
+                                    select(Project.price_filter_revision).where(Project.id == project.id)
+                                ) == price_filter_revision and db.scalar(
+                                    select(Project.search_config).where(Project.id == project.id)
+                                ) == getattr(project, 'search_config', None)
+                                finish_auction_search(
+                                    db, project, set(collection.rows),
+                                    all_pages=page_mode == 'ALL_PAGES' and unchanged_conditions,
+                                )
+                                _expire_previous_new_relations(db, project.id, previous_new_car_ids)
+                                stored_project.updated_at = datetime.now(timezone.utc)
+                                project_run.status = 'SUCCEEDED'
+                                project_statuses[str(project.id)] = 'SUCCEEDED'
+                                successes += 1
+                                completed += 1
+                                job.progress = min(99, round(completed / total_units * 100))
+                                _publish_live_results(
+                                    job, payload, report, failures, failure_details,
+                                    project_statuses, current_project_id=None,
+                                )
+                                db.commit()
+                            publish_scan_update(job.owner_id,job.id)
+                            continue
                         rows = collection.rows
                         _raise_if_project_cancelled(db, job, project.id)
                         search_found_ids: set[str] = set()
@@ -1372,8 +1476,8 @@ def process_job(job_id: int) -> None:
                     except ScanError as exc:
                         project_run.status = "FAILED"
                         project_run.error_code = exc.code
-                        if exc.code == "CAPTCHA":
-                            blocked_sources.add(project.source_key)
+                        if exc.code in {"CAPTCHA", "SOURCE_ACCESS_DENIED", "SOURCE_RATE_LIMITED"}:
+                            blocked_sources[project.source_key] = exc.code
                         failures.append(f"{project.name}:{exc.code}: {exc}")
                         failure_details.append(
                             _failure_detail(exc=exc, scope="PROJECT", project=project)
@@ -1661,6 +1765,8 @@ def enqueue_scheduled(*, now: datetime | None = None) -> None:
     from .maintenance import maintenance_active
     from fastapi import HTTPException
 
+    if settings.source_test_mode:
+        return
     if maintenance_active():
         return
     try:
@@ -1738,6 +1844,7 @@ def enqueue_scheduled(*, now: datetime | None = None) -> None:
                         "source_key": project.source_key,
                         "name": project.name,
                         "search_url": project.search_url,
+                        "search_config": deepcopy(project.search_config),
                         "scan_mode": project.scan_mode,
                         "search_page_mode": project.search_page_mode,
                         "price_filter_mode": project.price_filter_mode,
@@ -1773,15 +1880,17 @@ def enqueue_scheduled(*, now: datetime | None = None) -> None:
 
 def run(stop_event: Event | None = None) -> None:
     worker_id = f"desktop-{uuid4().hex}"
-    while not (stop_event and stop_event.is_set()):
-        enqueue_scheduled()
-        job_id = claim_next_job(engine, worker_id)
-        if job_id:
-            process_job(job_id)
-        elif stop_event:
-            stop_event.wait(settings.worker_poll_seconds)
-        else:
-            time.sleep(settings.worker_poll_seconds)
+    with BrowserRuntimePool(desktop_playwright) as runtime_pool:
+        while not (stop_event and stop_event.is_set()):
+            runtime_pool.reap()
+            enqueue_scheduled()
+            job_id = claim_next_job(engine, worker_id)
+            if job_id:
+                process_job(job_id, runtime_pool=runtime_pool)
+            elif stop_event:
+                stop_event.wait(settings.worker_poll_seconds)
+            else:
+                time.sleep(settings.worker_poll_seconds)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 {
   "name": "searchcar-desktop",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "packageManager": "pnpm@11.17.0",
   "engines": {
@@ -18,12 +18,19 @@
     "sbom:generate": "node scripts/generate_sbom.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern desktop/dist --ignore-pattern desktop/runtime --ignore-pattern desktop/src-tauri/target --ignore-pattern work",
     "db:generate": "drizzle-kit generate",
-    "license:typecheck": "tsc -p license-service/tsconfig.json",
+    "license:types": "node scripts/run_with_wrangler_log.mjs wrangler types license-service/worker-configuration.d.ts --config license-service/wrangler.jsonc --env-interface LicenseWorkerEnv",
+    "license:typecheck": "pnpm license:types && tsc -p license-service/tsconfig.json",
     "license:build": "node scripts/run_with_wrangler_log.mjs wrangler deploy --dry-run --config license-service/wrangler.jsonc --outdir dist",
     "license:test": "pnpm license:build && node --test license-service/tests/*.test.mjs",
     "license:migrate:local": "wrangler d1 migrations apply LICENSE_DB --local --config license-service/wrangler.jsonc",
+    "telegram:types": "node scripts/run_with_wrangler_log.mjs wrangler types telegram-relay/worker-configuration.d.ts --config telegram-relay/wrangler.jsonc --config license-service/wrangler.jsonc --strict-vars=false",
+    "telegram:typecheck": "pnpm telegram:types && tsc -p telegram-relay/tsconfig.json",
+    "telegram:build": "node scripts/run_with_wrangler_log.mjs wrangler deploy --dry-run --config telegram-relay/wrangler.jsonc --outdir dist",
+    "telegram:operator:build": "node scripts/run_with_wrangler_log.mjs wrangler deploy telegram-relay/ops/index.ts --dry-run --config telegram-relay/wrangler.jsonc --env staging --compatibility-flags nodejs_compat global_fetch_strictly_public --outdir telegram-relay/dist/operator",
+    "telegram:test": "pnpm license:build && pnpm telegram:build && pnpm telegram:operator:build && node --test telegram-relay/tests/*.test.mjs",
     "desktop:frontend:dev": "vite --config desktop/frontend/vite.config.ts",
     "desktop:frontend:build": "vite build --config desktop/frontend/vite.config.ts",
+    "calendar:build": "vite build --config calendar/vite.config.ts && node scripts/run_with_wrangler_log.mjs wrangler pages functions build calendar/functions --outdir work/calendar-page/dist/_worker.js --minify",
     "desktop:tauri:info": "cd desktop/src-tauri && tauri info",
     "desktop:tauri:dev": "cd desktop/src-tauri && tauri dev",
     "desktop:tauri:build": "cd desktop/src-tauri && tauri build"

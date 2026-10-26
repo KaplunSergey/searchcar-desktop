@@ -8,6 +8,8 @@ TOOLCHAIN_ROOT="${PROJECT_ROOT:h:h}/.toolchains"
 export RUSTUP_HOME="$TOOLCHAIN_ROOT/rustup"
 export CARGO_HOME="$TOOLCHAIN_ROOT/cargo"
 export SEARCHCAR_MACOS_LOCAL_KEY_FALLBACK=1
+SOURCE_TEST_BUILD_MODE="${SEARCHCAR_SOURCE_TEST_MODE:-1}"
+unset SEARCHCAR_SOURCE_TEST_MODE
 NODE_BIN="/Users/sergeykaplun/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin"
 PNPM_DIR="/Users/sergeykaplun/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback"
 export PATH="$CARGO_HOME/bin:$NODE_BIN:$PNPM_DIR:$PATH"
@@ -85,7 +87,8 @@ print "Building backend sidecar..."
 
 print "Checking and building the native shell..."
 cargo check --manifest-path desktop/src-tauri/Cargo.toml
-"$PNPM_BIN" desktop:tauri:build \
+# Persist the local auction preview choice in the native shell, not Finder's env.
+SEARCHCAR_SOURCE_TEST_MODE="$SOURCE_TEST_BUILD_MODE" "$PNPM_BIN" desktop:tauri:build \
   --target aarch64-apple-darwin \
   --bundles app \
   --no-sign \

@@ -9,13 +9,94 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.auth import require_user
 from app.database import Base, create_database_engine, get_db
 from app.main import app
-from app.models import AuctionObservation, AuctionRound, AuctionScheduleVersion, Car, Project, ProjectCar, User, UserCarState
+from app.models import AuctionObservation, AuctionRound, AuctionScheduleVersion, Car, Project, ProjectCar, User, UserCarState, ScanRun, ProjectScanRun
 from app.auction_rounds import record_auction_observation
 from app.money import store_money_values
 from test_money_values import quote
 
 
 NOW = datetime(2026, 10, 11, 0, 30, tzinfo=timezone.utc)
+
+
+def test_project_dates_do_not_call_creation_or_settings_a_search_refresh(auction_api):
+    client, factory, _ = auction_api
+    with factory() as db:
+        project = db.get(Project, 1)
+        project.created_at = NOW - timedelta(days=7)
+        project.updated_at = NOW
+        db.commit()
+    project = client.get('/api/projects?source_key=copart').json()[0]
+    assert project['created_at'].startswith('2026-10-04')
+    assert project['last_refreshed_at'] is None
+
+
+def test_last_project_refresh_is_last_completed_success_not_newer_failure_or_other_project(auction_api):
+    client, factory, _ = auction_api
+    with factory() as db:
+        for key, project_id, status, finished in [
+            (1, 1, 'SUCCEEDED', NOW - timedelta(days=2)),
+            (2, 1, 'FAILED', NOW - timedelta(days=1)),
+            (3, 2, 'SUCCEEDED', NOW),
+            (4, 1, 'SUCCEEDED', None),  # This project finished but its multi-project run is still active.
+        ]:
+            db.add(ScanRun(id=key, owner_id=1, kind='PROJECTS', status='RUNNING' if finished is None else 'PARTIAL',
+                           created_at=NOW-timedelta(days=3)+timedelta(hours=key), finished_at=finished))
+            db.flush()
+            db.add(ProjectScanRun(scan_run_id=key, project_id=project_id, status=status))
+        db.commit()
+    project = client.get('/api/projects/1').json()
+    assert project['last_refreshed_at'].startswith('2026-10-09T00:30:00')
+
+
+@pytest.mark.parametrize('car_id,project_id,url', [
+    (1, 1, 'https://cs.copart.com/v1/fixture_thb.jpg'),
+    (2, 2, 'https://vis.iaai.com/fixture.jpg'),
+])
+def test_auction_api_preserves_valid_source_photo_without_a_local_download(auction_api, car_id, project_id, url):
+    client, factory, _ = auction_api
+    with factory() as db:
+        car = db.get(Car, car_id)
+        car.details = {**car.details, 'main_image_source_url': url}
+        db.commit()
+    project = client.get(f'/api/projects/{project_id}/auction-lots?computer_timezone=UTC').json()
+    single = client.get(f'/api/cars/{car_id}/auction?project_id={project_id}&computer_timezone=UTC').json()
+    assert project['lots'][0]['image'] == url
+    assert single['lot']['image'] == url
+
+
+@pytest.mark.parametrize('local', [None, '/storage/fixture-main.jpg'])
+def test_auction_api_keeps_local_photo_priority_and_rejects_untrusted_remote(auction_api, monkeypatch, local):
+    client, factory, _ = auction_api
+    with factory() as db:
+        car = db.get(Car, 1)
+        car.details = {**car.details, 'main_image_source_url': 'https://untrusted.example/photo.jpg'}
+        db.commit()
+    monkeypatch.setattr('app.main.image_payloads', lambda *_: {'MAIN': {'url': local}} if local else {})
+    assert client.get('/api/projects/1/auction-lots?computer_timezone=UTC').json()['lots'][0]['image'] == local
+    assert client.get('/api/cars/1/auction?computer_timezone=UTC').json()['lot']['image'] == local
+
+
+def test_registered_auction_family_uses_shared_rounds_and_read_api(auction_api, monkeypatch):
+    from app.sources import registry
+    catalog = dict(getattr(registry, "_CATALOG", {}))
+    catalog["sampleauction"] = {"key": "sampleauction", "name": "Sample Auction", "family": "AUCTION", "ui": "auction", "domains": [], "capabilities": []}
+    monkeypatch.setattr(registry, "_CATALOG", catalog, raising=False)
+    client, factory, _ = auction_api
+    with factory() as db:
+        db.add(Project(id=20, owner_id=1, source_key="sampleauction", name="Fourth auction", name_key="fourth auction", search_url="https://sampleauction.example.test/search"))
+        car = Car(id=20, source_key="sampleauction", source_listing_id="same-id", url="https://sampleauction.example.test/lot/same-id", title="Fourth-source car")
+        db.add(car)
+        db.flush()
+        db.add(ProjectCar(project_id=20, car_id=20))
+        record_auction_observation(db, car, observation_key="fixture", observed_at=NOW, schedule={"local_datetime": "2026-10-11T04:00:00", "source_timezone": "UTC", "event_kind": "START"})
+        db.commit()
+    response = client.get("/api/projects/20/auction-lots?computer_timezone=Europe/Warsaw&today_only=true")
+    assert response.status_code == 200, response.text
+    assert response.json()["lots"][0]["source_key"] == "sampleauction"
+    single = client.get("/api/cars/20/auction?project_id=20&computer_timezone=Europe/Warsaw")
+    assert single.status_code == 200, single.text
+    assert single.json()["lot"]["title"] == "Fourth-source car"
+    assert client.get("/api/projects/3/auction-lots?computer_timezone=Europe/Warsaw").status_code == 400
 
 
 @pytest.fixture

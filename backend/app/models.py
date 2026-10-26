@@ -4,12 +4,17 @@ from sqlalchemy import BigInteger, Boolean, CheckConstraint, ForeignKey, Foreign
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
 from .db_types import UTCDateTime
+from .search_identity import url_identity_v1
 
 
 def _encar_listing_id(context):
     # Transitional default for existing Encar writers and legacy DB conversion.
     # A displayed registration number or alias must never become the identity.
     return context.get_current_parameters().get("canonical_encar_id")
+
+
+def _project_url_identity(context):
+    return url_identity_v1(context.get_current_parameters()['search_url'])
 
 class ScanMode(str, enum.Enum): FAST="FAST"; ACCURATE="ACCURATE"
 class User(Base):
@@ -62,7 +67,7 @@ class Project(Base):
     __tablename__="projects"
     __table_args__=(
         UniqueConstraint("owner_id","source_key","name_key",name="uq_projects_owner_source_name_key"),
-        UniqueConstraint("owner_id","source_key","search_url",name="uq_projects_owner_source_search_url"),
+        UniqueConstraint("owner_id","source_key","search_identity",name="uq_projects_owner_source_search_identity"),
         CheckConstraint("length(source_key) > 0", name="ck_projects_source_key"),
     )
     id: Mapped[int]=mapped_column(primary_key=True)
@@ -70,6 +75,8 @@ class Project(Base):
     source_key: Mapped[str]=mapped_column(String(32), default="encar", server_default="encar")
     name: Mapped[str]=mapped_column(String(140)); name_key: Mapped[str]=mapped_column(String(140))
     search_url: Mapped[str]=mapped_column(Text); telegram_url: Mapped[str|None]=mapped_column(Text)
+    search_config: Mapped[dict|None]=mapped_column(JSON)
+    search_identity: Mapped[str]=mapped_column(String(64), default=_project_url_identity)
     scan_mode: Mapped[str]=mapped_column(String(16), default="FAST"); search_page_mode: Mapped[str]=mapped_column(String(16), default="ALL_PAGES")
     price_filter_mode: Mapped[str]=mapped_column(String(16), default="LINK")
     price_min_krw: Mapped[int|None]=mapped_column(BigInteger)

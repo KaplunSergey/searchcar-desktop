@@ -95,6 +95,7 @@ def test_explicit_project_plan_is_owned_and_frozen_at_enqueue(tmp_path: Path) ->
                 "source_key": "encar",
                 "name": "Audi A5",
                 "search_url": original_url,
+                "search_config": None,
                 "scan_mode": "FAST",
                 "search_page_mode": "FIRST_PAGE",
                 "price_filter_mode": "LINK",

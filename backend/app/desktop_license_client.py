@@ -100,7 +100,7 @@ class MacOSKeychainApi:
     _ERR_SEC_SUCCESS = 0
     _ERR_SEC_ITEM_NOT_FOUND = -25300
 
-    def __init__(self) -> None:
+    def __init__(self, *, service: str = KEYCHAIN_SERVICE, account: str = KEYCHAIN_ACCOUNT) -> None:
         import ctypes
 
         self.ctypes = ctypes
@@ -111,8 +111,8 @@ class MacOSKeychainApi:
             "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
         )
         self._configure_functions()
-        self.service = KEYCHAIN_SERVICE.encode("utf-8")
-        self.account = KEYCHAIN_ACCOUNT.encode("utf-8")
+        self.service = service.encode("utf-8")
+        self.account = account.encode("utf-8")
 
     def _configure_functions(self) -> None:
         ctypes = self.ctypes
@@ -443,7 +443,9 @@ class WindowsDpapiStore:
         self.path = data_dir / LICENSE_DIRECTORY_NAME / DPAPI_KEY_NAME
 
     @staticmethod
-    def _crypt(value: bytes, *, protect: bool) -> bytes:
+    def _crypt(value: bytes, *, protect: bool,
+               context: bytes = b"SearchCar DPAPI device key v1",
+               description_text: str = "SearchCar device signing key") -> bytes:
         if sys.platform != "win32":
             raise LicenseClientError("LICENSE_DPAPI_UNAVAILABLE")
         import ctypes
@@ -467,7 +469,7 @@ class WindowsDpapiStore:
 
         source, source_buffer = blob(value)
         entropy, entropy_buffer = blob(
-            hashlib.sha256(b"SearchCar DPAPI device key v1").digest()
+            hashlib.sha256(context).digest()
         )
         output = DataBlob()
         crypt32 = ctypes.windll.crypt32
@@ -483,7 +485,7 @@ class WindowsDpapiStore:
                 wintypes.DWORD,
                 ctypes.POINTER(DataBlob),
             ]
-            description: Any = "SearchCar device signing key"
+            description: Any = description_text
         else:
             function = crypt32.CryptUnprotectData
             function.argtypes = [

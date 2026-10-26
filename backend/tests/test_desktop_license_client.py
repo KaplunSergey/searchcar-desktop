@@ -105,6 +105,8 @@ def test_refresh_installs_signed_source_changes_and_offline_keeps_last_policy(tm
     now = datetime.now(timezone.utc)
     policy = ["*"]
     offline = False
+    allowed = ('copart', 'encar', 'iaa')
+    monkeypatch.setattr('app.sources.registry.list_sources', lambda: tuple(SimpleNamespace(key=key) for key in allowed))
 
     def handler(request):
         if offline:
@@ -119,18 +121,19 @@ def test_refresh_installs_signed_source_changes_and_offline_keeps_last_policy(tm
 
     client = LicenseServiceClient(tmp_path, service_url="https://license.example.test",
                                   store=MemoryStore(), transport=httpx.MockTransport(handler))
-    assert client.activate_trial("source-policy@example.test")["sources"] == ("encar",)
+    assert client.activate_trial("source-policy@example.test")["sources"] == allowed
     policy = ["copart"]
-    assert client.refresh()["sources"] == ("copart",)
+    assert client.refresh()["sources"] == allowed
     cached = (tmp_path / "license" / "lease.json").read_bytes()
+    assert json.loads(cached)['payload']['entitlements']['sources'] == ['copart']
     offline = True
     with pytest.raises(LicenseClientError):
         client.refresh()
     assert (tmp_path / "license" / "lease.json").read_bytes() == cached
-    assert evaluate_search_entitlement(data_dir=tmp_path, mode="required").sources == ("copart",)
+    assert evaluate_search_entitlement(data_dir=tmp_path, mode="required").sources == allowed
     offline = False
     policy = ["*"]
-    assert client.refresh()["sources"] == ("encar",)
+    assert client.refresh()["sources"] == allowed
     assert evaluate_search_entitlement(data_dir=tmp_path, mode="required", now=now + timedelta(hours=49)).can_search is False
 
 

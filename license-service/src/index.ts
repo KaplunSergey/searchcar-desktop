@@ -1,4 +1,5 @@
 import { constantTimeEqual, verifyDeviceProof } from "./crypto";
+export { TelegramAuthorization } from "./telegram_authorization";
 import {
   beginIdempotentRequest,
   cleanupExpiredState,

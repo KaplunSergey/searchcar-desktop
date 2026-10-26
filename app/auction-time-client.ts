@@ -17,6 +17,7 @@ export type AuctionLot = {
   id: number;
   source_key: string;
   source_listing_id: string;
+  project_search_status?: "FOUND" | "NOT_FOUND_IN_SEARCH";
   url: string;
   title: string | null;
   image: string | null;
@@ -46,8 +47,38 @@ export type AuctionClockContext = {
 };
 export type ProjectAuctionView = AuctionClockContext & {
   project_id: number; source_key: string; today_only: boolean; lots: AuctionLot[];
+  collection?: AuctionCollection;
 };
+export type AuctionCollection = "active" | "today" | "future" | "undated" | "archive";
 export type SingleAuctionView = AuctionClockContext & { lot: AuctionLot };
+export type AuctionSnapshotView = SingleAuctionView & { captured_round_id: string | null };
+
+/** Recalculate a known instant locally; elapsed time never proves LIVE/SOLD. */
+export function auctionTimeAt(lot: Pick<AuctionLot, "schedule" | "time">, nowMs: number): AuctionTimeView {
+  const time = lot.time, raw = lot.schedule.utc_at;
+  if (time.precision !== "EXACT" || !["START", "END"].includes(time.event_kind)
+    || !raw || !/(?:Z|[+-]\d{2}:\d{2})$/i.test(raw)) return time;
+  const target = Date.parse(raw);
+  if (!Number.isFinite(target) || !Number.isFinite(nowMs)) return time;
+  return { ...time, remaining_seconds: Math.max(0, Math.ceil((target - nowMs) / 1000)),
+    time_state: target > nowMs ? (time.event_kind === "START" ? "UPCOMING_START" : "UPCOMING_END")
+      : (time.event_kind === "START" ? "SCHEDULED_START_PASSED" : "SCHEDULED_END_PASSED") };
+}
+
+export function watchAuctionCountdown(onTick: (now: number) => void, now = Date.now, win = window, doc = document): () => void {
+  let active = true;
+  const tick = () => { if (active && doc.visibilityState !== "hidden") onTick(now()); };
+  const timer = win.setInterval(tick, 1000);
+  win.addEventListener("focus", tick);
+  win.addEventListener("pageshow", tick);
+  doc.addEventListener("visibilitychange", tick);
+  tick();
+  return () => {
+    active = false; win.clearInterval(timer);
+    win.removeEventListener("focus", tick); win.removeEventListener("pageshow", tick);
+    doc.removeEventListener("visibilitychange", tick);
+  };
+}
 
 export function computerTimeZone(): string | null {
   try {
@@ -63,7 +94,7 @@ export function computerTimeZone(): string | null {
 }
 
 export function withAuctionTimeZone(path: string, readZone = computerTimeZone): string {
-  if (!/^\/(?:projects\/\d+\/auction-lots|cars\/\d+\/auction)(?:\?|$)/.test(path)) return path;
+  if (!/^\/(?:projects\/\d+\/auction-lots|cars\/\d+\/auction|scans\/\d+\/auction-report)(?:\?|$)/.test(path)) return path;
   const zone = readZone();
   if (!zone) throw new Error("computer_timezone_unavailable");
   const url = new URL(path, "https://searchcar.invalid");

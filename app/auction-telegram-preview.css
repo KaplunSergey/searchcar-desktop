@@ -1,0 +1,56 @@
+.button.telegram-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; background: #087eb5; border-color: #087eb5; color: #fff; }
+.button.telegram-button:hover { background: #066b9b; border-color: #066b9b; }
+.button.telegram-button:focus-visible { outline: 3px solid #229ed9; outline-offset: 3px; }
+.telegram-icon-button { width: 44px; padding: 7px; }
+.telegram-car-action { margin-top: 12px; max-width: 100%; overflow-wrap: anywhere; }
+.telegram-car-action [role="alert"] { font-size: 14px; line-height: 1.5; }
+.telegram-button[aria-busy="true"] .telegram-logo { opacity: .45; }
+.telegram-select-all, .telegram-select-car { display: flex; align-items: center; gap: 12px; overflow-wrap: anywhere; font-weight: 600; margin-bottom: 12px; }
+.telegram-select-all input, .telegram-select-car input { flex: none; width: 20px; height: 20px; }
+.telegram-settings select { width: 100%; min-width: 0; }
+.telegram-sent-before { display: block; color: #117b46; font-size: 13px; margin: 8px 0; }
+.telegram-delivery-progress { font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.telegram-delivery-progress p { margin: 8px 0; }
+.telegram-delivery-progress label { display: flex; align-items: flex-start; gap: 8px; }
+.telegram-delivery-progress input[type="checkbox"] { flex: none; width: 20px; height: 20px; }
+.telegram-button .telegram-logo { flex: none; width: 28px; height: 28px; }
+.telegram-button span { min-width: 0; overflow-wrap: anywhere; }
+.auction-telegram-preview h2 { margin: 0; overflow-wrap: anywhere; }
+.auction-telegram-preview > p { line-height: 1.6; }
+.telegram-preview-message { border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin: 14px 0; }
+.telegram-preview-message .auction-photo { display: block; max-width: 100%; width: 260px; height: 160px; margin-bottom: 10px; }
+.telegram-preview-message .telegram-preview-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; margin: 0; }
+.telegram-message-calendar, .telegram-message-listing { color: #087eb5; text-decoration: underline; text-underline-offset: 3px; }
+.telegram-message-calendar:focus-visible, .telegram-message-listing:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.telegram-preview-message:focus { outline: 2px solid var(--blue); outline-offset: -2px; }
+.telegram-preview-message:has(input:checked) { border-color: var(--blue); box-shadow: inset 0 0 0 1px var(--blue); }
+.auction-telegram-preview .launch-actions { flex-wrap: wrap; }
+.auction-telegram-preview .launch-actions button { white-space: normal; }
+.auction-calendar-actions { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+.auction-calendar-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.auction-calendar-buttons .button { white-space: normal; overflow-wrap: anywhere; max-width: 100%; text-decoration: none; }
+.auction-calendar-actions input { width: 100%; min-width: 0; }
+.auction-car-actions { display: grid; grid-template-columns: repeat(3, 44px) minmax(0, 1fr); gap: 10px; margin-top: 16px; }
+.auction-car-actions .telegram-car-action { display: contents; }
+.auction-car-actions .telegram-icon-button { grid-column: 2; grid-row: 1; width: 44px; height: 44px; }
+.auction-car-actions .telegram-car-feedback { grid-column: 1 / -1; grid-row: 2; min-width: 0; overflow-wrap: anywhere; }
+.button.auction-action-icon { display: grid; place-items: center; width: 44px; height: 44px; margin: 0; padding: 9px; color: #fff; text-decoration: none; }
+.auction-action-icon svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.button.auction-listing-button { grid-column: 1; grid-row: 1; background: #15803d; border-color: #15803d; }
+.button.auction-listing-button:hover { background: #166534; border-color: #166534; }
+.button.auction-remove-button { grid-column: 3; grid-row: 1; background: #dc2626; border-color: #dc2626; }
+.button.auction-remove-button:hover { background: #b91c1c; border-color: #b91c1c; }
+.auction-create-dialog .auction-project-form { display: grid; gap: 16px; margin: 12px 0; }
+.auction-create-dialog .auction-project-form > label { display: grid; gap: 8px; }
+.auction-create-dialog input:not([type="checkbox"]), .auction-create-dialog select { width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 7px; background-color: #fff; }
+.auction-create-dialog .telegram-project { margin-top: 0; }
+.auction-create-dialog .launch-content { padding: 4px; }
+.auction-project-toolbar > .auction-project-controls { align-items: center; flex-wrap: nowrap; gap: 8px; }
+.auction-project-controls .button { display: grid; place-items: center; flex: none; width: 44px; height: 44px; margin: 0; padding: 9px; }
+.auction-project-icon svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.button.auction-project-icon { color: #fff; }
+.button.auction-project-edit-button { background: #475569; border-color: #475569; }
+.button.auction-project-edit-button:hover { background: #334155; border-color: #334155; }
+.button.auction-project-refresh { background: #2563eb; border-color: #2563eb; }
+.button.auction-project-refresh:hover { background: #1d4ed8; border-color: #1d4ed8; }
+.auction-project-controls .button:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }

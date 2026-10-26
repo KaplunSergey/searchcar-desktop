@@ -49,7 +49,16 @@ next-env.d.ts
 /.wrangler/
 /license-service/.wrangler/
 /license-service/dist/
+/telegram-relay/.wrangler/
+/telegram-relay/dist/
+/telegram-relay/work/
+/calendar/.wrangler/
+/candidate-dist/
+/telegram-relay/worker-configuration.d.ts
+/license-service/worker-configuration.d.ts
+**/.dev.vars*
 /outputs/
+/output/
 /work/
 /storage/
 /legacy-data/

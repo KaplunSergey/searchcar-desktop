@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from .auction_time import _day_bounds, _timezone, _utc_now, normalize_schedule
 from .models import AuctionObservation, AuctionRound, AuctionScheduleVersion, Car
+from .sources.registry import is_auction_source
 
 
 def _key(value, name, *, optional=False):
@@ -44,6 +45,8 @@ def _date_contains(date_only, exact):
 
 
 def _updated_schedule(previous, incoming):
+    if (incoming or {}).get('date_absent_confirmed') is True:
+        return normalize_schedule({**incoming,'local_date':None,'local_datetime':None})
     # Missing fields do not clear a known value; raw failed evidence is retained
     # on the observation. Explicit date changes must not borrow an old time.
     merged = {**previous, **{key: value for key, value in (incoming or {}).items() if value is not None}}
@@ -105,7 +108,7 @@ def record_auction_observation(db: Session, car: Car, *, observation_key: str,
     observed_at = _utc_now(observed_at)
     source_updated_at = _utc_now(source_updated_at) if source_updated_at is not None else None
     normalized = normalize_schedule(schedule)  # Validate before any writes.
-    if car.id is None or car.source_key not in {"copart", "iaa"}:
+    if car.id is None or not is_auction_source(car.source_key):
         raise ValueError("Expected a persisted auction source listing")
     try:
         payload = json.loads(json.dumps(dict(schedule=schedule, sale_id=sale_id,

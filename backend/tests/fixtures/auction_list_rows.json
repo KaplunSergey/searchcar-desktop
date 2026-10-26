@@ -1,0 +1,12 @@
+{
+  "provenance": "Reduced fields observed in public rendered DOM, macOS Codex IAB, 2026-10-12. No API/account data. Pagination/error mutations in tests are synthetic.",
+  "copart": [
+    {"source_car_id":"66091506","url":"https://www.copart.com/lot/66091506/salvage-2021-audi-a5-premium-45-sc-north-charleston","title":"2021 AUDI A5 PREMIUM 45","date_text":"10/14/2026 04:00 pm CEST","odometer":"130,543 A","accuracy":"ACTUAL","damage":"FRONT END","document":"CERT OF TITLE-SALVAGE","location":"SC - NORTH CHARLESTON","engine_status":"Run & Drive","retail":"$17,246","bid":"Current bid : $0.00 Bid now","image":null},
+    {"source_car_id":"63582456","url":"https://www.copart.com/lot/63582456/salvage-2022-audi-a5-premium-plus-40-ok-tulsa","title":"2022 AUDI A5 PREMIUM PLUS 40","date_text":"Future","odometer":"65,249 A","accuracy":"ACTUAL","damage":"FRONT END","location":"OK - TULSA","retail":"$23,686","bid":"Current bid : $0.00 Bid now","image":"https://cs.copart.com/v1/AUTH_svc.pdoc00001/lpp/0726/1c61d6d8289044b8b4eed9df5782383e_thb.jpg"}
+  ],
+  "iaa": [
+    {"source_car_id":"46075606~US","url":"https://www.iaai.com/VehicleDetail/46075606~US","title":"2022 AUDI A4 PREMIUM PLUS 45 TFSI S LINE QUATTRO S TRONIC","stock_number":"45577252","date_text":"Mon Oct 12, 8:30am CDT","sale_list_url":"https://www.iaai.com/SalesList/723~US/10122026","site_city":"Chicago","odometer":"78,834 mi","damage":"Left Rear","secondary_damage":"Left Side","document":"Salvage","engine_status":"Run & Drive","keys":"Key Available","retail":"$18,089 USD","source_action":"Pre-Bid","location":"Northern Virginia (Virginia)","image":null},
+    {"source_car_id":"46560600~US","url":"https://www.iaai.com/VehicleDetail/46560600~US","title":"2023 AUDI A4 PREMIUM 40 TFSI QUATTRO S TRONIC","date_text":"Thu Oct 15, 8:30am CDT","sale_list_url":"https://www.iaai.com/SalesList/613~US/10152026","site_city":"Chicago","odometer":"18,566 mi","damage":"Flood","engine_status":"Stationary","keys":"Key Available","retail":"$26,535 USD","buy_now":"Buy Now $11,175 USD","source_action":"Pre-Bid","image":null},
+    {"source_car_id":"46828067~US","url":"https://www.iaai.com/VehicleDetail/46828067~US","title":"2023 AUDI A4 PREMIUM PLUS 45 TFSI S LINE QUATTRO S TRONIC","date_text":"Auction Not Assigned","site_city":"Chicago","damage":"Rear","retail":"$27,840 USD","image":null}
+  ]
+}

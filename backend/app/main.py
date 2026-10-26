@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from copy import deepcopy
 import json
 import logging
 import os
@@ -7,6 +8,7 @@ import shutil
 import webbrowser
 from pathlib import Path
 from uuid import uuid4
+from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,8 +36,19 @@ from .auth import (
 )
 from .database import get_db, settings
 from .money import comparable_money, money_values_out, payload_money_values
-from .auction_read import project_auction_view, single_auction_view
+from .auction_read import project_auction_view, single_auction_view, report_snapshot_view
 from .auction_time import _timezone
+from .workspace_preferences import WorkspacePreferences, load_workspace, save_workspace
+from .telegram_connection import router as telegram_router
+from . import telegram_pairing
+from . import telegram_dispatch
+from . import telegram_automatic
+from . import telegram_reschedules
+from .telegram_connection import TelegramError
+from starlette.concurrency import run_in_threadpool
+from .source_search_selection import search_selections
+from .search_identity import url_identity_v1
+from .sources.registry import is_auction_source
 from .importer import inspect_source, run as run_import
 from .job_queue import SCAN_COMMAND_LOCK, detach_project_from_active_jobs, project_execution_order
 from .models import (
@@ -44,6 +57,7 @@ from .models import (
     CarEvent,
     CarImage,
     CarSnapshot,
+    AuctionObservation,
     AuthAttempt,
     AuthSession,
     AuditLog,
@@ -90,6 +104,8 @@ from .schemas import (
     DesktopLicenseTransferClaimIn,
     DesktopLicenseTrialIn,
     ExternalUrlIn,
+    SearchSelectionIn,
+    ProjectSearchSelectionIn,
     validate_price_filter,
     RegistrationIn,
 )
@@ -99,10 +115,12 @@ from .sources.registry import get_source
 from .reporting import dedupe_report
 from .vehicle_groups import group_vehicle_listings
 from .live_updates import live_updates
+from .http_middleware import RequestLogMiddleware
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="SearchCar API", version=settings.app_version)
+app.include_router(telegram_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -117,30 +135,19 @@ app.add_middleware(
 storage_path = Path(settings.storage_root)
 storage_path.mkdir(parents=True, exist_ok=True)
 MAX_DESKTOP_BACKUP_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024
+app.add_event_handler('shutdown', search_selections.shutdown)
+app.add_event_handler('shutdown', telegram_dispatch.service.stop)
 
-
-@app.middleware("http")
-async def attach_desktop_log_context(request: Request, call_next):
-    """Keep a short request id across local API log records."""
-
-    from .desktop_runtime import desktop_correlation_id
-
-    token = desktop_correlation_id.set(f"request-{uuid4().hex[:12]}")
-    response = None
+def start_telegram_delivery():
     try:
-        response = await call_next(request)
-        return response
+        telegram_dispatch.service.start()
     except Exception:
-        logger.exception("Local API request failed: method=%s path=%s", request.method, request.url.path)
-        raise
-    finally:
-        logger.info(
-            "Local API request completed: method=%s path=%s status=%s",
-            request.method,
-            request.url.path,
-            getattr(response, "status_code", 500),
-        )
-        desktop_correlation_id.reset(token)
+        logger.warning('Telegram delivery is unavailable; application startup continues')
+
+app.add_event_handler('startup', start_telegram_delivery)
+
+
+app.add_middleware(RequestLogMiddleware)
 
 
 def user_out(user: User, db: Session, *, include_usage: bool = True) -> dict:
@@ -161,6 +168,8 @@ def user_out(user: User, db: Session, *, include_usage: bool = True) -> dict:
         "last_login_at": user.last_login_at,
         "last_activity_at": user.last_activity_at,
     }
+    if os.environ.get("SEARCHCAR_DESKTOP_DATA_DIR"):
+        result["workspace"] = load_workspace(user.id)
     if include_usage:
         result["project_count"] = (
             db.scalar(
@@ -426,6 +435,18 @@ def update_profile(
     )
     db.commit()
     return user_out(current, db)
+
+
+@app.put("/api/auth/workspace")
+def update_workspace(body: WorkspacePreferences, current: User = Depends(require_csrf)) -> dict:
+    if not os.environ.get("SEARCHCAR_DESKTOP_DATA_DIR"):
+        raise HTTPException(400, "desktop_workspace_unavailable")
+    try:
+        save_workspace(current.id, body)
+    except OSError:
+        logger.exception("Desktop navigation preferences could not be saved")
+        raise HTTPException(503, "workspace_storage_unavailable")
+    return {"saved": True}
 
 
 @app.post("/api/auth/register", status_code=202)
@@ -798,11 +819,18 @@ def project_out(project: Project, db: Session) -> dict:
         .order_by(ScanRun.created_at.desc())
         .limit(1)
     ).first()
+    last_refreshed_at = db.scalar(
+        select(func.max(ScanRun.finished_at))
+        .join(ProjectScanRun, ProjectScanRun.scan_run_id == ScanRun.id)
+        .where(ProjectScanRun.project_id == project.id, ProjectScanRun.status == "SUCCEEDED")
+    )
     return {
         "id": project.id,
         "source_key": project.source_key,
         "name": project.name,
         "search_url": project.search_url,
+        "search_config": project.search_config,
+        "search_revision": project.price_filter_revision,
         "telegram_url": project.telegram_url,
         "scan_mode": project.scan_mode,
         "search_page_mode": project.search_page_mode,
@@ -813,6 +841,7 @@ def project_out(project: Project, db: Session) -> dict:
         "cars": cars,
         "created_at": project.created_at,
         "updated_at": project.updated_at,
+        "last_refreshed_at": last_refreshed_at,
         "latest_scan": (
             {
                 "id": last_run.ScanRun.id,
@@ -998,6 +1027,24 @@ def create_project(
     current: User = Depends(require_csrf),
     db: Session = Depends(get_db),
 ) -> dict:
+    search_config = None
+    if body.search_selection_id is not None:
+        root = selection_root(body.source_key, db)
+        try:
+            selected = search_selections.current(root, current.id, body.source_key, draft_id=body.search_draft_id)
+        except (OSError, ValueError, KeyError, TypeError):
+            raise HTTPException(409, 'search_selection_changed') from None
+        if (not selected or selected['id'] != body.search_selection_id
+                or selected.get('project_id') is not None
+                or not selected['can_use'] or selected['status'] != 'CLOSED'
+                or selected['snapshot']['creation_url'] != body.search_url):
+            raise HTTPException(409, 'search_selection_changed')
+        search_config = deepcopy(selected['snapshot'])
+    search_identity = url_identity_v1(body.search_url)
+    if search_config:
+        identity_for_config = getattr(get_source(body.source_key), 'search_identity', None)
+        if identity_for_config:
+            search_identity = identity_for_config(search_config)
     locked_user = db.scalar(
         select(User).where(User.id == current.id).with_for_update()
     )
@@ -1017,9 +1064,12 @@ def create_project(
         raise HTTPException(403, "project_limit_reached")
     project = Project(
         owner_id=current.id,
+        source_key=body.source_key,
         name=body.name.strip(),
         name_key=body.name.strip().casefold(),
         search_url=body.search_url,
+        search_config=search_config,
+        search_identity=search_identity,
         telegram_url=body.telegram_url,
         scan_mode=body.scan_mode,
         search_page_mode=body.search_page_mode,
@@ -1045,6 +1095,68 @@ def create_project(
     return project_out(project, db)
 
 
+def selection_root(source_key: str, db: Session):
+    from .source_test_profile import validate_source_test_isolation, SourceTestModeError
+    if not settings.source_test_mode:
+        raise HTTPException(409, 'source_test_profile_required')
+    try:
+        validate_source_test_isolation(settings, database_url=db.get_bind().url)
+        source = get_source(source_key)
+        if not getattr(source, 'selection_entry_url', None):
+            raise ValueError('unsupported_selection')
+    except (ValueError, SourceTestModeError, SourceUnavailableError):
+        raise HTTPException(409, 'source_selection_unavailable') from None
+    return Path(settings.storage_root).parent
+
+
+@app.get('/api/source-search/{source_key}/selection')
+def get_search_selection(source_key: str, current: User = Depends(require_user), db: Session = Depends(get_db),
+                         draft_id: str | None = Query(default=None, pattern=r'^[a-f0-9]{32}$')):
+    root = selection_root(source_key, db)
+    try:
+        return {'selection': search_selections.current(root, current.id, source_key, draft_id=draft_id)}
+    except (OSError, ValueError, KeyError, TypeError):
+        raise HTTPException(503, 'selection_state_unreadable') from None
+
+
+@app.post('/api/source-search/{source_key}/selection')
+def change_search_selection(source_key: str, body: SearchSelectionIn,
+                            current: User = Depends(require_csrf), db: Session = Depends(get_db)):
+    from .desktop_license import SearchEntitlementError, require_search_entitlement
+    from .maintenance import maintenance_active
+    root = selection_root(source_key, db)
+    project = owned_project(body.project_id, current, db) if body.project_id is not None else None
+    if project and (project.source_key != source_key or body.draft_id is None):
+        raise HTTPException(409, 'search_selection_changed')
+    if body.action != 'OPEN':
+        try:
+            selected = search_selections.current(root, current.id, source_key, draft_id=body.draft_id)
+            if not selected or selected.get('project_id') != body.project_id:
+                raise ValueError('selection_project_changed')
+        except (OSError, ValueError, KeyError, TypeError):
+            raise HTTPException(409, 'search_selection_changed') from None
+    if body.action == 'CANCEL':
+        try:
+            return {'selection': search_selections.cancel(root, current.id, source_key, body.selection_id, draft_id=body.draft_id)}
+        except ValueError:
+            raise HTTPException(409, 'selection_not_ready') from None
+    if maintenance_active():
+        raise HTTPException(409, 'desktop_maintenance_active')
+    try:
+        require_search_entitlement(source_key)
+    except SearchEntitlementError as exc:
+        raise HTTPException(402, exc.code.lower()) from exc
+    try:
+        selection = (search_selections.start(root, current.id, source_key, locale=current.preferred_locale, draft_id=body.draft_id,
+                         **({'project_id': project.id, 'initial_snapshot': project.search_config, 'entry_url': project.search_url} if project else {})) if body.action == 'OPEN'
+                     else search_selections.confirm(root, current.id, source_key, body.selection_id, draft_id=body.draft_id))
+        return {'selection': selection}
+    except (ValueError, InvalidSourceUrlError):
+        raise HTTPException(409, 'selection_not_ready') from None
+    except OSError:
+        raise HTTPException(503, 'selection_state_unwritable') from None
+
+
 @app.get("/api/projects/{project_id}")
 def get_project(
     project_id: int,
@@ -1052,6 +1164,236 @@ def get_project(
     db: Session = Depends(get_db),
 ) -> dict:
     project = owned_project(project_id, current, db)
+    return project_out(project, db)
+
+
+def telegram_project_scope(project):
+    return [project.source_key, project.created_at.isoformat()]
+
+
+@app.get("/api/telegram/recipients")
+def telegram_recipients(current: User = Depends(require_user), db: Session = Depends(get_db)):
+    projects = db.scalars(select(Project).where(Project.owner_id == current.id)).all()
+    try:
+        return telegram_pairing.saved_recipients(current.id,
+            [(project.id, telegram_project_scope(project)) for project in projects])
+    except (OSError, ValueError, telegram_pairing.sqlite3.Error):
+        raise HTTPException(503, "telegram_pairing_storage_failed") from None
+
+
+@app.get("/api/projects/{project_id}/telegram")
+def project_telegram(project_id: int, source_key: str | None = None,
+                     current: User = Depends(require_user), db: Session = Depends(get_db)):
+    project = owned_project(project_id, current, db)
+    if source_key and source_key != project.source_key:
+        raise HTTPException(404, "project_not_found")
+    try:
+        return telegram_pairing.project_status(current.id, project.id, telegram_project_scope(project))
+    except (OSError, ValueError, telegram_pairing.sqlite3.Error):
+        raise HTTPException(503, "telegram_pairing_storage_failed") from None
+
+
+@app.post("/api/projects/{project_id}/telegram")
+async def change_project_telegram(project_id: int, request: Request, source_key: str | None = None,
+                                 current: User = Depends(require_csrf), db: Session = Depends(get_db)):
+    project = owned_project(project_id, current, db)
+    if source_key and source_key != project.source_key:
+        raise HTTPException(404, "project_not_found")
+    body = await telegram_pairing.pairing_body(request)
+    try:
+        return await run_in_threadpool(telegram_pairing.change_project, current.id, project.id, telegram_project_scope(project), body)
+    except TelegramError as error:
+        raise HTTPException(error.status, error.code) from None
+
+@app.post('/api/telegram/automatic-clock')
+def telegram_automatic_clock(body: telegram_automatic.AutomaticClock, current: User = Depends(require_csrf)):
+    try:
+        with telegram_pairing.LOCK:
+            telegram_automatic.update_clock(telegram_dispatch.configuration(), current.id, body.computer_timezone, int(now_utc().timestamp()*1000))
+        return {'ok': True}
+    except TelegramError as error:
+        raise HTTPException(error.status, error.code) from None
+    except (OSError, ValueError, telegram_pairing.sqlite3.Error):
+        raise HTTPException(503, 'telegram_delivery_storage_failed') from None
+
+
+@app.get('/api/projects/{project_id}/telegram-automatic')
+def telegram_automatic_status(project_id: int, source_key: str | None = None,
+                              current: User = Depends(require_user), db: Session = Depends(get_db)):
+    project = owned_project(project_id, current, db)
+    if source_key and source_key != project.source_key:
+        raise HTTPException(404, 'project_not_found')
+    try:
+        with telegram_pairing.LOCK:
+            return telegram_automatic.status(telegram_dispatch.configuration(), current.id, project, int(now_utc().timestamp()*1000))
+    except TelegramError as error:
+        raise HTTPException(error.status, error.code) from None
+    except (OSError, ValueError, telegram_pairing.sqlite3.Error):
+        raise HTTPException(503, 'telegram_delivery_storage_failed') from None
+
+
+@app.post('/api/projects/{project_id}/telegram-automatic')
+def configure_telegram_automatic(project_id: int, body: telegram_automatic.AutomaticPolicy, source_key: str | None = None,
+                                 current: User = Depends(require_csrf), db: Session = Depends(get_db)):
+    project = owned_project(project_id, current, db)
+    if source_key and source_key != project.source_key:
+        raise HTTPException(404, 'project_not_found')
+    try:
+        with telegram_pairing.LOCK:
+            result = telegram_automatic.configure(telegram_dispatch.configuration(), current.id, project, body, int(now_utc().timestamp()*1000))
+        telegram_dispatch.service.kick()
+        return result
+    except TelegramError as error:
+        raise HTTPException(error.status, error.code) from None
+    except (OSError, ValueError, telegram_pairing.sqlite3.Error):
+        raise HTTPException(503, 'telegram_delivery_storage_failed') from None
+
+
+@app.get('/api/projects/{project_id}/telegram-reschedules')
+def telegram_reschedule_status(project_id: int, source_key: str | None = None,
+                               current: User = Depends(require_user), db: Session = Depends(get_db)):
+    project = owned_project(project_id, current, db)
+    if source_key and source_key != project.source_key:
+        raise HTTPException(404, 'project_not_found')
+    try:
+        with telegram_pairing.LOCK:
+            return telegram_reschedules.status(telegram_dispatch.configuration(), current.id, project, int(now_utc().timestamp()*1000))
+    except TelegramError as error:
+        raise HTTPException(error.status, error.code) from None
+    except (OSError, ValueError, telegram_pairing.sqlite3.Error):
+        raise HTTPException(503, 'telegram_delivery_storage_failed') from None
+
+
+@app.post('/api/projects/{project_id}/telegram-reschedules')
+def configure_telegram_reschedules(project_id: int, body: telegram_automatic.AutomaticPolicy, source_key: str | None = None,
+                                   current: User = Depends(require_csrf), db: Session = Depends(get_db)):
+    project = owned_project(project_id, current, db)
+    if source_key and source_key != project.source_key:
+        raise HTTPException(404, 'project_not_found')
+    try:
+        with telegram_pairing.LOCK:
+            result = telegram_reschedules.configure(telegram_dispatch.configuration(), current.id, project, body, int(now_utc().timestamp()*1000))
+        telegram_dispatch.service.kick()
+        return result
+    except TelegramError as error:
+        raise HTTPException(error.status, error.code) from None
+    except (OSError, ValueError, telegram_pairing.sqlite3.Error):
+        raise HTTPException(503, 'telegram_delivery_storage_failed') from None
+
+
+@app.post('/api/projects/{project_id}/telegram-deliveries')
+async def create_telegram_delivery(project_id: int, request: Request, source_key: str | None = None,
+                                   current: User = Depends(require_csrf), db: Session = Depends(get_db)):
+    project = owned_project(project_id, current, db)
+    if source_key and source_key != project.source_key:
+        raise HTTPException(404, 'project_not_found')
+    if not is_auction_source(project.source_key):
+        raise HTTPException(400, 'not_an_auction_source')
+    body = await telegram_dispatch.delivery_body(request)
+    def enqueue():
+        with telegram_pairing.LOCK:
+            config = telegram_dispatch.configuration()
+            result = telegram_dispatch.enqueue(config, current, project, db, body, now=now_utc())
+        telegram_dispatch.service.kick()
+        return result
+    try:
+        return await run_in_threadpool(enqueue)
+    except TelegramError as error:
+        raise HTTPException(error.status, error.code) from None
+    except (OSError, ValueError, telegram_pairing.sqlite3.Error):
+        raise HTTPException(503, 'telegram_delivery_storage_failed') from None
+
+@app.get('/api/projects/{project_id}/telegram-history')
+def telegram_delivery_history(project_id: int, source_key: str | None = None,
+                               current: User = Depends(require_user), db: Session = Depends(get_db)):
+    project = owned_project(project_id, current, db)
+    if source_key and source_key != project.source_key:
+        raise HTTPException(404, 'project_not_found')
+    config, issue = telegram_pairing.configuration()
+    if issue:
+        return dict(project_id=project_id, source_key=project.source_key, sent_car_ids=[])
+    try:
+        with telegram_pairing.LOCK:
+            session = telegram_pairing.PairingSession(config, current.id, project.id, telegram_project_scope(project))
+            return dict(project_id=project_id, source_key=project.source_key,
+                sent_car_ids=telegram_dispatch.DeliveryBox(session.box.path).history(current.id, project.id, session.scope))
+    except (OSError, ValueError, telegram_pairing.sqlite3.Error):
+        raise HTTPException(503, 'telegram_delivery_storage_failed') from None
+
+@app.get('/api/projects/{project_id}/telegram-deliveries/{intent_id}')
+def get_telegram_delivery(project_id: int, intent_id: str, source_key: str | None = None,
+                          current: User = Depends(require_user), db: Session = Depends(get_db)):
+    project = owned_project(project_id, current, db)
+    if source_key and source_key != project.source_key:
+        raise HTTPException(404, 'project_not_found')
+    try:
+        with telegram_pairing.LOCK:
+            config = telegram_dispatch.configuration()
+            return telegram_dispatch.read_batch(config, current.id, project, intent_id)
+    except TelegramError as error:
+        raise HTTPException(error.status, error.code) from None
+    except (OSError, ValueError, telegram_pairing.sqlite3.Error):
+        raise HTTPException(503, 'telegram_delivery_storage_failed') from None
+
+@app.post('/api/projects/{project_id}/telegram-deliveries/{intent_id}/cancel')
+def cancel_telegram_delivery(project_id: int, intent_id: str, source_key: str | None = None,
+                             current: User = Depends(require_csrf), db: Session = Depends(get_db)):
+    project = owned_project(project_id, current, db)
+    if source_key and source_key != project.source_key:
+        raise HTTPException(404, 'project_not_found')
+    try:
+        with telegram_pairing.LOCK:
+            return telegram_dispatch.cancel_batch(telegram_dispatch.configuration(), current.id, project, intent_id)
+    except TelegramError as error:
+        raise HTTPException(error.status, error.code) from None
+    except (OSError, ValueError, telegram_pairing.sqlite3.Error):
+        raise HTTPException(503, 'telegram_delivery_storage_failed') from None
+
+
+@app.post('/api/projects/{project_id}/search-selection')
+def update_project_search_selection(project_id: int, body: ProjectSearchSelectionIn,
+                                    current: User = Depends(require_csrf), db: Session = Depends(get_db)):
+    from .desktop_license import SearchEntitlementError, require_search_entitlement
+    from .maintenance import maintenance_active
+    project = owned_project(project_id, current, db)
+    root = selection_root(project.source_key, db)
+    if maintenance_active():
+        raise HTTPException(409, 'desktop_maintenance_active')
+    try:
+        require_search_entitlement(project.source_key)
+    except SearchEntitlementError as exc:
+        raise HTTPException(402, exc.code.lower()) from exc
+    try:
+        selected = search_selections.current(root, current.id, project.source_key, draft_id=body.draft_id)
+        if (not selected or selected['id'] != body.selection_id or selected.get('project_id') != project.id
+                or not selected['can_use'] or selected['status'] != 'CLOSED'
+                or not selected['snapshot'].get('creation_url')):
+            raise ValueError('unconfirmed_selection')
+        source = get_source(project.source_key)
+        config = source.validate_selection_snapshot(selected['snapshot'])
+        url = source.validate_search_url(config['creation_url'])
+    except (OSError, ValueError, KeyError, TypeError, InvalidSourceUrlError):
+        raise HTTPException(409, 'search_selection_changed') from None
+    identity = getattr(source, 'search_identity', lambda _: url_identity_v1(url))(config)
+    with SCAN_COMMAND_LOCK:
+        db.refresh(project)
+        if project.price_filter_revision != body.expected_revision:
+            raise HTTPException(409, 'project_search_changed')
+        active = list(db.scalars(select(ScanRun).where(ScanRun.owner_id == current.id,
+            ScanRun.status.in_(['QUEUED', 'RUNNING', 'CANCEL_REQUESTED']))))
+        if project.id in _busy_project_runs(db, active, {project.id}):
+            raise HTTPException(409, 'project_search_active')
+        project.search_config, project.search_url, project.search_identity = deepcopy(config), url, identity
+        project.price_filter_revision += 1
+        project.updated_at = datetime.now(timezone.utc)
+        try:
+            db.flush()
+            audit(db, 'PROJECT_UPDATED', actor_user_id=current.id, entity_type='PROJECT', entity_id=project.id,
+                  payload={'fields': ['search_config', 'search_url'], 'search_revision': project.price_filter_revision})
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(409, 'project_name_or_url_exists') from None
     return project_out(project, db)
 
 
@@ -1064,6 +1406,8 @@ def patch_project(
 ) -> dict:
     project = owned_project(project_id, current, db)
     changes = body.model_dump(exclude_unset=True)
+    if 'search_url' in changes and project.search_config:
+        raise HTTPException(409, 'search_selection_required')
     next_price_mode = changes.get("price_filter_mode", project.price_filter_mode)
     next_price_minimum = changes.get("price_min_krw", project.price_min_krw)
     next_price_maximum = changes.get("price_max_krw", project.price_max_krw)
@@ -1095,6 +1439,8 @@ def patch_project(
         project.name_key = body.name.strip().casefold()
     if changes_search_conditions:
         project.price_filter_revision += 1
+    if 'search_url' in changes:
+        project.search_identity = url_identity_v1(project.search_url)
     project.updated_at = datetime.now(timezone.utc)
     try:
         db.commit()
@@ -1210,15 +1556,18 @@ def project_auction_lots(
     project_id: int,
     computer_timezone: str = Depends(auction_computer_timezone),
     today_only: bool = False,
+    collection: Literal["active", "today", "future", "undated", "archive"] = "active",
     current: User = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> dict:
     project = owned_project(project_id, current, db)
-    if project.source_key not in {"copart", "iaa"}:
+    if not is_auction_source(project.source_key):
         raise HTTPException(400, "not_an_auction_source")
-    result = project_auction_view(db, project, now=now_utc(), computer_timezone=computer_timezone, today_only=today_only)
+    if today_only and collection not in {"active", "today"}:
+        raise HTTPException(400, "conflicting_auction_collection")
+    result = project_auction_view(db, project, now=now_utc(), computer_timezone=computer_timezone, today_only=today_only, collection=collection)
     for lot in result["lots"]:
-        lot["image"] = (image_payloads(lot["id"], db).get("MAIN") or {}).get("url")
+        lot["image"] = (image_payloads(lot["id"], db).get("MAIN") or {}).get("url") or lot["image"]
     return result
 
 
@@ -1490,10 +1839,10 @@ def car_auction(
     record = get_car_or_404(car_id, db)
     if record.source_key != db.get(Project, relation.project_id).source_key:
         raise HTTPException(404, "project_car_not_found")
-    if record.source_key not in {"copart", "iaa"}:
+    if not is_auction_source(record.source_key):
         raise HTTPException(400, "not_an_auction_source")
     result = single_auction_view(db, car_id, now=now_utc(), computer_timezone=computer_timezone)
-    result["lot"]["image"] = (image_payloads(car_id, db).get("MAIN") or {}).get("url")
+    result["lot"]["image"] = (image_payloads(car_id, db).get("MAIN") or {}).get("url") or result["lot"]["image"]
     return result
 
 
@@ -1730,6 +2079,14 @@ def _busy_project_runs(db: Session, active_runs: list[ScanRun], project_ids: set
 def _enqueue_unlocked(kind: str, payload: dict, owner: User, db: Session) -> dict:
     from .maintenance import maintenance_active
     from .desktop_license import SearchEntitlementError, require_search_entitlement
+    from .source_test_profile import SourceTestModeError, validate_source_test_scan
+
+    try:
+        validate_source_test_scan(settings, kind, payload, database_url=db.get_bind().url)
+    except SourceTestModeError as exc:
+        raise HTTPException(409, exc.code.lower()) from exc
+    if settings.source_test_mode:
+        payload = {**payload, "source_test_mode": True}
 
     if maintenance_active():
         raise HTTPException(409, "desktop_maintenance_active")
@@ -2020,9 +2377,11 @@ def _scan_source_payload(run: ScanRun, db: Session, source_key: str) -> dict:
     return payload
 
 
-def scan_out(run: ScanRun, db: Session, source_key: str | None = None) -> dict:
+def scan_out(run: ScanRun, db: Session, source_key: str | None = None, *, report_car_ids: set[int] | None = None) -> dict:
     payload = dict(run.payload or {}) if source_key is None else _scan_source_payload(run, db, source_key)
     raw_report = list(payload.get("report") or [])
+    if report_car_ids is not None:
+        raw_report = [item for item in raw_report if item.get("car_id") in report_car_ids]
     invalidated_report = [
         item
         for item in raw_report
@@ -2383,6 +2742,7 @@ def scan_projects(
                 "source_key": project.source_key,
                 "name": project.name,
                 "search_url": search_url,
+                "search_config": deepcopy(project.search_config),
                 "scan_mode": project.scan_mode,
                 "search_page_mode": project.search_page_mode,
                 "price_filter_mode": project.price_filter_mode,
@@ -2495,6 +2855,8 @@ def live_events(current: User = Depends(require_user)):
             while True:
                 try:
                     event = subscriber.get(timeout=20)
+                    if event is None:
+                        break
                     yield f"event: scan\ndata: {json.dumps(event)}\n\n"
                 except Empty:
                     yield ": keep-alive\n\n"
@@ -2525,6 +2887,47 @@ def scan(
     if not run:
         raise HTTPException(404, "scan_not_found")
     return scan_out(run, db, source_key)
+
+
+@app.get("/api/scans/{scan_id}/auction-report")
+def auction_report(
+    scan_id: int,
+    source_key: str,
+    car_ids: list[int] = Query(..., min_length=1, max_length=20),
+    computer_timezone: str = Depends(auction_computer_timezone),
+    current: User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    run = db.scalar(select(ScanRun).where(ScanRun.id == scan_id, ScanRun.owner_id == current.id))
+    if not run:
+        raise HTTPException(404, "scan_not_found")
+    if not is_auction_source(source_key):
+        raise HTTPException(400, "not_an_auction_source")
+    report = {item["car_id"]: item for item in scan_out(run, db, source_key, report_car_ids=set(car_ids))["payload"].get("report", [])}
+    requested = list(dict.fromkeys(car_ids))
+    if any(car_id not in report for car_id in requested):
+        raise HTTPException(404, "report_car_not_found")
+    snapshot_ids = {item.get("after_snapshot_id") for item in report.values()
+                    if item["car_id"] in requested and type(item.get("after_snapshot_id")) is int}
+    snapshots = {snapshot.id: snapshot for snapshot in db.scalars(select(CarSnapshot).where(CarSnapshot.id.in_(snapshot_ids)))}
+    observations = {observation.car_id: observation.round_id for observation in db.scalars(select(AuctionObservation).where(
+        AuctionObservation.car_id.in_(requested),
+        AuctionObservation.observation_key.in_([f"scan:{scan_id}:{car_id}" for car_id in requested])))
+        if observation.observation_key == f"scan:{scan_id}:{observation.car_id}"}
+    items = []
+    for car_id in requested:
+        item, view = report[car_id], None
+        snapshot_id = item.get("after_snapshot_id")
+        try:
+            view = report_snapshot_view(snapshots.get(snapshot_id) if type(snapshot_id) is int else None, item,
+                scan_id=scan_id, source_key=source_key, computer_timezone=computer_timezone,
+                captured_round_id=observations.get(car_id))
+        except (ValueError, TypeError, KeyError, OverflowError):
+            pass  # A missing/corrupt historical observation must never become today's Car.
+        items.append(dict(car_id=car_id, snapshot_id=snapshot_id if view else None,
+                          recorded_at=view["generated_at"] if view else None,
+                          view=view, issue=None if view else "SNAPSHOT_UNAVAILABLE"))
+    return dict(scan_id=scan_id, source_key=source_key, computer_timezone=computer_timezone, items=items)
 
 
 @app.post("/api/scans/{scan_id}/cancel", status_code=202)

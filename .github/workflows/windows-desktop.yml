@@ -3,6 +3,11 @@ name: Windows desktop pilot
 on:
   workflow_dispatch:
     inputs:
+      auction_preview:
+        description: "Use isolated auction preview data and the staging Telegram relay"
+        required: false
+        default: false
+        type: boolean
       include_diagnostic_standalone:
         description: "Also compile and check the slow standalone diagnostic sidecar"
         required: false
@@ -78,8 +83,11 @@ jobs:
           $testDatabase = Join-Path $env:RUNNER_TEMP "searchcar-tests.sqlite3"
           $env:DATABASE_URL = "sqlite+pysqlite:///$($testDatabase.Replace('\', '/'))"
           python -m pytest backend/tests -q
+          if ($LASTEXITCODE -ne 0) { throw "Backend tests failed" }
           pnpm build
+          if ($LASTEXITCODE -ne 0) { throw "Frontend build failed" }
           pnpm test
+          if ($LASTEXITCODE -ne 0) { throw "Frontend tests failed" }
           pnpm desktop:frontend:build
 
       - name: Prepare browser and external Playwright driver
@@ -155,6 +163,21 @@ jobs:
             -RuntimeRoot "$env:RUNNER_TEMP/searchcar-compiled-smoke" `
             -OutputDir "work/windows-smoke"
 
+      - name: Verify compiled navigation and bundled auction time
+        run: python scripts/compiled_navigation_smoke.py --sidecar desktop/src-tauri/binaries/searchcar-core-x86_64-pc-windows-msvc.exe --report-dir work/windows-smoke
+
+      - name: Upload compiled navigation and auction-time evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-navigation-windows
+          path: |
+            work/windows-smoke/compiled-navigation.*
+            work/windows-smoke/compiled-auction-time.json
+            work/windows-smoke/navigation-*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Verify updater signing secrets
         shell: pwsh
         env:
@@ -171,6 +194,8 @@ jobs:
       - name: Build unsigned offline NSIS installer and updater signature
         shell: pwsh
         env:
+          SEARCHCAR_SOURCE_TEST_MODE: ${{ inputs.auction_preview && '1' || '0' }}
+          SEARCHCAR_TELEGRAM_DELIVERY_PREVIEW: ${{ inputs.auction_preview && '1' || '0' }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
@@ -244,6 +269,7 @@ jobs:
             target = "x86_64-pc-windows-msvc"
             os_code_signed = $false
             updater_signed = $true
+            auction_preview = '${{ inputs.auction_preview }}' -eq 'true'
           }
           $summary | ConvertTo-Json | Set-Content `
             "work/windows-smoke/installer.json" -Encoding utf8

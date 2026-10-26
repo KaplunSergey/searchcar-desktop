@@ -271,7 +271,7 @@ def _scoped_source_identity(connection: Connection) -> None:
         _rebuild_source_table(connection, table)
 
 
-def _backup_source_identity(connection: Connection, engine: Engine) -> None:
+def _backup_source_identity(connection: Connection, engine: Engine, *, label='source-identity') -> None:
     database = engine.url.database
     if not database or database == ":memory:" or not inspect(connection).has_table("cars"):
         return
@@ -281,7 +281,7 @@ def _backup_source_identity(connection: Connection, engine: Engine) -> None:
     size = connection.exec_driver_sql("PRAGMA page_count").scalar_one() * connection.exec_driver_sql("PRAGMA page_size").scalar_one()
     if shutil.disk_usage(path.parent).free < size * 4 + 1024 * 1024:
         raise RuntimeError("source_identity_migration_insufficient_disk_space")
-    backup = path.with_name(f"{path.stem}.pre-source-identity-{uuid4().hex}.sqlite3")
+    backup = path.with_name(f"{path.stem}.pre-{label}-{uuid4().hex}.sqlite3")
     backup.touch(mode=0o600, exist_ok=False)
     # A separate reader sees the committed pre-migration state under our write lock.
     _online_sqlite_backup(path, backup)
@@ -302,6 +302,42 @@ def _auction_rounds(connection: Connection) -> None:
     migrate_auctions_v1(connection)
 
 
+def _project_search_config(connection: Connection) -> None:
+    from .search_identity import url_identity_v1
+    if connection.exec_driver_sql('PRAGMA foreign_keys').scalar_one():
+        raise RuntimeError('project_search_rebuild_requires_foreign_keys_off_before_transaction')
+    _add_column_if_missing(connection, 'projects', 'search_config', 'JSON')
+    _add_column_if_missing(connection, 'projects', 'search_identity', "VARCHAR(64) NOT NULL DEFAULT ''")
+    for row in connection.execute(text("SELECT id, search_url FROM projects WHERE search_identity = ''")):
+        connection.execute(text('UPDATE projects SET search_identity=:identity WHERE id=:id'),
+                           {'id': row.id, 'identity': url_identity_v1(row.search_url)})
+    metadata = MetaData()
+    original = Table('projects', metadata, autoload_with=connection)
+    replacement = original.to_metadata(metadata, name='projects__search_config')
+    obsolete_columns = ('owner_id', 'source_key', 'search_url')
+    for constraint in list(replacement.constraints):
+        if isinstance(constraint, UniqueConstraint) and tuple(c.name for c in constraint.columns) == obsolete_columns:
+            replacement.constraints.remove(constraint)
+    if not any(c.name == 'uq_projects_owner_source_search_identity' for c in replacement.constraints):
+        replacement.append_constraint(UniqueConstraint('owner_id', 'source_key', 'search_identity', name='uq_projects_owner_source_search_identity'))
+    replacement.c.search_identity.server_default = None
+    objects = connection.execute(text("SELECT type, name, sql FROM sqlite_master WHERE tbl_name='projects' AND type IN ('index','trigger') AND sql IS NOT NULL")).all()
+    quote = connection.dialect.identifier_preparer.quote_identifier
+    obsolete_indexes = set()
+    for index in connection.exec_driver_sql('PRAGMA index_list("projects")'):
+        columns = tuple(row[2] for row in connection.exec_driver_sql(f'PRAGMA index_info({quote(index[1])})'))
+        if index[2] and columns == obsolete_columns:
+            obsolete_indexes.add(index[1])
+    connection.execute(CreateTable(replacement))
+    columns = ', '.join(quote(c.name) for c in original.columns)
+    connection.exec_driver_sql(f'INSERT INTO projects__search_config ({columns}) SELECT {columns} FROM projects')
+    connection.exec_driver_sql('DROP TABLE projects')
+    connection.exec_driver_sql('ALTER TABLE projects__search_config RENAME TO projects')
+    for kind, name, sql in objects:
+        if kind != 'index' or name not in obsolete_indexes:
+            connection.exec_driver_sql(sql)
+
+
 MIGRATIONS = (
     SQLiteMigration(1, "current_web_schema_baseline", _baseline),
     SQLiteMigration(2, "durable_single_worker_scan_queue", _durable_scan_queue),
@@ -314,6 +350,7 @@ MIGRATIONS = (
     SQLiteMigration(9, "source_scoped_identity", _scoped_source_identity),
     SQLiteMigration(10, "typed_money_values", _typed_money_values),
     SQLiteMigration(11, "auction_rounds_and_schedule_history", _auction_rounds),
+    SQLiteMigration(12, "project_public_search_config", _project_search_config),
 )
 
 
@@ -342,11 +379,9 @@ def migrate_sqlite(engine: Engine) -> int:
         raise ValueError("desktop_sqlite_migrations_require_sqlite")
 
     with engine.connect() as connection:
-        needs_rebuild = any(item.version == 9 for item in MIGRATIONS) and (
-            not inspect(connection).has_table("desktop_schema_migrations") or not connection.execute(
-                text("SELECT 1 FROM desktop_schema_migrations WHERE version = 9")
-            ).first()
-        )
+        applied_versions = set(connection.execute(text('SELECT version FROM desktop_schema_migrations')).scalars()) if inspect(connection).has_table('desktop_schema_migrations') else set()
+        rebuild_versions = {9, 12} & {migration.version for migration in MIGRATIONS}
+        needs_rebuild = bool(rebuild_versions - applied_versions)
         connection.rollback()
         if needs_rebuild:
             # SQLite ignores this PRAGMA inside a transaction. Disable only on
@@ -364,8 +399,8 @@ def migrate_sqlite(engine: Engine) -> int:
                     )
                 )
             }
-            if needs_rebuild and 9 not in applied:
-                _backup_source_identity(connection, engine)
+            if needs_rebuild and rebuild_versions - applied.keys():
+                _backup_source_identity(connection, engine, label='source-identity' if 9 not in applied else 'project-search-config')
             for migration in MIGRATIONS:
                 existing = applied.get(migration.version)
                 if existing:

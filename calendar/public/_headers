@@ -1,0 +1,12 @@
+/*
+  Referrer-Policy: no-referrer
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  X-Robots-Tag: noindex, nofollow
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-ancestors 'none'
+
+/SearchCar%20Reminder.shortcut
+  Content-Type: application/x-apple.shortcut
+  Content-Disposition: inline; filename="SearchCar Reminder.shortcut"
+  Cache-Control: no-store

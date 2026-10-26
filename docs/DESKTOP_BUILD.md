@@ -108,6 +108,63 @@ The launcher calls `scripts/build_mac_fixed.command` to rebuild the sidecar and
 Tauri shell, then installs `SearchCar Desktop Fixed.app`. The previous app
 bundle is retained with a UTC timestamp instead of being deleted.
 
+The local macOS launcher builds the auction preview by default. It embeds
+`SEARCHCAR_SOURCE_TEST_MODE=1` in the native shell, which passes
+`--source-test-mode` to the sidecar even when Finder supplies no environment.
+Both native license preflight and the backend use the existing
+`<app-data>/source-tests` profile. This keeps its projects, captured filters,
+storage and device binding together. Nothing is copied or merged into the
+ordinary profile. Set `SEARCHCAR_SOURCE_TEST_MODE=0` on the local launcher
+to deliberately build the ordinary profile. For a direct Tauri invocation,
+set `SEARCHCAR_SOURCE_TEST_MODE=1` on that build command for an auction preview;
+the sidecar itself supports both profiles. Production CI retains its ordinary
+profile unless explicitly configured otherwise.
+
+For Windows CI, dispatch `windows-desktop.yml` with `auction_preview=true`
+to build this isolated profile with the staging Telegram delivery pilot.
+The option defaults to false and is applied only when compiling the native
+shell, not to the test suite. `installer.json` records the selected profile.
+This dispatch produces test artifacts only; it does not publish a release.
+
+The preview's existing native `--source-test-mode` flag also pins the sidecar's
+Telegram origin to `https://searchcar-telegram-relay-staging.mapatar23.workers.dev`
+and forces `SEARCHCAR_TELEGRAM_DELIVERY_ENABLED=0`, overriding inherited values.
+It enables `SEARCHCAR_TELEGRAM_CHAT_PAIRING_ENABLED=1` only in that preview so
+private, group and channel recipient binding can be tested against staging.
+This works from Finder without custom shell variables and bundles no bot secret.
+Ordinary-profile builds retain their existing trusted configuration; this does
+not set a production relay default or enable message delivery. Source tests and
+compiled preview acceptance cover missing/synthetic device binding, cached
+recipient reads, and delivery staying off without contacting Telegram. A real
+Start/check/confirm flow still needs explicit interactive acceptance.
+
+For the separately authorized manual-delivery pilot, compile the native shell
+with both `SEARCHCAR_SOURCE_TEST_MODE=1` and
+`SEARCHCAR_TELEGRAM_DELIVERY_PREVIEW=1`. The shell passes the explicit
+`--telegram-delivery-preview` flag to the sidecar, enabling the local dispatcher
+against the pinned staging relay in the existing source-tests profile. The
+25 October candidate also supports automatic Today posting through that dispatcher,
+but only after a separate per-project opt-in (default OFF) and the next fully
+successful search. Schedule-change notices have a separate per-project option,
+default ON: they require a confirmed initial publication to that recipient before
+the observed change and a new fully successful search. Enabling or reconnecting
+does not replay historical changes. Without
+that extra build flag, the pairing preview still forces delivery off; the
+sidecar rejects the delivery-preview flag outside source-test mode. Production
+defaults are unchanged. Connecting a recipient does not publish a vehicle's
+initial message. With Today OFF, initial publications require an explicit
+single-car/bulk action; schedule-change notices follow their independent setting.
+With Today ON, the local dispatcher can recover fresh work from a committed full
+successful run; any incomplete/cancelled project suppresses that whole run.
+Queue work
+continues while the app is open. The staging relay must independently enable
+delivery; this does not distribute a bot secret or add a server scheduler.
+
+An auction preview acceptance check must open a previously populated profile,
+verify its projects remain visible, verify Copart and IAA have `can_search=true`,
+and create a project in disposable data. A successful `/api/health` alone does
+not verify the selected profile or auction availability.
+
 GitHub Actions builds are split by native platform:
 
 - `macos-desktop.yml` produces an ad-hoc-signed Apple Silicon `.app` zip;
@@ -172,7 +229,12 @@ The Windows onefile payload uses a product-version and payload-fingerprint
 directory below the current user's cache and validates the cached files before
 reuse. The fingerprint prevents two pilot commits with the same visible
 product version from trying to overwrite DLLs that an older installed or
-orphaned sidecar still has open. The first `check` invocation primes that
+orphaned sidecar still has open. The shared source metadata file
+`backend/app/sources/catalog.json` is explicitly bundled as
+`app/sources/catalog.json` and included in that fingerprint. Adding a source
+must invalidate the cached payload even when the visible version is unchanged.
+Verify catalog loading from the actual compiled sidecar, not only Python source
+or the command-construction tests, before publishing. The first `check` invocation primes that
 cache; the Chromium check and server startup no longer extract the same runtime
 into disposable directories again. Inner onefile
 compression is disabled to keep the initial extraction predictable while the
@@ -204,6 +266,31 @@ The pilot build is intentionally unsigned. Production release automation will
 add platform signing and updater signatures in a later milestone.
 
 ## Required smoke tests
+
+### Auction workspace UI (local fixtures)
+
+Run `pnpm desktop:frontend:dev`, then in a separate terminal:
+
+```bash
+.desktop-build-venv/bin/python scripts/auction_workspace_ui_smoke.py \
+  --base-url http://127.0.0.1:1420/ \
+  --report-dir work/auction-ui-smoke
+```
+
+This uses the existing bundled Playwright runtime and real frontend, but all
+API/media responses are fixtures. It checks create-to-queue behavior, denied
+search/queue failure, photo preview/keyboard focus, captured conditions and
+explicit confirmation, incomplete-selection protection, IAA replay gating and
+responsive project/form layout. JSON results/screenshots go to the report folder.
+No user database, activation, live auction or Telegram requests are used.
+This is browser UI evidence, not a native installed-app or live-source check.
+
+The selection transport also has an opt-in bundled Chromium fixture test:
+from `backend/`, with disposable `STORAGE_ROOT` and `DATABASE_URL`, run
+`RUN_SOURCE_SELECTION_BROWSER=1 ../.desktop-build-venv/bin/python -m pytest -q tests/test_source_selection_browser.py tests/test_source_selection_checkbox_browser.py`.
+All IAA/Copart responses are intercepted; this checks real browser request
+events, checkbox/label/keyboard activation, duplicate events, pending/stale
+requests, edits and closing, not current live-site access or native Windows.
 
 ### Windows update installation continuity
 
@@ -257,6 +344,12 @@ or installed-app smoke and not live Copart/IAA access. See
 - closing the desktop process asks active work to cancel cooperatively, waits
   for the partial report to be committed and then terminates the sidecar;
 - Encar and Telegram links open in the operating-system browser.
+- complete native close/relaunch restores the last section of every site,
+  including project/car IDs and application settings. Test across different
+  localhost ports: native startup uses an ephemeral port, so reloading the same
+  origin is insufficient. Desktop navigation is stored per authenticated owner
+  in `ui/workspace-{user_id}.json` under the data directory, not only localStorage;
+  a write failure must be visible and preserve the previous valid snapshot.
 
 On an Apple Silicon build machine, run the compiled smoke scenario with:
 
@@ -288,6 +381,46 @@ frontend footprint plus elapsed smoke time. The Windows workflow also writes
 size and cold/warm startup time manually on each clean pilot machine because
 CI unpack time is not representative of a customer computer.
 
+Both workflows also run compiled navigation and auction-time acceptance after compilation:
+
+```bash
+python scripts/compiled_navigation_smoke.py \
+  --sidecar desktop/src-tauri/binaries/searchcar-core-aarch64-apple-darwin \
+  --frontend desktop/dist \
+  --report-dir work/macos-smoke
+```
+
+On Windows use `searchcar-core-x86_64-pc-windows-msvc.exe` and
+`work/windows-smoke`. To check the packaged macOS resources, pass
+`<app>/Contents/MacOS/searchcar-core` and `<app>/Contents/Resources/desktop-ui`.
+Use the build Python environment containing pytest/backend dependencies.
+The runner owns disposable SQLite/storage and test owner, starts the compiled
+HTTP stack three times on different localhost ports and verifies catalog
+validation, protected bootstrap, CSRF, saved per-site routes and zero jobs.
+Another disposable process checks the auction read API using bundled timezone
+data with `PYTHONTZPATH=""` and without external `PYTHONPATH`/`PYTHONHOME`.
+Fixed independent expectations cover UTC/Warsaw/Los Angeles/Tokyo across US
+spring/fall DST transitions; START/END/UNKNOWN, date-only, unconfirmed CST,
+today filtering and unchanged rounds/statuses are also checked. An open SSE
+subscription is held through each shutdown. This runner checks compiled
+projections, not a source adapter's parsing or a real OS timezone/wake change.
+It never uses the installed application's data, accesses live sources or
+sends Telegram messages. `compiled-navigation.json`, `compiled-auction-time.json`, JUnit XML and
+startup logs are uploaded separately, even if a later build step fails.
+Success JSON markers from earlier runs are removed before validation/testing;
+failures retain their original logs/JUnit instead of presenting stale green.
+Unrelated reports are preserved. These tests are opt-in and skipped in the ordinary backend suite.
+This proves compiled HTTP behavior, not native WebView or installed-app behavior.
+
+Product TypeScript checks exclude disposable `work/` build outputs. Nuitka may
+recreate Playwright driver declarations there during compilation; these are not
+product sources and must not enter `tsc --noEmit`. The real app and desktop
+frontend remain covered; `tests/typecheck-scope.test.mjs` verifies that boundary.
+The license and Telegram Workers also have separate TypeScript programs so their
+generated runtime globals cannot override browser DOM types. Both remain checked
+through their own targets; the root web Worker owns its lightweight D1 contract
+instead of relying on a license-service declaration leaking into the frontend.
+
 The current local Apple Silicon build inputs are approximately 236 MB unpacked
 (about 179 MB browser, 54 MB onefile sidecar and 3 MB frontend). Treat this only
 as an engineering baseline: the installer is compressed and exact figures are
@@ -307,6 +440,43 @@ retains already processed cars in the report. The native shell waits up to 40
 seconds and uses force-kill only if cooperative shutdown does not finish; the
 next start then recovers any remaining active record as interrupted. Closing
 the window no longer keeps background scheduling alive implicitly.
+
+Desktop shutdown explicitly ends every live `/api/events` subscription,
+including a full subscriber queue, before waiting for the scan worker. Late
+publishes cannot replace that end marker and new subscriptions finish immediately.
+This prevents the native window and HTTP server waiting for each other to close.
+The worker's 35-second persistence grace remains unchanged; HTTP draining has
+its own 2-second safety bound. An idle exit should not consume the native
+40-second fallback. `backend/tests/test_desktop_shutdown.py` checks a real
+source-runtime server with the SSE connection held open until after process exit,
+data lock release, and cooperative partial-report persistence on disposable data.
+Compiled navigation acceptance also keeps SSE open across each shutdown.
+These tests do not replace installed macOS/Windows GUI acceptance.
+
+### Local API contention and error recovery
+
+Authentication activity timestamps are best-effort. A busy SQLite writer must
+not turn otherwise valid project/status reads into failures or wait five seconds
+for an optional activity update. Only SQLite BUSY/LOCKED is skipped; expiry,
+revocation, account status and CSRF checks remain mandatory. Other storage
+failures are not hidden.
+
+The desktop session guard and request logger use direct ASGI wrappers, avoiding
+the compiled `BaseHTTPMiddleware` exception-group generator seen in the macOS
+25 October crash report. `test_auth_contention.py` covers real file-backed
+contention and access controls; `test_http_stack.py` covers guard, logging and
+streaming contracts. Compiled navigation acceptance also holds a real writer
+lock while reading projects/status/runtime, then separately exercises 3,000
+concurrent healthy/500 requests on a deliberately broken disposable schema.
+The service must recover after schema repair and shut down with SSE still open.
+Passing this stress test is not a guarantee against every native crash.
+
+The frontend's runtime probe has a bounded timeout. Losing the previously
+connected desktop service marks the worker unavailable, makes the active count
+unknown, disables the global new-search button and offers an explicit connection
+recheck without starting another scan. Cached projects remain visible. The
+`backend disconnection` scenario in the existing auction UI fixture runner
+checks loss/recovery in RU/UK at desktop widths without using customer data.
 
 ## Background scheduler and tray checks
 

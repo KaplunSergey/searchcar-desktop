@@ -41,7 +41,8 @@ def legacy_rows(engine):
     with engine.connect() as connection:
         # Compare logical values, not physical column order or SQLite's optional
         # datetime fractional suffix/JSON-null representation after conversion.
-        return {name: connection.execute(select(Base.metadata.tables[name]).order_by(
+        return {name: connection.execute(select(*[column for column in Base.metadata.tables[name].columns
+            if column.name not in ('search_config', 'search_identity')]).order_by(
             *Base.metadata.tables[name].primary_key.columns)).mappings().all()
             for name in ("cars", "car_snapshots", "price_history", "projects", "project_cars", "car_aliases")}
 
@@ -49,8 +50,8 @@ def legacy_rows(engine):
 def test_v11_is_additive_idempotent_and_does_not_invent_encar_rounds(tmp_path, monkeypatch):
     engine = v10_database(tmp_path, monkeypatch)
     before = legacy_rows(engine)
-    assert sqlite_migrations.migrate_sqlite(engine) == 11
-    assert sqlite_migrations.migrate_sqlite(engine) == 11
+    assert sqlite_migrations.migrate_sqlite(engine) == sqlite_migrations.MIGRATIONS[-1].version
+    assert sqlite_migrations.migrate_sqlite(engine) == sqlite_migrations.MIGRATIONS[-1].version
     assert legacy_rows(engine) == before
     with engine.connect() as connection:
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
@@ -76,7 +77,7 @@ def test_failed_v11_rolls_back_all_new_tables_and_keeps_v10_data(tmp_path, monke
     with engine.connect() as connection:
         assert not set(TABLES) & set(inspect(connection).get_table_names())
         assert connection.exec_driver_sql("SELECT MAX(version) FROM desktop_schema_migrations").scalar_one() == 10
-    assert sqlite_migrations.migrate_sqlite(engine) == 11
+    assert sqlite_migrations.migrate_sqlite(engine) == sqlite_migrations.MIGRATIONS[-1].version
 
 
 def test_alembic_additive_upgrade_and_guarded_downgrade(tmp_path, monkeypatch):
@@ -147,12 +148,12 @@ def test_rounds_observations_and_event_ids_survive_backup_and_read_only_conversi
         assert report.source_counts == report.target_counts
     assert legacy_rows(engine) == before
     validation = validate_backup(archive)
-    assert validation.schema_version == 11
+    assert validation.schema_version == sqlite_migrations.MIGRATIONS[-1].version
     assert [validation.table_counts[name] for name in TABLES] == [4, 6, 6]
     target = tmp_path / "restored.sqlite3"
     restore_backup(archive, target, tmp_path / "restored-storage", tmp_path / "backups")
     restored = create_database_engine(f"sqlite+pysqlite:///{target}")
-    assert sqlite_migrations.migrate_sqlite(restored) == 11
+    assert sqlite_migrations.migrate_sqlite(restored) == sqlite_migrations.MIGRATIONS[-1].version
     assert legacy_rows(restored) == before
     with restored.connect() as connection:
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []

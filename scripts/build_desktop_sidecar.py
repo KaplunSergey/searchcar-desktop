@@ -59,6 +59,7 @@ def sidecar_source_fingerprint() -> str:
     backend_root = REPOSITORY_ROOT / "backend"
     inputs = [
         *backend_root.joinpath("app").rglob("*.py"),
+        backend_root / "app" / "sources" / "catalog.json",
         *backend_root.joinpath("alembic").rglob("*.py"),
         backend_root / "alembic.ini",
         backend_root / "alembic" / "script.py.mako",
@@ -119,6 +120,7 @@ def build(mode: str) -> dict[str, object]:
         f"--report={report_path}",
         f"--output-filename={binary_name}",
         "--include-package=app",
+        f"--include-data-files={REPOSITORY_ROOT / 'backend/app/sources/catalog.json'}=app/sources/catalog.json",
         "--include-package=pwdlib",
         "--include-package=argon2",
         "--include-package=_argon2_cffi_bindings",
@@ -136,25 +138,40 @@ def build(mode: str) -> dict[str, object]:
     ]
     onefile_policy: dict[str, str | bool] = {}
     if mode == "onefile":
-        # The default Nuitka onefile policy extracts into a disposable
-        # temporary directory. macOS can purge that directory while SearchCar
-        # is still open, leaving Playwright without its Python package data.
-        # A versioned cache makes the payload durable for the sidecar's whole
-        # lifetime and safely separates pilot builds with the same version.
         cache_fingerprint = sidecar_source_fingerprint()
-        cache_spec = (
-            "{CACHE_DIR}/SearchCar/searchcar-core/"
-            + product_version()
-            + "-"
-            + cache_fingerprint
-        )
         command.remove("--remove-output")
+        if platform.system() == "Darwin":
+            # A persistent onefile extraction can be left locked by a killed
+            # macOS app (or by an older pilot build with the same visible
+            # version). The Nuitka stub then hangs before it can start Python,
+            # and Tauri reports the generic "local service terminated" error.
+            # Use a unique disposable directory on macOS; the Playwright
+            # driver and browsers are bundled Tauri resources, so they do not
+            # depend on Nuitka's extraction directory surviving a later run.
+            cache_spec = (
+                "{TEMP}/SearchCar/searchcar-core/"
+                + product_version()
+                + "-"
+                + cache_fingerprint
+                + "-{PID}-{RANDOM}"
+            )
+            cache_mode = "temporary"
+        else:
+            # Keep the durable, fingerprinted extraction for Windows where it
+            # avoids a costly first start without the macOS stale-lock issue.
+            cache_spec = (
+                "{CACHE_DIR}/SearchCar/searchcar-core/"
+                + product_version()
+                + "-"
+                + cache_fingerprint
+            )
+            cache_mode = "cached"
         command[3:3] = [
-            "--onefile-cache-mode=cached",
+            f"--onefile-cache-mode={cache_mode}",
             f"--onefile-tempdir-spec={cache_spec}",
         ]
         onefile_policy = {
-            "onefile_cache_mode": "cached",
+            "onefile_cache_mode": cache_mode,
             "onefile_cache_spec": cache_spec,
             "onefile_cache_fingerprint": cache_fingerprint,
         }

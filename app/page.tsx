@@ -1,6 +1,8 @@
 "use client";
 
-import { ActivityDialog, cancellationBody, type CancellationTarget } from "./activity-dialog";
+import { ActivityDialog, activityProjects, cancellationBody, type CancellationTarget } from "./activity-dialog";
+import { TelegramSettings } from "./telegram-settings";
+import { TelegramAutomaticClock } from "./telegram-automatic";
 
 import {
   QueryClient,
@@ -24,9 +26,11 @@ import { filterReportItems, reportProjectIds } from "./report-filter";
 import { formatSeatCount, translateOptionCode, translateVehicleSpec } from "./vehicle-dictionary";
 import { APP_VERSION } from "./version";
 import { AUCTION_QUERY_KEY, watchAuctionClock, withAuctionTimeZone } from "./auction-time-client";
-import { initialWorkspace, normalizeRoute, sourceRead, workspaceUrl, SITE_NAMES, WORKSPACE_STORAGE_KEY, type SourceKey, type View, type WorkspaceRoute } from "./source-workspace";
-import { SourceNavigation, SourceUnavailable, SourceContextMismatch, SourceAvailabilityNotice, sourceAvailability } from "./source-navigation";
+import { initialWorkspace, initialSiteRoutes, persistWorkspace, normalizeRoute, sourceRead, workspaceUrl, type SourceKey, type View } from "./source-workspace";
+import { SourceNavigation, SourceContextMismatch, SourceAvailabilityNotice, sourceAvailability } from "./source-navigation";
 import { LaunchDialog, launchSummary, reasonText, type LaunchOptions, type LaunchResult } from "./launch-dialog";
+import { SOURCE_CATALOG, SourceCatalogContext, sourceDefinition, sourceName, type SourceCatalog } from "./source-catalog";
+import { WORKSPACE_MODULES, MissingWorkspace, type WorkspaceModules } from "./source-modules";
 
 type Translate = (key: Key) => string;
 type AuthUser = {
@@ -41,6 +45,7 @@ type AuthUser = {
   must_change_password: boolean;
   passwordless_workspace?: boolean;
   preferred_locale: Locale;
+  workspace?: string | null;
   created_at: string;
   updated_at: string;
   last_login_at?: string | null;
@@ -84,6 +89,8 @@ type ProjectRecord = {
   auto_update: boolean;
   cars: number;
   updated_at: string;
+  created_at?: string | null;
+  last_refreshed_at?: string | null;
   latest_scan?: LatestScan | null;
 };
 type PriceChange = {
@@ -192,6 +199,7 @@ type ScanRecord = {
         found_count: number;
         total_results?: number | null;
         complete: boolean;
+        interaction?: { state: string; source_key?: string; reason?: string; expires_at?: string } | null;
       }
     >;
     detail_progress?: Record<
@@ -330,6 +338,8 @@ type DesktopMigrationReport = {
 type DesktopRuntimeInfo = {
   desktop: boolean;
   updater: boolean;
+  source_test_mode?: boolean;
+  telegram_delivery_enabled?: boolean;
   update_status?: {
     state: "idle" | "checking" | "available" | "preparing" | "downloading" | "retrying" | "installing" | "failed";
     progress?: number | null;
@@ -366,9 +376,14 @@ class ApiError extends Error {
   }
 }
 
-function responseErrorCode(body: string): string | undefined {
+export function responseErrorCode(body: string): string | undefined {
   try {
     const parsed = JSON.parse(body) as unknown;
+    if (parsed && typeof parsed === "object" && "detail" in parsed && Array.isArray(parsed.detail)
+      && parsed.detail.some((issue: unknown) => issue && typeof issue === "object" && "loc" in issue
+        && Array.isArray(issue.loc) && issue.loc.at(-1) === "search_url")) {
+      return "invalid_source_search_url";
+    }
     if (
       parsed &&
       typeof parsed === "object" &&
@@ -613,21 +628,32 @@ function carStatusText(status: string, t: Translate) {
   return keys[status] ? t(keys[status]) : t("updated");
 }
 
+const telegramClockWrite = <T,>(path: string, body: unknown) => request<T>(path, { method: "POST", body: JSON.stringify(body) });
+
 export function App({
   currentUser,
   onSessionChanged,
+  sourceCatalog = SOURCE_CATALOG,
+  workspaceModules = WORKSPACE_MODULES,
 }: {
   currentUser: AuthUser;
   onSessionChanged: () => void;
+  sourceCatalog?: SourceCatalog;
+  workspaceModules?: WorkspaceModules;
 }) {
   const client = useQueryClient();
   useEffect(() => watchAuctionClock(() => {
     void client.invalidateQueries({ queryKey: AUCTION_QUERY_KEY });
   }), [client]);
   const [locale, setLocale] = useState<Locale>(currentUser.preferred_locale || "ru");
-  const [route, setRoute] = useState(initialWorkspace);
+  const [route, setRoute] = useState(() => initialWorkspace(currentUser.workspace, sourceCatalog));
+  const [sectionVisit, setSectionVisit] = useState(0);
   const { source, view, projectId: activeProjectId, carId: activeCarId } = route;
-  const lastRoutes = useRef<Partial<Record<SourceKey, WorkspaceRoute>>>({ [source]: route });
+  const [restoredRoutes] = useState(() => initialSiteRoutes(route, currentUser.workspace, sourceCatalog));
+  const lastRoutes = useRef(restoredRoutes);
+  const workspaceSnapshot = useRef(currentUser.workspace);
+  const workspaceWrites = useRef<Promise<unknown>>(Promise.resolve());
+  const [workspaceSaveError, setWorkspaceSaveError] = useState(false);
   const [toast, setToast] = useState("");
   const [selections, setSelections] = useState<Partial<Record<SourceKey, number[]>>>({});
   const selected = selections[source] || [];
@@ -666,16 +692,16 @@ export function App({
   const scansQuery = useQuery<ScanRecord[]>({
     queryKey: scanRead.queryKey,
     queryFn: () => request(scanRead.path),
-    refetchInterval: 30_000,
+    refetchInterval: (query) => query.state.data?.some((run) => ["QUEUED", "RUNNING", "CANCEL_REQUESTED"].includes(run.status)) ? 5000 : 30_000,
   });
   const allScansQuery = useQuery<ScanRecord[]>({
     queryKey: ["scans", "active"],
     queryFn: () => request("/scans/active"),
-    refetchInterval: showActivity ? 5000 : 30_000,
+    refetchInterval: 5000,
   });
   const launchOptionsQuery = useQuery<LaunchOptions>({
     queryKey: ["launch-options"], queryFn: () => request("/scans/launch-options"),
-    refetchInterval: showLaunch ? 5000 : 30_000,
+    refetchInterval: (query) => showLaunch || query.state.data?.projects.some((project) => project.active_status) ? 5000 : 30_000,
     refetchOnWindowFocus: true,
     retry: false, staleTime: 0,
   });
@@ -690,11 +716,13 @@ export function App({
   });
   const desktopRuntimeQuery = useQuery<DesktopRuntimeInfo>({
     queryKey: ["desktop-runtime"],
-    queryFn: () => request("/desktop/runtime"),
+    queryFn: () => request("/desktop/runtime", { signal: AbortSignal.timeout(3000) }),
     retry: false,
     staleTime: Number.POSITIVE_INFINITY,
     refetchInterval: (query) => query.state.data?.desktop ? 1000 : false,
   });
+  const backendDisconnected = desktopRuntimeQuery.isError && desktopRuntimeQuery.data?.desktop === true;
+  const workerUnavailable = backendDisconnected || projectsQuery.isError || allScansQuery.isError;
   const updateState = desktopRuntimeQuery.data?.update_status?.state || "idle";
   const updateBusy = ["checking", "available", "preparing", "downloading", "retrying", "installing"].includes(updateState);
   const updateProgress = desktopRuntimeQuery.data?.update_status?.progress;
@@ -739,6 +767,7 @@ export function App({
         void client.invalidateQueries({ queryKey: ["scans"] });
         void client.invalidateQueries({ queryKey: ["projects"] });
         void client.invalidateQueries({ queryKey: ["launch-options"] });
+        void client.invalidateQueries({ queryKey: AUCTION_QUERY_KEY });
       }, 100);
     };
     events.addEventListener("scan", refresh);
@@ -750,19 +779,25 @@ export function App({
   }, [client]);
 
   useEffect(() => {
-    const initial = initialWorkspace();
+    const initial = initialWorkspace(currentUser.workspace, sourceCatalog);
     window.history.replaceState(initial, "", workspaceUrl(window.location.pathname, initial));
     const onPopState = (event: PopStateEvent) => {
-      setRoute(event.state ? normalizeRoute(event.state) : initialWorkspace());
+      setRoute(event.state ? normalizeRoute(event.state, sourceCatalog) : initialWorkspace(workspaceSnapshot.current, sourceCatalog));
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
   useEffect(() => {
-    if (!["settings", "admin"].includes(view)) lastRoutes.current[source] = route;
-    try { window.localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(route)); } catch { /* Storage can be unavailable in a WebView. */ }
-  }, [route, source, view]);
+    const snapshot = persistWorkspace(route, lastRoutes.current);
+    if (currentUser.workspace !== undefined) {
+      workspaceSnapshot.current = snapshot;
+      // Serial writes keep a slow response from replacing a newer route.
+      workspaceWrites.current = workspaceWrites.current.then(() => request("/auth/workspace", {
+        method: "PUT", body: snapshot, keepalive: true,
+      })).then(() => setWorkspaceSaveError(false)).catch(() => setWorkspaceSaveError(true));
+    }
+  }, [route]);
 
   const navigate = (next: View, projectId?: number | null, carId?: number | null, nextSource = source) => {
     const state = {
@@ -780,8 +815,9 @@ export function App({
     setRoute(state);
   };
   const selectSource = (key: SourceKey) => {
-    const saved = lastRoutes.current[key] || normalizeRoute({ source: key });
-    navigate(saved.view, saved.projectId, saved.carId, key);
+    client.removeQueries({ queryKey: ["auction-history-ui", key], exact: true });
+    setSectionVisit((visit) => visit + 1);
+    navigate("projects", null, null, key);
   };
 
   const notify = (message: string) => {
@@ -851,7 +887,7 @@ export function App({
         method: id ? "PATCH" : "POST",
         body: JSON.stringify(form),
       }),
-    onSuccess: (savedProject, variables) => {
+    onSuccess: async (savedProject, variables) => {
       const availability = sourceAvailability(launchOptionsQuery.data, savedProject.source_key || "encar", launchOptionsQuery.isError);
       notify(variables.id ? t("projectEdited") : `${t("projectCreated")}${availability.can_search ? "" : ` · ${reasonText(availability.reason, locale)}`}`);
       setFormProject(null);
@@ -877,14 +913,17 @@ export function App({
     mutationFn: (id: number) => request<void>(`/projects/${id}`, { method: "DELETE" }),
     onSuccess: (_, id) => {
       setDeleteProject(null);
+      client.setQueriesData<ProjectRecord[]>({ queryKey: ["projects"] }, (data) => data?.filter((project) => project.id !== id));
       setSelections((previous) => Object.fromEntries(Object.entries(previous).map(
-        ([key, values]) => [key, values.filter((value) => value !== id)],
+        ([key, values]) => [key, (values || []).filter((value) => value !== id)],
       )));
       if (activeProjectId === id) {
         navigate("projects");
       }
       notify(t("projectDeleted"));
-      void client.invalidateQueries({ queryKey: ["projects"] });
+      for (const key of [["projects"], ["scans"], ["launch-options"], ["scheduler"], ["favorites"], AUCTION_QUERY_KEY]) {
+        void client.invalidateQueries({ queryKey: key });
+      }
     },
     onError: () => notify(t("deleteFailed")),
   });
@@ -899,15 +938,23 @@ export function App({
     if (result.car) navigate("car", result.project_id ?? null, result.car.id);
   };
 
+  const uiKey = sourceDefinition(source, sourceCatalog)?.ui || "";
+  const Workspace = Object.hasOwn(workspaceModules, uiKey) ? workspaceModules[uiKey] : MissingWorkspace;
   return (
-    <div className="app-shell">
+    <SourceCatalogContext.Provider value={sourceCatalog}><div className="app-shell">
+      <TelegramAutomaticClock enabled={desktopRuntimeQuery.data?.desktop === true && !backendDisconnected} write={telegramClockWrite} />
       <aside>
         <button className="brand" onClick={() => navigate("projects")}>
           <span>S</span> SearchCar
         </button>
         <p className="eyebrow">{t("workspace")}</p>
-        <SourceNavigation source={source} view={view} locale={locale} navigate={navigate} selectSource={selectSource}
-          options={launchOptionsQuery.data} failed={launchOptionsQuery.isError} />
+        <SourceNavigation source={source} view={view} locale={locale} navigate={(next) => {
+          client.removeQueries({ queryKey: ["auction-history-ui", source], exact: true });
+          setSectionVisit((visit) => visit + 1);
+          navigate(next);
+        }} selectSource={selectSource}
+          options={launchOptionsQuery.data} failed={launchOptionsQuery.isError} runs={activeScans}
+          activityFailed={allScansQuery.isError || backendDisconnected} activityPending={allScansQuery.isPending} />
         <nav aria-label={locale === "uk" ? "Адміністрування" : "Администрирование"}>
           {localAdminEnabled ? (
             <button
@@ -920,11 +967,11 @@ export function App({
           ) : null}
         </nav>
         <div className="worker">
-          <span className={`dot ${projectsQuery.isError ? "offline" : ""}`} />
+          <span className={`dot ${workerUnavailable ? "offline" : ""}`} />
           <div>
             <small>{t("backgroundWorker")}</small>
             <strong>
-              {projectsQuery.isError
+              {workerUnavailable
                 ? t("backendUnavailable")
                 : activeScans.length
                   ? t("scanInProgress")
@@ -951,12 +998,12 @@ export function App({
       <section className="workspace">
         <header>
           <div>
-            {view === "settings" ? (locale === "uk" ? "Застосунок" : "Приложение") : SITE_NAMES[source]}　/　{view === "admin"
+            {view === "settings" ? (locale === "uk" ? "Застосунок" : "Приложение") : sourceName(source, sourceCatalog)}　/　{view === "admin"
               ? locale === "uk" ? "Адміністрування" : "Администрирование"
               : t(view === "car" ? "car" : view === "favorites" ? "favorites" : view === "settings" || view === "source-settings" ? "settings" : view === "scans" ? "scans" : "projects")}
           </div>
           <div className="top-actions">
-            <button ref={launchTrigger} type="button" className="button shell-refresh" aria-haspopup="dialog" onClick={() => setShowLaunch(true)}>{locale === "uk" ? "Оновити дані" : "Обновить данные"}</button>
+            <button ref={launchTrigger} type="button" className="button shell-refresh" disabled={backendDisconnected} aria-haspopup="dialog" onClick={() => setShowLaunch(true)}>{locale === "uk" ? "Оновити дані" : "Обновить данные"}</button>
             {schedulerQuery.data?.enabled && schedulerQuery.data.next_run_at ? (
               <span className="next-update">
                 {schedulerQuery.data.paused ? t("schedulerTitle") : t("nextUpdateIn")}
@@ -971,7 +1018,7 @@ export function App({
               aria-label={locale === "uk" ? "Активні запуски — відкрити чергу" : "Активные запуски — открыть очередь"}
               onClick={() => setShowActivity(true)}>
               {t("activeScans")}
-              <b>{allScansQuery.isError ? "?" : activeScans.length}</b>
+              <b>{allScansQuery.isError || backendDisconnected ? "?" : activeScans.length}</b>
             </button>
             {!currentUser.passwordless_workspace ? (
               <span className="current-user">
@@ -1017,8 +1064,37 @@ export function App({
           </div>
         </header>
         <main>
-          {source !== "encar" && !["settings", "admin"].includes(view) && <SourceUnavailable source={source} view={view} locale={locale}
-            availability={searchAvailability} retry={retryAvailability} settings={() => navigate("settings")} />}
+          {backendDisconnected && <div className="warning-text" role="alert" data-backend-disconnected>
+            <strong>{locale === "uk" ? "Немає зв’язку з локальним сервісом SearchCar." : "Нет связи с локальным сервисом SearchCar."}</strong>
+            <p>{locale === "uk"
+              ? "Стан пошуку не підтверджено. Якщо повторна перевірка не допоможе, закрийте та знову відкрийте застосунок."
+              : "Состояние поиска не подтверждено. Если повторная проверка не поможет, закройте и заново откройте приложение."}</p>
+            <button type="button" className="button" onClick={() => { void client.refetchQueries({ type: "active" }); }}>{locale === "uk" ? "Перевірити зв’язок" : "Проверить связь"}</button>
+          </div>}
+          {desktopRuntimeQuery.data?.source_test_mode && <p className="warning-text" role="status">{desktopRuntimeQuery.data.telegram_delivery_enabled
+            ? locale === "uk" ? "Тестовий профіль джерел · дані відокремлені від робочих · лише ручний пошук. Telegram — за налаштуваннями проєктів."
+              : "Тестовый профиль источников · данные отдельно от рабочих · только ручной поиск. Telegram — по настройкам проектов."
+            : locale === "uk" ? "Тестовий профіль джерел · дані відокремлені від робочих · лише ручні запуски, без автоматичної розсилки."
+              : "Тестовый профиль источников · данные отдельно от рабочих · только ручные запуски, без автоматической рассылки."}</p>}
+          {workspaceSaveError && <p className="warning-text" role="alert">{locale === "uk"
+            ? "Не вдалося зберегти розділ. Після перезапуску він може не відновитися."
+            : "Не удалось сохранить раздел. После перезапуска он может не восстановиться."}</p>}
+          {source !== "encar" && !["settings", "admin"].includes(view) && <>
+            <SourceAvailabilityNotice source={source} availability={workspaceAvailability} locale={locale} retry={retryAvailability} settings={() => navigate("settings")} detailed={view === "source-settings"} />
+            <Workspace key={`${source}:${sectionVisit}`} source={source} view={view} projectId={activeProjectId} carId={activeCarId} locale={locale}
+              projects={projectsQuery.data || []} projectsLoading={projectsQuery.isPending} projectsError={projectsQuery.isError} retryProjects={() => { void projectsQuery.refetch(); }}
+              runs={[...activeScans.filter((run) => activityProjects(run, projectsQuery.data || []).some((project) => project.source_key === source)), ...(scansQuery.data || []).filter((run) => !activeScans.some((active) => active.id === run.id))]} runsLoading={scansQuery.isPending} runsError={scansQuery.isError} retryRuns={() => { void scansQuery.refetch(); }}
+              read={request} navigate={navigate} imageUrl={assetUrl} openListing={(url) => { void openExternalUrl(url); }}
+              sourceTestMode={desktopRuntimeQuery.data?.source_test_mode === true} canSearch={searchAvailability.can_search}
+              busyProjects={launchOptionsQuery.data?.projects.filter((p) => p.active_status).map((p) => p.id) || []}
+              write={(path,body) => request(path,{method:"POST",body:JSON.stringify(body)})}
+              removeProjectCar={(projectId, carId) => request<void>(`/projects/${projectId}/cars/${carId}`, { method: "DELETE" })}
+              requestProjectDeletion={(id) => {
+                const project = projectsQuery.data?.find((item) => item.id === id && item.source_key === source);
+                if (project) { deleteMutation.reset(); setDeleteProject(project); }
+              }}
+              refreshProjects={(ids) => refreshMutation.mutateAsync(ids)} />
+          </>}
           {source === "encar" && !["settings", "admin"].includes(view) && <SourceAvailabilityNotice source={source}
             availability={workspaceAvailability} locale={locale} retry={retryAvailability} settings={() => navigate("settings")} detailed={view === "source-settings"} />}
           {source === "encar" && view === "source-settings" && <>
@@ -1067,7 +1143,7 @@ export function App({
             />
           )}
           {source === "encar" && view === "project" && activeProjectId && (
-            <Project
+            <><Project
               t={t}
               locale={locale}
               projectId={activeProjectId}
@@ -1082,7 +1158,7 @@ export function App({
               edit={(project) => setFormProject(project)}
               remove={setDeleteProject}
               notify={notify}
-            />
+            /></>
           )}
           {source === "encar" && view === "car" && activeCarId && (
             <Car
@@ -1116,8 +1192,12 @@ export function App({
               t={t}
               locale={locale}
               projects={allProjectsQuery.data || []}
+              projectsLoading={allProjectsQuery.isPending}
+              projectsError={allProjectsQuery.isError}
+              retryProjects={() => { void allProjectsQuery.refetch(); }}
               notify={notify}
               isAdmin={currentUser.role === "ADMIN"}
+              desktop={desktopRuntimeQuery.data?.desktop === true}
               canManageDesktopData={
                 currentUser.role === "ADMIN" || currentUser.passwordless_workspace === true
               }
@@ -1133,6 +1213,7 @@ export function App({
         </main>
       </section>
       {showLaunch && <LaunchDialog locale={locale} options={launchOptionsQuery.data}
+        read={request}
         returnFocus={launchTrigger}
         loading={launchOptionsQuery.isFetching && !launchOptionsQuery.data}
         failed={launchOptionsQuery.isError} retry={() => { void launchOptionsQuery.refetch(); }}
@@ -1165,8 +1246,10 @@ export function App({
           t={t}
           project={deleteProject}
           busy={deleteMutation.isPending}
-          close={() => setDeleteProject(null)}
-          confirm={() => deleteMutation.mutate(deleteProject.id)}
+          failed={deleteMutation.isError}
+          active={activeScans.some((run) => activityProjects(run, projectsQuery.data || []).some((project) => project.id === deleteProject.id)) || !!launchOptionsQuery.data?.projects.find((project) => project.id === deleteProject.id)?.active_status}
+          close={() => { if (!deleteMutation.isPending) { setDeleteProject(null); deleteMutation.reset(); } }}
+          confirm={() => { if (!deleteMutation.isPending) deleteMutation.mutate(deleteProject.id); }}
         />
       )}
       {toast && (
@@ -1189,7 +1272,7 @@ export function App({
           }}
         />
       ) : null}
-    </div>
+    </div></SourceCatalogContext.Provider>
   );
 }
 
@@ -2891,7 +2974,7 @@ function Favorites({
           <p>{t("favoritesSubtitle")} · {favorites.length}</p>
         </div>
         <div>
-          <span className="badge outline">{favorites.length} {t("cars").toLowerCase()}</span>
+          <span className="badge outline">{t("cars")}: {favorites.length}</span>
         </div>
       </div>
       {favoritesQuery.isLoading && <div className="panel empty-state">{t("loadingCars")}</div>}
@@ -3873,16 +3956,24 @@ function Settings({
   t,
   locale,
   projects,
+  projectsLoading,
+  projectsError,
+  retryProjects,
   notify,
   isAdmin,
   canManageDesktopData,
+  desktop,
 }: {
   t: Translate;
   locale: Locale;
   projects: ProjectRecord[];
+  projectsLoading: boolean;
+  projectsError: boolean;
+  retryProjects: () => void;
   notify: (message: string) => void;
   isAdmin: boolean;
   canManageDesktopData: boolean;
+  desktop: boolean;
 }) {
   const client = useQueryClient();
   const schedulerQuery = useQuery<SchedulerRecord>({
@@ -4212,11 +4303,17 @@ function Settings({
           </label>
         </fieldset>
       </section>
+      <TelegramSettings native={desktop} locale={locale} projects={projects} projectsLoading={projectsLoading} projectsError={projectsError} retryProjects={retryProjects} read={request} imageUrl={assetUrl}
+        write={(path, body) => request(path, {method:"POST", body:JSON.stringify(body)})}
+        saveLegacy={async (id, url) => {
+          await request(`/projects/${id}`, {method:"PATCH", body:JSON.stringify({telegram_url:url})});
+          await client.invalidateQueries({queryKey:["projects"]});
+        }} />
       <section className="panel settings import-panel">
         <div className="setting-row">
           <div>
             <h3>{t("schedulerTitle")}</h3>
-            <p>{t("automaticHelp")}</p>
+            <p>{t(desktop ? "automaticDesktopHelp" : "automaticHelp")}</p>
             <div className="scheduler-state">
               <span className={`source-state ${scheduler.enabled && !scheduler.paused ? "ready" : ""}`}>
                 {scheduler.paused
@@ -4283,7 +4380,7 @@ function Settings({
             </span>
           </label>
           <p className="scheduler-policy">
-            <b>{t("catchUpScans")}</b>
+            <b>{t("catchUpScans")}</b>{" "}
             <small>{t("catchUpScansHelp")}</small>
           </p>
         </fieldset>
@@ -4669,6 +4766,20 @@ function ProjectModal({
   close: () => void;
   save: (form: ProjectForm) => void;
 }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const node = dialog.current, origin = document.activeElement;
+    node?.showModal();
+    return () => {
+      node?.close();
+      if (origin instanceof HTMLElement && origin.isConnected) origin.focus();
+      else {
+        const heading = document.querySelector<HTMLElement>("main h1");
+        heading?.setAttribute("tabindex", "-1");
+        heading?.focus();
+      }
+    };
+  }, []);
   const [form, setForm] = useState<ProjectForm>({
     name: project?.name || "",
     search_url: project?.search_url || "",
@@ -4715,17 +4826,26 @@ function ProjectModal({
     save(form);
   };
   return (
-    <div className="modal-backdrop" role="presentation">
-      <form className="modal" onSubmit={submit}>
+    <dialog ref={dialog} className="modal project-dialog" aria-label={project ? t("editProject") : t("createProject")} aria-busy={busy}
+      onCancel={(event) => { event.preventDefault(); if (!busy) close(); }}
+      onKeyDown={(event) => {
+        if (event.key !== "Tab") return;
+        const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled)"));
+        const first = controls[0], last = controls[controls.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+      }}>
+      <form onSubmit={submit}>
         <div className="modal-head">
           <h2>{project ? t("editProject") : t("createProject")}</h2>
-          <button type="button" onClick={close}>
+          <button type="button" aria-label={t("cancel")} disabled={busy} onClick={close}>
             ×
           </button>
         </div>
         <label>
           {t("projectName")}
           <input
+            autoFocus
             required
             value={form.name}
             onChange={(event) => setForm({ ...form, name: event.target.value })}
@@ -4817,15 +4937,6 @@ function ProjectModal({
           </div>
         ) : null}
         <label>
-          {t("telegramChannelUrl")}
-          <input
-            type="url"
-            value={form.telegram_url}
-            placeholder="https://t.me/channel"
-            onChange={(event) => setForm({ ...form, telegram_url: event.target.value })}
-          />
-        </label>
-        <label>
           {t("scanMode")}
           <select
             value={form.scan_mode}
@@ -4872,13 +4983,13 @@ function ProjectModal({
           {t("automaticUpdates")}
         </label>
         <div className="modal-actions">
-          <Button onClick={close}>{t("cancel")}</Button>
+          <Button disabled={busy} onClick={close}>{t("cancel")}</Button>
           <Button kind="primary" type="submit" disabled={busy || priceRangeInvalid}>
             {t("saveChanges")}
           </Button>
         </div>
       </form>
-    </div>
+    </dialog>
   );
 }
 
@@ -4886,30 +4997,51 @@ function ConfirmModal({
   t,
   project,
   busy,
+  failed,
+  active,
   close,
   confirm,
 }: {
   t: Translate;
   project: ProjectRecord;
   busy: boolean;
+  failed: boolean;
+  active: boolean;
   close: () => void;
   confirm: () => void;
 }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const failure = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    const node = dialog.current, origin = document.activeElement;
+    node?.showModal();
+    return () => {
+      node?.close();
+      if (origin instanceof HTMLElement && origin.isConnected) origin.focus();
+      else {
+        const heading = document.querySelector<HTMLElement>("main h1");
+        heading?.setAttribute("tabindex", "-1");
+        heading?.focus();
+      }
+    };
+  }, []);
+  useEffect(() => { if (failed) failure.current?.focus(); }, [failed]);
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="modal confirm-modal">
-        <h2>{t("deleteProject")}</h2>
+      <dialog ref={dialog} className="launch-dialog confirm-modal" aria-labelledby="delete-project-title" aria-describedby="delete-project-help" aria-busy={busy}
+        onCancel={(event) => { event.preventDefault(); if (!busy) close(); }}>
+        <h2 id="delete-project-title">{t("deleteProject")}</h2>
         <p>
           {t("deleteProjectQuestion")} <b>{project.name}</b>?
         </p>
-        <p className="warning-text">{t("deletePermanentHelp")}</p>
+        <p id="delete-project-help" className="warning-text">{t("deletePermanentHelp")}</p>
+        {active && <p className="warning-text">{t("deleteActiveProjectHelp")}</p>}
+        {failed && <p ref={failure} tabIndex={-1} role="alert" className="launch-error">{t("deleteFailed")}</p>}
         <div className="modal-actions">
-          <Button onClick={close}>{t("cancel")}</Button>
+          <button type="button" className="button" autoFocus disabled={busy} onClick={close}>{t("cancel")}</button>
           <Button kind="danger" disabled={busy} onClick={confirm}>
             {t("deletePermanently")}
           </Button>
         </div>
-      </section>
-    </div>
+      </dialog>
   );
 }
