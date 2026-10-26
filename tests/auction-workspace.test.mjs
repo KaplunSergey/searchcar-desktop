@@ -195,6 +195,30 @@ test("auction search explains partial coverage, filtering and the reason, in bot
     assert.doesNotMatch(html,/Продано|SOLD/);
   }
 });
+test('an unread first search page is not presented as a failed next page; saved error details stay project-scoped', () => {
+  for (const [locale, first, next, details] of [
+    ['ru', 'Не удалось прочитать первую страницу результатов', 'Следующая страница не загрузилась', 'Подробности ошибки'],
+    ['uk', 'Не вдалося прочитати першу сторінку результатів', 'Наступна сторінка не завантажилася', 'Подробиці помилки'],
+  ]) {
+    const run={status:'FAILED',payload:{pagination:{'9':{pages_visited:0,total_pages:1,ads_seen:0,complete:false,stop_reason:'SEARCH_PAGE_NOT_READY'}},
+      failures:[{project_id:9,code:'SEARCH_PAGE_NOT_READY',technical:'Copart interface <loading> did not finish'},
+        {project_id:10,code:'OTHER_PROJECT',technical:'Must not appear'}]}};
+    const render=()=>renderToStaticMarkup(React.createElement(AuctionSearchNotice,{run,projectId:9,locale}));
+    const html=render();
+    assert.ok(html.includes(first)&&html.includes(details));assert.ok(!html.includes(next));
+    assert.match(html,/SEARCH_PAGE_NOT_READY/);assert.match(html,/Copart interface &lt;loading&gt; did not finish/);
+    assert.doesNotMatch(html,/OTHER_PROJECT|Must not appear|<loading>/);
+    run.payload.pagination['9'].pages_visited=1;
+    assert.ok(render().includes(next));
+  }
+});
+test('an unavailable IAA reset is not misreported as a busy browser or an instruction to expand a closed window',()=>{
+  for(const locale of ['ru','uk']) {
+    const html=renderToStaticMarkup(React.createElement(SelectionSummary,{locale,selection:{
+      id:'a'.repeat(32),source_key:'iaa',status:'FAILED',issue:'SOURCE_SELECTION_RESET_UNAVAILABLE',can_use:false,snapshot:null}}));
+    assert.doesNotMatch(html,/закройте другое окно|закрийте інше вікно|Разверните фильтры|Розгорніть фільтри/);
+  }
+});
 test('auction photos are keyboard-operable preview buttons, not listing links', () => {
   const html=card({image:'https://cs.copart.com/fixture.jpg'});
   assert.match(html,/<button[^>]+aria-label="Посмотреть фото: Saved car"/);

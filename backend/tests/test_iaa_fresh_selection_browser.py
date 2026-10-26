@@ -16,14 +16,15 @@ from test_source_test_profile import isolated_environment, profile_queue
 
 
 @pytest.mark.skipif(os.environ.get('RUN_SOURCE_SELECTION_BROWSER') != '1', reason='Opt-in routed browser')
-@pytest.mark.parametrize('case', ['new', 'resume', 'reset-failed', 'after-verification', 'server-rendered', 'edit-legacy', 'edit-preset'])
+@pytest.mark.parametrize('case', ['new', 'resume', 'reset-failed', 'after-verification', 'server-rendered', 'edit-legacy', 'edit-preset',
+                                'hidden-clear', 'already-default'])
 def test_fresh_iaa_selection_uses_native_clear_without_erasing_other_browser_state(tmp_path, adapters, case):
     root = Path(__file__).resolve().parents[2]
     configure_playwright_environment(root / 'desktop/runtime/browsers')
     configure_playwright_driver(root / 'desktop/runtime/playwright-driver')
     fresh = deepcopy(IAA)
     fresh['Searches'] = [{'Facets': [{'Group': 'Default', 'Value': 'True'}], 'FullSearch': None, 'LongRanges': None}]
-    html = '''<a href="#" id="clear">Clear All Filters</a>
+    html = '''<a href="#" id="clear" data-bind="click: function() { ClearFilters(true, false)}, visible: Breadcrumbs.BreadcrumbContainer().length > 0">Clear All Filters</a>
       <div>0 VEHICLES <span id="ResultFoundOnPage">No vehicles</span></div>
       <div id="ListingGrid"></div><div id="ResultHeaderContainer"><input name="RequestUri" value="fixture"></div>
       <script>
@@ -33,6 +34,10 @@ def test_fresh_iaa_selection_uses_native_clear_without_erasing_other_browser_sta
       document.querySelector('#clear').onclick=()=>{localStorage.setItem('filters',JSON.stringify(FRESH));search(FRESH)};
       if(SEND_INITIAL) setTimeout(()=>search(OLD),20);
       </script>'''.replace('OLD', json.dumps(IAA)).replace('FRESH', json.dumps(fresh)).replace('SEND_INITIAL', 'false' if case == 'server-rendered' else 'true')
+    if case in ('hidden-clear', 'already-default'):
+        html = '<style>#clear{display:none}</style>' + html
+    if case == 'already-default':
+        html = html.replace(json.dumps(IAA), json.dumps(fresh))
     source = IAASource()
     session = SelectionSession(tmp_path, 1, 'iaa', draft_id='a' * 32)
     if case.startswith('edit-'):
@@ -68,7 +73,7 @@ def test_fresh_iaa_selection_uses_native_clear_without_erasing_other_browser_sta
         source.read_selection_dom = read
         try:
             SearchSelections.observe(session, source, OwnedWindow())
-            assert requests[0] == (fresh if case == 'server-rendered' else IAA)
+            assert requests[0] == (fresh if case in ('server-rendered', 'already-default') else IAA)
             assert len(requests) == (1 if case in ('resume', 'server-rendered', 'edit-legacy', 'edit-preset') else 2)
             assert session.draft.can_use == (case != 'reset-failed')
             if case == 'reset-failed':

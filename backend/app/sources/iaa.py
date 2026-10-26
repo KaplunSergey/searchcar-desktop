@@ -32,8 +32,16 @@ class IAASource(AuctionListSource):
                 invalidate()
                 button.click(timeout=2000)
                 return True
+        # IAA hides this native control when breadcrumbs are empty or the
+        # filter pane is collapsed. Its own reset still starts a clean search.
+        for index in range(clear.count()):
+            button = clear.nth(index)
+            if re.search(r'\bClearFilters\s*\(\s*true\s*,\s*false\s*\)', button.get_attribute('data-bind') or ''):
+                invalidate()
+                button.evaluate('(control) => control.click()')
+                return True
         if clear.count():
-            raise AuctionListError('SOURCE_SELECTION_RESET_UNAVAILABLE', 'Expand IAA filters to clear the previous search before choosing a new one')
+            raise AuctionListError('SOURCE_SELECTION_RESET_UNAVAILABLE', 'IAA did not expose its supported native search reset control')
         return False
 
     def validate_selection_snapshot(self, snapshot):

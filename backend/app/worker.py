@@ -1,4 +1,5 @@
 import os
+import logging
 import time
 from copy import deepcopy
 from contextlib import ExitStack, nullcontext
@@ -13,6 +14,7 @@ from sqlalchemy import select, update
 
 from .database import SessionLocal, engine, settings
 from .desktop_runtime import desktop_playwright
+from .desktop_diagnostics import _safe_message
 from .browser_runtime_pool import BrowserRuntimePool
 from .detail_workers import DetailTask, DetailWorkerPool
 from .external_links import validated_external_url
@@ -331,6 +333,11 @@ def _failure_detail(
         code = "TIMEOUT"
     else:
         code = type(exc).__name__[:30].upper()
+    logging.getLogger(__name__).warning(
+        "Search failure: source=%s scope=%s code=%s detail=%s",
+        getattr(project, "source_key", None) or getattr(car, "source_key", None) or "unknown",
+        scope, code, _safe_message(technical),
+    )
     external_url = url or (car.url if car else None)
     try:
         external_url = validated_external_url(external_url) if external_url else None

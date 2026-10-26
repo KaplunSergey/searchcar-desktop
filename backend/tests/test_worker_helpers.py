@@ -694,3 +694,20 @@ def test_changed_car_is_published_while_its_project_is_still_running():
     assert job.payload["summary"]["new"] == 1
     assert job.payload["failures"] == []
     assert job.payload["pagination"] == {"4": {"current_page": 1}}
+def test_source_failure_is_available_to_support_logs_without_secrets(caplog):
+    import logging
+    from types import SimpleNamespace
+    from app.worker import _failure_detail
+    from app.sources.auction_lists import AuctionListError
+
+    project = SimpleNamespace(id=9, name='Private project name', source_key='copart')
+    error = AuctionListError('SEARCH_PAGE_NOT_READY',
+        'copart page did not expose a verified result token=private-test-token '
+        'https://www.copart.com/lotSearchResults?searchCriteria=private-query')
+    with caplog.at_level(logging.WARNING, logger='app.worker'):
+        result = _failure_detail(exc=error, scope='PROJECT', project=project)
+    assert result['code'] == 'SEARCH_PAGE_NOT_READY'
+    assert 'SEARCH_PAGE_NOT_READY' in caplog.text
+    assert 'source=copart' in caplog.text and 'verified result' in caplog.text
+    assert 'private-test-token' not in caplog.text and 'private-query' not in caplog.text
+    assert 'Private project name' not in caplog.text

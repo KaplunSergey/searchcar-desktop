@@ -45,7 +45,7 @@ def test_verified_window_is_minimized_without_replacing_its_page_or_context(case
 
 def test_hidden_native_reset_cannot_silently_accept_previous_filters():
     invalidations = []
-    hidden = SimpleNamespace(is_visible=lambda: False)
+    hidden = SimpleNamespace(is_visible=lambda: False, get_attribute=lambda name: None)
     clear = SimpleNamespace(count=lambda: 1, nth=lambda index: hidden)
     page = SimpleNamespace(get_by_text=lambda *a, **k: clear)
     with pytest.raises(AuctionListError) as caught:

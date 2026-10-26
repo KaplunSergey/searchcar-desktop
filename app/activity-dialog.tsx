@@ -11,7 +11,7 @@ export type ActivityRun = {
     trigger?: string;
     report?: { car_id: number; project_id: number; project_ids?: number[]; after_snapshot_id?: number; source_key?: string; source_listing_id?: string; title?: string | null; change: string;
       changes?: { field: string; old?: unknown; new?: unknown }[] }[];
-    failures?: { project_id?: number | null; code: string }[];
+    failures?: { project_id?: number | null; code: string; technical?: string | null }[];
     project_plans?: { project_id: number; source_key: string; name?: string }[];
     pagination?: Record<string, {
       mode?: string; pages_visited?: number; total_pages?: number; expected_pages?: number; ads_seen?: number; complete?: boolean; stop_reason?: string;
