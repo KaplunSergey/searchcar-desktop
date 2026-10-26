@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param([Parameter(Mandatory = $true)][string]$Installer)
+param(
+    [Parameter(Mandatory = $true)][string]$Installer,
+    [ValidateSet('Overwrite', 'Rename')][string]$Simulation = 'Rename'
+)
 
 # This installs the real bundle and changes HKCU registration. Run ONLY on an
 # ephemeral GitHub Actions runner, never against a customer's installation.
@@ -7,6 +10,7 @@ $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or -not $env:RUNNER_TEMP) {
     throw 'Installer update smoke test requires an ephemeral GitHub Actions runner.'
 }
+. (Join-Path $PSScriptRoot 'windows_shortcut.ps1')
 $installerPath = (Resolve-Path -LiteralPath $Installer).Path
 $registry = 'HKCU:\Software\SearchCar\SearchCar Desktop'
 if (Test-Path -LiteralPath $registry) {
@@ -31,6 +35,20 @@ Invoke-Installer "/S /D=$installation"
 $executable = Join-Path $installation 'searchcar-desktop.exe'
 if (-not (Test-Path -LiteralPath $executable)) { throw 'Initial install is missing the main executable.' }
 $expectedHash = (Get-FileHash -LiteralPath $executable).Hash
+$shell = New-Object -ComObject WScript.Shell
+function Assert-Shortcuts([string]$Stage) {
+    foreach ($folder in @('Desktop', 'Programs')) {
+        $shortcut = Join-Path ([Environment]::GetFolderPath($folder)) 'SearchCar Desktop.lnk'
+        $present = Test-Path -LiteralPath $shortcut
+        $legacyTarget = if ($present) { $shell.CreateShortcut($shortcut).TargetPath } else { $null }
+        $target = if ($present) { Get-SearchCarShortcutTarget $shortcut } else { $null }
+        [ordered]@{ stage = $Stage; shortcut = $shortcut; present = $present; target = $target; legacyTarget = $legacyTarget; expected = $executable } | ConvertTo-Json -Compress | Write-Host
+        if (-not $present -or $target -ne $executable) {
+            throw "Shortcut does not point to the updated application: $shortcut (stage: $Stage; actual: $target; expected: $executable)"
+        }
+    }
+}
+Assert-Shortcuts 'initial'
 if ((Get-Item -LiteralPath $registry).GetValue('') -ne $installation) {
     throw 'Unexpected installer registry identity.'
 }
@@ -38,7 +56,14 @@ if ((Get-Item -LiteralPath $registry).GetValue('') -ne $installation) {
 # Reproduce a registry entry pointing to a different copy. Updater must still
 # replace the binary launched by the existing shortcut, at its actual path.
 Set-Item -LiteralPath $registry -Value $otherDirectory
-Move-Item -LiteralPath $executable -Destination ($executable + '.before-update')
+if ($Simulation -eq 'Rename') {
+    # Preserve the original missing-main-binary regression scenario.
+    Move-Item -LiteralPath $executable -Destination ($executable + '.before-update')
+} else {
+    # Keep the file identity/path used by the shortcuts. We test replacement,
+    # not Windows' ability to follow a deliberately renamed link target.
+    [IO.File]::WriteAllBytes($executable, [byte[]](0, 1, 2, 3))
+}
 Invoke-Installer "/S /UPDATE /ARGS /D=$installation"
 if (-not (Test-Path -LiteralPath $executable) -or
     (Get-FileHash -LiteralPath $executable).Hash -ne $expectedHash) {
@@ -50,13 +75,6 @@ if (Test-Path -LiteralPath (Join-Path $otherDirectory 'searchcar-desktop.exe')) 
 if ((Get-Item -LiteralPath $registry).GetValue('') -ne $installation) {
     throw 'Update did not restore the actual installation path in the registry.'
 }
-$shell = New-Object -ComObject WScript.Shell
-foreach ($folder in @('Desktop', 'Programs')) {
-    $shortcut = Join-Path ([Environment]::GetFolderPath($folder)) 'SearchCar Desktop.lnk'
-    if (-not (Test-Path -LiteralPath $shortcut) -or
-        $shell.CreateShortcut($shortcut).TargetPath -ne $executable) {
-        throw "Shortcut does not point to the updated application: $shortcut"
-    }
-}
+Assert-Shortcuts 'updated'
 [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
 Write-Host 'Passed: update preserved the actual install path and both shortcuts despite stale registry data.'

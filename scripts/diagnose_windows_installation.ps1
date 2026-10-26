@@ -5,6 +5,7 @@ param([string]$OutputPath)
 # shortcuts changed, registry values changed, or application data collected.
 $ErrorActionPreference = 'Stop'
 if ($env:OS -ne 'Windows_NT') { throw 'Run this diagnostic on Windows.' }
+. (Join-Path $PSScriptRoot 'windows_shortcut.ps1')
 if (-not $OutputPath) {
     $OutputPath = Join-Path ([Environment]::GetFolderPath('Desktop')) (
         'SearchCar-installation-{0}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss')
@@ -98,9 +99,10 @@ $shortcuts = @(
         foreach ($file in Get-ChildItem -LiteralPath $root -Filter '*.lnk' -Recurse -File -ErrorAction SilentlyContinue) {
             try {
                 $link = $shell.CreateShortcut($file.FullName)
-                if ($file.BaseName -notlike '*SearchCar*' -and $link.TargetPath -notlike '*SearchCar*') { continue }
-                if ($link.TargetPath) { [void]$candidates.Add($link.TargetPath) }
-                [ordered]@{ shortcut = $file.FullName; target = $link.TargetPath; working_directory = $link.WorkingDirectory }
+                $target = Get-SearchCarShortcutTarget $file.FullName
+                if ($file.BaseName -notlike '*SearchCar*' -and $target -notlike '*SearchCar*') { continue }
+                if ($target) { [void]$candidates.Add($target) }
+                [ordered]@{ shortcut = $file.FullName; target = $target; working_directory = $link.WorkingDirectory }
             } catch { $issues.Add('Could not inspect shortcut: ' + $file.FullName) }
         }
     }

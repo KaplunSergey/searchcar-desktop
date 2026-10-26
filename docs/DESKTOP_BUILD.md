@@ -305,6 +305,18 @@ its disposable runner: install in a custom Unicode path, point registration
 elsewhere, update with `/D`, and check the executable, registration, Desktop
 and Start menu shortcuts. This test must never run on a user's computer.
 
+Both this smoke and `diagnose_windows_installation.ps1` read shortcut targets
+through the shared `windows_shortcut.ps1` Unicode Shell API. Keep that helper
+beside the scripts when copying the diagnostic. The legacy WScript target
+reader can replace Cyrillic characters with `?`, falsely reporting a broken
+shortcut. The installer smoke logs both readers but validates the Unicode one;
+missing files, wrong targets and path conflicts still fail the check.
+`test_windows_installation_diagnostic.ps1` verifies healthy Desktop/Start Menu
+Unicode targets, detection of a deliberately broken shortcut, and recovery after
+removing that fixture on the disposable Windows runner. The manual
+`windows-installer-check.yml` probe exercises Rename and Overwrite using a
+checksum-verified published installer without recompiling the application.
+
 For a reported old version after update, run `Diagnose SearchCar for Windows.cmd`
 on the affected Windows computer while SearchCar is open. It saves
 `SearchCar-installation-*.json` on the Desktop. Run it once after updater restart

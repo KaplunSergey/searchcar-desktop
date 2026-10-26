@@ -282,8 +282,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows updater tests failed" }
           scripts/windows_installer_update_smoke.ps1 `
             -Installer "work/windows-artifact/SearchCar-Desktop-Windows-x64-setup.exe"
-          scripts/diagnose_windows_installation.ps1 `
-            -OutputPath "work/windows-smoke/installation.json"
+          scripts/test_windows_installation_diagnostic.ps1 `
+            -OutputDir "work/windows-smoke"
           $diagnostic = Get-Content "work/windows-smoke/installation.json" -Raw | ConvertFrom-Json
           if (-not $diagnostic.findings) { throw "Installation diagnostic produced no findings summary" }
           $warnings = @($diagnostic.findings | Where-Object { $_.severity -eq "warning" })
