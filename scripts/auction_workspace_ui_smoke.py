@@ -333,6 +333,35 @@ with desktop_playwright() as pw:
             mode.update(locale='ru',collections_fixture=False,collection_empty=False,runs=[])
     check('search feedback: rounded settings selection and undated results RU/UK',search_feedback)
 
+    def opening_search_feedback():
+        try:
+            for locale in ['ru','uk']:
+                for width in [1280,360]:
+                    for stage,heading in [('OPENING_SEARCH','Открываем страницу поиска' if locale=='ru' else 'Відкриваємо сторінку пошуку'),
+                                          ('PREPARING_SEARCH','Ожидаем выдачу сайта' if locale=='ru' else 'Очікуємо видачу сайту'),
+                                          ('SEARCH_WINDOW_LOADING','Открыто окно Copart' if locale=='ru' else 'Відкрито вікно Copart')]:
+                        mode.update(locale=locale,source='copart',collections_fixture=True,collection_empty=True,runs=[dict(
+                            id=101,kind='PROJECTS',status='RUNNING',progress=0,payload=dict(project_ids=[9],current_project_id=9,
+                            project_statuses={'9':'RUNNING'},pagination={'9':dict(stage=stage,mode='ALL_PAGES',pages_visited=0,
+                            total_pages=1,ads_seen=0,complete=False)}))])
+                        page.set_viewport_size({'width':width,'height':900})
+                        page.goto(BASE+'?source=copart&view=project&project=9')
+                        page.get_by_text(heading,exact=True).wait_for()
+                        assert not page.locator('.auction-card').count()
+                        assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+                        if stage=='SEARCH_WINDOW_LOADING':
+                            page.get_by_text('Не меняйте фильтры' if locale=='ru' else 'Не змінюйте фільтри',exact=False).wait_for()
+                            page.screenshot(path=str(report/f'loading-window-{locale}-{width}.png'),full_page=True)
+                    mode['runs'][0]['status']='FAILED'
+                    mode['runs'][0]['payload']['project_statuses']['9']='FAILED'
+                    mode['runs'][0]['payload']['pagination']['9']['stop_reason']='SEARCH_PAGE_NOT_READY'
+                    page.reload()
+                    page.get_by_text('Неполный поиск' if locale=='ru' else 'Неповний пошук',exact=True).wait_for()
+                    assert not page.get_by_text('Открыто окно Copart' if locale=='ru' else 'Відкрито вікно Copart',exact=True).count()
+        finally:
+            mode.update(locale='ru',collections_fixture=False,collection_empty=False,runs=[])
+    check('opening search feedback: stages and diagnostic window RU/UK',opening_search_feedback)
+
     def backend_disconnection():
         try:
             for locale in ['ru','uk']:

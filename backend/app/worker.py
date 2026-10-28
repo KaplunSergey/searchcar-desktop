@@ -1,5 +1,6 @@
 import os
 import logging
+import json
 import time
 from copy import deepcopy
 from contextlib import ExitStack, nullcontext
@@ -334,9 +335,9 @@ def _failure_detail(
     else:
         code = type(exc).__name__[:30].upper()
     logging.getLogger(__name__).warning(
-        "Search failure: source=%s scope=%s code=%s detail=%s",
+        "Search failure: source=%s scope=%s code=%s detail=%s browser_diagnostics=%s",
         getattr(project, "source_key", None) or getattr(car, "source_key", None) or "unknown",
-        scope, code, _safe_message(technical),
+        scope, code, _safe_message(technical), json.dumps(getattr(exc, 'browser_diagnostics', None), sort_keys=True),
     )
     external_url = url or (car.url if car else None)
     try:
@@ -354,6 +355,7 @@ def _failure_detail(
         "code": code,
         "technical": technical[:4000],
         **({"network_failures": exc.network_failures} if getattr(exc, "network_failures", None) else {}),
+        **({"browser_diagnostics": exc.browser_diagnostics} if getattr(exc, "browser_diagnostics", None) else {}),
     }
 
 
@@ -948,7 +950,7 @@ def process_job(job_id: int, *, runtime_pool=None) -> None:
                             )
                             page_fraction = min(
                                 1,
-                                int(info.get("current_page") or 1)
+                                int(info.get("current_page") or 0)
                                 / page_total,
                             )
                             job.progress = round(

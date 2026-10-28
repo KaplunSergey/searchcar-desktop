@@ -250,6 +250,23 @@ test('a waiting project in the expanded journal is still active, not an incomple
     run:{status:'WAITING_FOR_USER',payload:{pagination:{'9':{pages_visited:0,total_pages:2,ads_seen:0,complete:false}}}}}));
   assert.match(html,/Обход выдачи/);assert.doesNotMatch(html,/Неполный поиск/);
 });
+test('opening and preparing a search are visible before the first lot, without fake completion or percentages',()=>{
+  for(const [locale,opening,preparing] of [['ru','Открываем страницу поиска','Ожидаем выдачу сайта'],['uk','Відкриваємо сторінку пошуку','Очікуємо видачу сайту']]) {
+    const run={status:'RUNNING',payload:{pagination:{'9':{stage:'OPENING_SEARCH',pages_visited:0,total_pages:1,ads_seen:0,complete:false}}}};
+    const render=()=>renderToStaticMarkup(React.createElement(AuctionSearchNotice,{run,projectId:9,locale}));
+    assert.ok(render().includes(opening));
+    run.payload.pagination['9'].stage='PREPARING_SEARCH';
+    assert.ok(render().includes(preparing));
+    assert.doesNotMatch(render(),/Неполный поиск|Неповний пошук|%|Завершено/);
+    run.payload.pagination['9'].stage='SEARCH_WINDOW_LOADING';
+    assert.match(render(), locale==='ru' ? /Открыто окно Copart/ : /Відкрито вікно Copart/);
+    assert.match(render(), locale==='ru' ? /Не меняйте фильтры/ : /Не змінюйте фільтри/);
+    assert.doesNotMatch(render(),/CAPTCHA|%/);
+    run.status='FAILED';assert.ok(!render().includes(preparing));
+    run.status='SUCCEEDED';run.payload.pagination['9'].complete=true;
+    assert.ok(!render().includes(preparing));
+  }
+});
 test('a successful verified search explains the manual window fallback without marking it incomplete', () => {
   const run={status:'SUCCEEDED',payload:{pagination:{'9':{pages_visited:2,total_pages:2,ads_seen:2,complete:true,browser_notice:'MANUAL_MINIMIZE'}}}};
   for(const [locale,copy] of [['ru','Окно сайта можно свернуть вручную'],['uk','Вікно сайту можна згорнути вручну']]){

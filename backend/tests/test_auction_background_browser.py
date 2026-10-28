@@ -598,7 +598,8 @@ def test_copart_cold_interface_has_its_own_bounded_cancellable_load_budget(adapt
         def click(self, **kwargs): clicks.append(clock[0])
     page = SimpleNamespace(
         locator=lambda selector: SimpleNamespace(count=lambda: 0),
-        evaluate=lambda script: {'ready':False,'blocked':False,'consent_required':False,'document_loaded':True},
+        evaluate=lambda script: {'ready':False,'blocked':False,'consent_required':False,'document_loaded':True,
+                                 'interface':{'modern_table':True,'unrendered_template':True,'visible_frames':0}},
         get_by_role=lambda *args, **kwargs: Classic(),
         wait_for_timeout=lambda ms: clock.__setitem__(0, clock[0]+ms/1000),
     )
@@ -615,8 +616,65 @@ def test_copart_cold_interface_has_its_own_bounded_cancellable_load_budget(adapt
             source.prepare_page(page,checkpoint=checkpoint,verification=verification)
         assert caught.value.code == 'SEARCH_PAGE_NOT_READY'
         assert clock[0] == 90.0 and not clicks
+        assert 'modern_table=True' in str(caught.value)
+        assert 'unrendered_template=True' in str(caught.value)
+        assert 'visible_frames=0' in str(caught.value)
     else:
         with pytest.raises(RuntimeError,match='cancel loading'):
             source.prepare_page(page,checkpoint=checkpoint,verification=verification)
         assert clock[0] == 1.0 and not clicks
     assert source.read_timeout_seconds == 30, 'Later result pages must retain their existing budget'
+
+
+@pytest.mark.parametrize('outcome', ['ready', 'timeout', 'cancel', 'scope_changed', 'closed', 'rate_limit', 'denied', 'cookies'])
+def test_copart_stalled_first_page_opens_one_diagnostic_window_with_the_original_budget(adapters, outcome):
+    ready = snapshot('copart', [ROWS['copart'][0]], total=1)
+    loading = {**ready, 'ready':False, 'document_loaded':True, 'manual_required':False, 'rows':[], 'total':None}
+    window = ready if outcome == 'ready' else loading
+    states = [[loading], [{**loading,'consent_required':True}, ready] if outcome == 'cookies' else [window]]
+    source, (_, context, page), pages, calls, closed, clock = runtime(adapters, 'copart', states)
+    adapters.monkeypatch.setattr('app.sources.copart.monotonic', lambda: clock[0])
+    for actual in pages:
+        original_locator = actual.locator
+        actual.locator = lambda selector, actual=actual, original=original_locator: (
+            SimpleNamespace(count=lambda: int(actual.snapshots[actual.index]['ready']))
+            if selector == '#serverSideDataTable' else original(selector))
+        actual.get_by_role = lambda *args, **kwargs: SimpleNamespace(count=lambda: 0)
+    if outcome == 'cookies':
+        original_wait = pages[1].wait_for_timeout
+        def close_cookie_dialog(ms):
+            original_wait(ms)
+            pages[1].index = 1  # The user makes their own choice in the visible site.
+        pages[1].wait_for_timeout = close_cookie_dialog
+    original_goto = pages[1].goto
+    def window_goto(url, **kwargs):
+        original_goto(url, **kwargs)
+        if outcome == 'scope_changed': pages[1].url = url.replace('%7B%7D','%7B%22query%22%3A%5B%22OTHER%22%5D%7D')
+        if outcome == 'closed': pages[1].is_closed = lambda: True
+        if outcome in ('rate_limit', 'denied'):
+            pages[1].listeners['response'](SimpleNamespace(status=429 if outcome == 'rate_limit' else 403,
+                url=url, request=SimpleNamespace(resource_type='document')))
+    pages[1].goto = window_goto
+    progress = []
+    def checkpoint():
+        if outcome == 'cancel' and clock[0] >= 116: raise RuntimeError('cancel diagnostic window')
+    try:
+        if outcome in ('ready', 'cookies'):
+            result = source.collect_search_pages(page, search_url('copart'), progress=progress.append, checkpoint=checkpoint)
+            assert len(result.rows) == 1 and result.pages_visited == 1
+            assert pages[1].window_state == 'minimized'
+        else:
+            with pytest.raises(RuntimeError if outcome == 'cancel' else ScanError) as caught:
+                source.collect_search_pages(page, search_url('copart'), progress=progress.append, checkpoint=checkpoint)
+            assert not caught.value.partial_collection.rows
+            if outcome != 'cancel':
+                assert caught.value.code == {'timeout':'SEARCH_PAGE_NOT_READY','scope_changed':'SOURCE_SEARCH_SCOPE_CHANGED',
+                    'closed':'SOURCE_BROWSER_CLOSED','rate_limit':'SOURCE_RATE_LIMITED','denied':'SOURCE_ACCESS_DENIED'}[outcome]
+        assert len(calls) == 2 and calls[1][2] == 115.0, 'Show the owned window once, after 15s'
+        assert pages[0].navigations == pages[1].navigations == [search_url('copart')]
+        assert any(info.get('stage') == 'SEARCH_WINDOW_LOADING' for info in progress)
+        assert not any(info.get('interaction') for info in progress) if outcome != 'cookies' else any(info.get('interaction') for info in progress)
+        if outcome == 'timeout': assert clock[0] == 190.0, 'Do not restart the 90-second loading budget'
+    finally:
+        context.close()
+    assert closed == [0,1]

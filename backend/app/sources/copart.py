@@ -95,7 +95,9 @@ class CopartSource(AuctionListSource):
         return bool(state and state[1] in 'AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC'.split())
 
     def prepare_page(self, page, *, checkpoint, verification):
-        deadline=monotonic()+self.prepare_timeout_seconds
+        started=monotonic()
+        deadline=started+self.prepare_timeout_seconds
+        window_requested=False
         while not page.locator('#serverSideDataTable').count():
             checkpoint()
             if page.locator('#serverSideDataTable').count():
@@ -121,10 +123,18 @@ class CopartSource(AuctionListSource):
                     deadline=monotonic()+self.prepare_timeout_seconds
                     continue
                 return
+            if isinstance(page, AuctionBrowserSession) and not page.interactive and not window_requested and monotonic()-started >= 15:
+                window_requested=True
+                verification('SEARCH_INTERFACE_LOADING')
+                continue  # Keep the original deadline; no automatic refresh loop.
             if monotonic()>=deadline:
+                interface=state.get('interface') or {}
                 raise AuctionListError('SEARCH_PAGE_NOT_READY',
                     f'Copart search interface did not finish loading after {self.prepare_timeout_seconds}s '
-                    f'(document_loaded={bool(state.get("document_loaded"))}; Classic view/table unavailable)')
+                    f'(document_loaded={bool(state.get("document_loaded"))}; Classic view/table unavailable; '
+                    f'modern_table={bool(interface.get("modern_table"))}; '
+                    f'unrendered_template={bool(interface.get("unrendered_template"))}; '
+                    f'visible_frames={interface.get("visible_frames",0)})')
             page.wait_for_timeout(250)
 
     dom_script = r"""() => {
@@ -152,6 +162,8 @@ class CopartSource(AuctionListSource):
       return {rows,total,page:Number(number)||1,has_next:!!document.querySelector('#serverSideDataTable_next:not(.disabled)'),
         document_loaded:['interactive','complete'].includes(document.readyState),
         can_prepare:Array.from(document.querySelectorAll('button')).some(e=>/Classic view/i.test(text(e)||'')),
+        interface:{modern_table:!!document.querySelector('p-table table'),unrendered_template:body.includes('{{'),
+          visible_frames:Array.from(document.querySelectorAll('iframe')).filter(e=>e.getClientRects().length&&e.clientWidth>0&&e.clientHeight>0&&getComputedStyle(e).visibility==='visible').length},
         consent_required:consent,
         ready:!!table&&!!counts,empty:total===0&&/No (matching records|data available)/i.test(text(table)||''),
         manual_required:/verify you are human|confirm you are human|security check|captcha/i.test(body)||(!table&&!!document.querySelector('iframe[src*="captcha"],iframe[src*="_Incapsula_Resource"]')),

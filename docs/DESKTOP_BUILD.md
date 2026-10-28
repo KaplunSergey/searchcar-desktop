@@ -165,6 +165,24 @@ verify its projects remain visible, verify Copart and IAA have `can_search=true`
 and create a project in disposable data. A successful `/api/health` alone does
 not verify the selected profile or auction availability.
 
+Copart first-page diagnostics use the existing owned site-browser profile. If
+neither Classic view nor its table appears within 15 seconds, SearchCar opens
+that site's browser window once with the original saved search. This is not
+presented as a CAPTCHA and does not restart the 90-second preparation budget;
+actual cookie/verification prompts retain their separate existing manual wait.
+The UI explains what is waiting and offers the existing active-run cancellation.
+Changing the search scope, closing the window, access denial without a manual
+prompt, and rate limits still stop the scan without marking it complete. A
+verified result set lets the owned window return to the background.
+
+Support logs include bounded browser diagnostics on failure: script-error count,
+request resource types and Chromium network-error codes, and HTTP status/type
+with a same-site boolean. They do not include script messages, request bodies,
+headers, cookies, or full request URLs. Copart timeout details also distinguish
+a modern table, unrendered templates and visible iframe count. These diagnostics
+help investigate installed Windows failures; fixture/macOS success alone is not
+proof that the live Windows source works.
+
 GitHub Actions builds are split by native platform:
 
 - `macos-desktop.yml` produces an ad-hoc-signed Apple Silicon `.app` zip;

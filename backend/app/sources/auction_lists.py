@@ -520,6 +520,7 @@ class AuctionListSource:
         checkpoint = checkpoint or (lambda:None)
         denied = []
         network_failures, pending_fetch_failures, schedule_issues = [], [], []
+        browser_diagnostics = dict(script_errors=0, request_failures=[], http_failures=[])
         rate_limited = False
         summary = dict(dated=0, exact_time=0, without_date=0, unrecognized_schedule=0, unsupported_market=0)
         session = page if isinstance(page, AuctionBrowserSession) else None
@@ -534,6 +535,8 @@ class AuctionListSource:
         restart_required = False
         silent_wait_used = False
         guard = None
+        next_preparation_progress = 0
+        loading_window_opened = False
         if search_config is not None:
             try:
                 clean = self.validate_selection_snapshot(search_config)
@@ -558,7 +561,15 @@ class AuctionListSource:
                               pages_visited=visited,total_results=total,ads_seen=len(rows),found_count=len(rows),complete=False,
                               max_pages=max_pages,read_summary=dict(summary),network_failures=list(network_failures),
                               schedule_issues=list(schedule_issues),interaction=None,browser_notice=browser_notice)
+                info['browser_diagnostics'] = {key: list(value) if isinstance(value,list) else value
+                                               for key,value in browser_diagnostics.items()}
                 progress({**info, **extra})
+        def preparing_checkpoint():
+            nonlocal next_preparation_progress
+            checked_checkpoint()
+            if monotonic() >= next_preparation_progress:
+                emit_progress(stage='SEARCH_WINDOW_LOADING' if loading_window_opened and session.interactive else 'PREPARING_SEARCH')
+                next_preparation_progress = monotonic() + 2
         def resume_background():
             nonlocal browser_notice
             if not session or not session.interactive:
@@ -574,9 +585,23 @@ class AuctionListSource:
                     browser_notice = 'MANUAL_MINIMIZE'
             raw_checkpoint()
             emit_progress()
-            self.prepare_page(page, checkpoint=checked_checkpoint, verification=wait_for_user)
+            self.prepare_page(page, checkpoint=preparing_checkpoint, verification=wait_for_user)
         def wait_for_user(code):
-            nonlocal restart_required, silent_wait_used
+            nonlocal restart_required, silent_wait_used, loading_window_opened
+            if code == 'SEARCH_INTERFACE_LOADING':
+                # A stalled first page is not a CAPTCHA or permission to retry access denials.
+                if not session or visited or loading_window_opened:
+                    return
+                raw_checkpoint()
+                if self.search_scope(page.url) != self.search_scope(url):
+                    raise AuctionListError('SOURCE_SEARCH_SCOPE_CHANGED', 'Search filters changed before opening the site window')
+                loading_window_opened = True
+                emit_progress(stage='SEARCH_WINDOW_LOADING')
+                session.show(self.validate_search_url(url), raw_checkpoint)
+                raw_checkpoint()
+                if self.search_scope(page.url) != self.search_scope(url):
+                    raise AuctionListError('SOURCE_SEARCH_SCOPE_CHANGED', 'Search filters changed in the site window')
+                return
             if code == 'COOKIE_CONSENT':
                 if self.search_scope(page.url) != self.search_scope(url):
                     raise AuctionListError('SOURCE_SEARCH_SCOPE_CHANGED', 'The browser search filters changed before the cookie choice')
@@ -617,7 +642,7 @@ class AuctionListSource:
             if (not session and not interactive) or (kind == 'ACCESS' and kind in waits_used):
                 raise AuctionListError(code, f'{self.key} denied public access; search stopped')
             state = self.read_dom(page)
-            if state.get('blocked') and state.get('manual_required') is False:
+            if kind == 'ACCESS' and state.get('manual_required') is False:
                 raise AuctionListError('SOURCE_ACCESS_DENIED', f'{self.key} denied access without a manual verification prompt')
             if session and not session.interactive:
                 if not (state.get('consent_required') or state.get('manual_required', code == 'CAPTCHA')):
@@ -658,7 +683,7 @@ class AuctionListSource:
                     if session and session.interactive:
                         resume_background()
                     elif reopened and state.get('can_prepare') and not state.get('ready'):
-                        self.prepare_page(page, checkpoint=checked_checkpoint, verification=wait_for_user)
+                        self.prepare_page(page, checkpoint=preparing_checkpoint, verification=wait_for_user)
                     return
                 if monotonic() >= deadline:
                     raise AuctionListError('SOURCE_VERIFICATION_TIMEOUT', 'Manual site verification did not finish in time; search stopped')
@@ -672,6 +697,12 @@ class AuctionListSource:
             nonlocal rate_limited
             parsed = urlsplit(response.url)
             resource_type = response.request.resource_type
+            if response.status >= 400 and resource_type in ('document','script','stylesheet','xhr','fetch'):
+                diagnostic = dict(resource_type=resource_type,status=response.status,
+                                  site_resource=parsed.hostname in self.descriptor.domains)
+                if diagnostic not in browser_diagnostics['http_failures']:
+                    browser_diagnostics['http_failures'].append(diagnostic)
+                    del browser_diagnostics['http_failures'][:-20]
             if response.status not in (401,403,429) or parsed.hostname not in self.descriptor.domains:
                 return
             failure = dict(status=response.status,host=parsed.hostname,path=parsed.path,resource_type=resource_type)
@@ -692,9 +723,23 @@ class AuctionListSource:
             raw_checkpoint()
             if denied:
                 wait_for_user('SOURCE_ACCESS_DENIED')
+        def script_error(_error):
+            browser_diagnostics['script_errors'] = min(1000, browser_diagnostics['script_errors'] + 1)
+        def request_failed(request):
+            if request.resource_type not in ('document','script','stylesheet','xhr','fetch'):
+                return
+            failure = request.failure or ''
+            diagnostic = dict(resource_type=request.resource_type,
+                              code=failure if re.fullmatch(r'net::ERR_[A-Z0-9_]{1,80}',failure) else 'OTHER')
+            if diagnostic not in browser_diagnostics['request_failures']:
+                browser_diagnostics['request_failures'].append(diagnostic)
+                del browser_diagnostics['request_failures'][:-20]
         page.on('response',resource_response)
+        page.on('pageerror',script_error)
+        page.on('requestfailed',request_failed)
         try:
             checked_checkpoint()
+            emit_progress(stage='OPENING_SEARCH')
             if session:
                 session.wait_for_request(checked_checkpoint)
             response=page.goto(self.validate_search_url(url), wait_until='domcontentloaded', timeout=20000)
@@ -705,7 +750,9 @@ class AuctionListSource:
                     wait_for_user('SOURCE_ACCESS_DENIED')
                 else:
                     raise AuctionListError('SOURCE_ACCESS_DENIED',f'{self.key} returned HTTP {response.status}; public access was not confirmed')
-            self.prepare_page(page,checkpoint=checked_checkpoint,verification=wait_for_user)
+            preparing_checkpoint()
+            self.prepare_page(page,checkpoint=preparing_checkpoint,verification=wait_for_user)
+            emit_progress(stage='READING_RESULTS')
             while True:
                 deadline = monotonic() + self.read_timeout_seconds
                 while True:
@@ -736,6 +783,8 @@ class AuctionListSource:
                             continue
                         raise AuctionListError('SEARCH_PAGE_NOT_READY', f'{self.key} page did not expose a new verified result set')
                     page.wait_for_timeout(250)
+                if loading_window_opened:
+                    resume_background()
                 page_rows = state.get('rows') or []
                 if not page_rows and not (state.get('empty') and state.get('total')==0):
                     raise AuctionListError('SEARCH_PAGE_NOT_READY', 'Unconfirmed empty result')
@@ -789,6 +838,7 @@ class AuctionListSource:
         except Exception as exc:
             exc.partial_collection = SearchCollection(rows,visited,expected_pages,total)
             exc.network_failures = list(network_failures)
+            exc.browser_diagnostics = browser_diagnostics
             try:
                 emit_progress(stop_reason=getattr(exc,'code','READ_ERROR'))
             except Exception:
@@ -796,5 +846,7 @@ class AuctionListSource:
             raise
         finally:
             page.remove_listener('response',resource_response)
+            page.remove_listener('pageerror',script_error)
+            page.remove_listener('requestfailed',request_failed)
             if guard:
                 guard.close()

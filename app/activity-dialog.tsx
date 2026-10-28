@@ -15,6 +15,7 @@ export type ActivityRun = {
     project_plans?: { project_id: number; source_key: string; name?: string }[];
     pagination?: Record<string, {
       mode?: string; pages_visited?: number; total_pages?: number; expected_pages?: number; ads_seen?: number; complete?: boolean; stop_reason?: string;
+      stage?: string;
       browser_notice?: string | null;
       read_summary?: { dated: number; exact_time: number; without_date: number; unrecognized_schedule: number; unsupported_market: number };
       interaction?: { state: string; source_key?: string; reason?: string; expires_at?: string } | null;

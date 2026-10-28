@@ -53,7 +53,16 @@ export function AuctionSearchNotice({ run, projectId, locale }: { run: Pick<Acti
   };
   const summary = info.read_summary;
   return <section className="activity-notice" aria-label={l("Результат обхода", "Результат обходу")}>
-    <b>{partial ? l("Неполный поиск", "Неповний пошук") : info.complete ? l("Выбранный охват проверен", "Вибране охоплення перевірено") : l("Обход выдачи", "Обхід видачі")}</b>
+    <b>{partial ? l("Неполный поиск", "Неповний пошук") : info.complete ? l("Выбранный охват проверен", "Вибране охоплення перевірено")
+      : info.stage === 'OPENING_SEARCH' ? l("Открываем страницу поиска", "Відкриваємо сторінку пошуку")
+      : info.stage === 'SEARCH_WINDOW_LOADING' ? l("Открыто окно Copart", "Відкрито вікно Copart")
+      : info.stage === 'PREPARING_SEARCH' ? l("Ожидаем выдачу сайта", "Очікуємо видачу сайту") : l("Обход выдачи", "Обхід видачі")}</b>
+    {!partial && !info.complete && info.stage === 'SEARCH_WINDOW_LOADING' && <p>{l(
+      "Страница загружается дольше обычного. Посмотрите открытое окно Copart: завершите выбор cookies или проверку, если сайт их запросит. Если страница пустая — обновите её вручную. Не меняйте фильтры. После загрузки поиск продолжится автоматически; его можно отменить в активных запусках.",
+      "Сторінка завантажується довше, ніж зазвичай. Перегляньте відкрите вікно Copart: завершіть вибір cookies або перевірку, якщо сайт їх запитає. Якщо сторінка порожня — оновіть її вручну. Не змінюйте фільтри. Після завантаження пошук продовжиться автоматично; його можна скасувати в активних запусках.")}</p>}
+    {!partial && !info.complete && ['OPENING_SEARCH','PREPARING_SEARCH'].includes(info.stage || '') && <p>{l(
+      "Лоты ещё не прочитаны. Поиск можно отменить в активных запусках.",
+      "Лоти ще не прочитані. Пошук можна скасувати в активних запусках.")}</p>}
     <p>{info.mode === "FIRST_PAGE" ? l("Первая страница", "Перша сторінка") : `${l("Страниц", "Сторінок")}: ${count(info.pages_visited)} / ${count(info.total_pages)}`} · {l("Прочитано лотов", "Прочитано лотів")}: {count(info.ads_seen)}</p>
     {summary && <p>{l("С датой", "З датою")}: {count(summary.dated)} · {l("С точным временем", "З точним часом")}: {count(summary.exact_time)} · {l("Без назначенной даты", "Без призначеної дати")}: {count(summary.without_date)} · {l("Расписание не подтверждено", "Розклад не підтверджено")}: {count(summary.unrecognized_schedule)} · {l("Вне рынка USA", "Поза ринком USA")}: {count(summary.unsupported_market)}</p>}
     {summary && Number.isSafeInteger(summary.without_date) && summary.without_date > 0 && <p>{l(

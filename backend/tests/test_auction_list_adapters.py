@@ -210,7 +210,8 @@ def test_interactive_verification_waits_for_the_user_not_an_automatic_reload(ada
     result=source.collect_search_pages(page,url,progress=progress.append)
     assert len(result.rows)==1
     assert page.navigations==[url]  # No automatic reload or CAPTCHA interaction.
-    assert progress[0]['interaction']['state']=='WAITING_FOR_USER'
+    assert progress[0]['stage']=='OPENING_SEARCH'
+    assert next(info['interaction'] for info in progress if info.get('interaction'))['state']=='WAITING_FOR_USER'
     assert progress[-1].get('interaction') is None
 
 
@@ -303,6 +304,99 @@ def test_result_header_before_async_rows_is_still_loading(adapters,key):
     assert len(source.collect_search_pages(page,url).rows)==1
 
 
+@pytest.mark.parametrize('outcome', ['ready','error','cancel'])
+def test_search_publishes_initial_and_preparation_progress_before_any_rows(adapters, outcome):
+    from app.sources.auction_lists import AuctionListError
+    source = get_source('copart')
+    clock, events = [100.0], []
+    adapters.monkeypatch.setattr('app.sources.auction_lists.monotonic', lambda: clock[0])
+    page = Page([snapshot('copart',[ROWS['copart'][0]],total=1)])
+    original_goto = page.goto
+    def goto(*args, **kwargs):
+        assert events and events[0][1].get('stage') == 'OPENING_SEARCH', 'Opening must be visible before navigation starts'
+        return original_goto(*args, **kwargs)
+    page.goto = goto
+    def prepare(page, *, checkpoint, verification):
+        for _ in range(6):
+            checkpoint()
+            clock[0] += 1
+        if outcome == 'error':
+            raise AuctionListError('SEARCH_PAGE_NOT_READY','fixture did not load')
+    adapters.monkeypatch.setattr(source,'prepare_page',prepare)
+    def checkpoint():
+        if outcome == 'cancel' and clock[0] >= 103:
+            raise RuntimeError('cancel preparation')
+    def collect():
+        return source.collect_search_pages(page,'https://www.copart.com/lotSearchResults?searchCriteria=%7B%7D',
+            checkpoint=checkpoint,progress=lambda info:events.append((clock[0],info)))
+    if outcome == 'ready':
+        assert len(collect().rows) == 1
+        assert events[-1][1]['complete'] is True
+    else:
+        with pytest.raises(AuctionListError if outcome == 'error' else RuntimeError):
+            collect()
+        assert events[-1][1]['complete'] is False
+        assert events[-1][1]['ads_seen'] == 0
+    preparing = [(t,info) for t,info in events if info.get('stage') == 'PREPARING_SEARCH']
+    assert len(preparing) >= (3 if outcome != 'cancel' else 2)
+    assert all(info['pages_visited'] == 0 and info['ads_seen'] == 0 for _,info in preparing)
+    assert all(later[0]-earlier[0] <= 2 for earlier,later in zip(preparing,preparing[1:]))
+
+
+def test_failed_search_diagnostics_keep_codes_not_script_text_urls_or_cookies(adapters, caplog):
+    from app.worker import _failure_detail
+    from app.sources.auction_lists import AuctionListError
+    source = get_source('copart')
+    page = Page([snapshot('copart',[],total=0)])
+    original_goto = page.goto
+    def goto(url, **kwargs):
+        original_goto(url, **kwargs)
+        page.listeners['pageerror'](BrowserError('private-script-text secret-token'))
+        for failure in ['net::ERR_CERT_AUTHORITY_INVALID', 'secret-token https://example.test/?cookie=private']:
+            page.listeners['requestfailed'](SimpleNamespace(resource_type='script', failure=failure,
+                url='https://private.example/path?token=private'))
+        page.listeners['response'](SimpleNamespace(status=503,url='https://other.example/private?token=secret',
+            request=SimpleNamespace(resource_type='script')))
+    page.goto = goto
+    adapters.monkeypatch.setattr(source, 'prepare_page', lambda *args, **kwargs: (_ for _ in ()).throw(
+        AuctionListError('SEARCH_PAGE_NOT_READY','Search interface did not load')))
+    progress = []
+    with pytest.raises(ScanError) as caught:
+        source.collect_search_pages(page,'https://www.copart.com/lotSearchResults?searchCriteria=%7B%7D',progress=progress.append)
+    failure = _failure_detail(exc=caught.value,scope='PROJECT')
+    diagnostics = failure['browser_diagnostics']
+    assert diagnostics['script_errors'] == 1
+    assert diagnostics['request_failures'] == [dict(resource_type='script',code='net::ERR_CERT_AUTHORITY_INVALID'),
+                                               dict(resource_type='script',code='OTHER')]
+    assert diagnostics['http_failures'] == [dict(resource_type='script',status=503,site_resource=False)]
+    assert progress[-1]['browser_diagnostics'] == diagnostics
+    assert 'browser_diagnostics=' in caplog.text
+    assert not any(secret in json.dumps(failure)+caplog.text for secret in ['secret-token','private-script-text','private.example','other.example','cookie='])
+    assert not page.listeners, 'Remove diagnostic listeners after the search, including failure'
+
+
+def test_worker_opening_progress_does_not_count_an_unread_page(adapters):
+    source = get_source('copart')
+    page = Page([snapshot('copart',[ROWS['copart'][0]],total=1)])
+    adapters.monkeypatch.setattr(source,'open_browser',lambda *a, **k:
+        (SimpleNamespace(close=lambda:None),SimpleNamespace(close=lambda:None),page))
+    adapters.monkeypatch.setattr('app.worker.desktop_playwright',_fake_playwright)
+    with adapters.factory() as db:
+        owner = db.get(User,adapters.user_id)
+        project = create_project(ProjectIn(name='Progress fixture',source_key='copart',
+            search_url='https://www.copart.com/lotSearchResults?searchCriteria=%7B%7D'),owner,db)
+        job = scan_projects(ScanProjectsIn(project_ids=[project['id']]),owner,db)
+    observed = []
+    def published(*_):
+        with adapters.factory() as db:
+            run = db.get(ScanRun,job['id'])
+            info = (run.payload.get('pagination') or {}).get(str(project['id']),{})
+            if info.get('stage') == 'OPENING_SEARCH': observed.append(run.progress)
+    adapters.monkeypatch.setattr('app.worker.publish_scan_update',published)
+    process_job(job['id'])
+    assert observed and observed == [0], 'Opening the browser has not read a result page'
+
+
 def test_consent_overlay_must_be_closed_before_pagination(adapters):
     source=get_source('copart')
     page=Page([{**snapshot('copart',[ROWS['copart'][0]],total=1),'consent_required':True},snapshot('copart',[ROWS['copart'][0]],total=1)])
@@ -311,7 +405,7 @@ def test_consent_overlay_must_be_closed_before_pagination(adapters):
     progress=[]
     result=source.collect_search_pages(page,'https://www.copart.com/lotSearchResults?searchCriteria=%7B%7D',all_pages=True,progress=progress.append)
     assert len(result.rows)==1
-    assert progress[0]['interaction']['reason']=='COOKIE_CONSENT'
+    assert next(info['interaction'] for info in progress if info.get('interaction'))['reason']=='COOKIE_CONSENT'
 
 
 @pytest.mark.parametrize('first,second', [('COOKIE_CONSENT','CAPTCHA'),('CAPTCHA','COOKIE_CONSENT')])
@@ -455,7 +549,7 @@ def test_worker_manual_wait_can_be_cancelled_from_another_connection_and_restart
         if cancellation:return
         with adapters.factory() as db:
             info=(db.get(ScanRun,job['id']).payload.get('pagination') or {}).get(str(project['id']),{})
-            if info.get('interaction',{}).get('state')=='WAITING_FOR_USER':
+            if (info.get('interaction') or {}).get('state')=='WAITING_FOR_USER':
                 thread=Thread(target=cancel)
                 cancellation.append(thread)
                 thread.start()
@@ -751,7 +845,7 @@ def test_cancelled_collection_keeps_checked_rows_and_can_start_fresh(adapters,ke
     cancel={'ready':False}
     def checkpoint():
         if cancel['ready']:raise RuntimeError('cancelled by user')
-    def progress(info):cancel['ready']=True
+    def progress(info):cancel['ready']=info['pages_visited'] >= 1
     with pytest.raises(RuntimeError,match='cancelled by user') as caught:
         source.collect_search_pages(Page(pages),url,all_pages=True,checkpoint=checkpoint,progress=progress)
     assert len(caught.value.partial_collection.rows)==1
