@@ -306,6 +306,33 @@ with desktop_playwright() as pw:
         except Exception as error:
             results.append({'name':name,'status':'failed','error':str(error)[:400],'url':page.url,'traceback':traceback.format_exc()[-1800:]})
             page.screenshot(path=str(report/f'failure-{len(results)}.png'),full_page=True)
+    def search_feedback():
+        try:
+            for locale in ['ru','uk']:
+                for width in [1280,980,360]:
+                    mode.update(locale=locale,source='copart',collections_fixture=True,collection_empty=True,runs=[dict(
+                        id=101,kind='PROJECTS',status='SUCCEEDED',progress=100,payload=dict(project_ids=[9],
+                        project_statuses={'9':'SUCCEEDED'},pagination={'9':dict(mode='ALL_PAGES',pages_visited=1,
+                        total_pages=1,ads_seen=3,complete=True,read_summary=dict(dated=0,exact_time=0,without_date=3,
+                        unrecognized_schedule=0,unsupported_market=0))}))])
+                    page.set_viewport_size({'width':width,'height':900})
+                    page.goto(BASE+'?source=copart&view=settings')
+                    settings=page.locator('.source-nav button[aria-current="page"]')
+                    settings.wait_for()
+                    assert settings.inner_text()==('Настройки приложения' if locale=='ru' else 'Налаштування застосунку')
+                    assert settings.evaluate('(e)=>["borderTopLeftRadius","borderTopRightRadius","borderBottomLeftRadius","borderBottomRightRadius"].every(k=>parseFloat(getComputedStyle(e)[k])>=7)'), 'Selected settings must have four rounded corners'
+                    settings.screenshot(path=str(report/f'settings-selected-{locale}-{width}.png'))
+                    page.goto(BASE+'?source=copart&view=project&project=9')
+                    copy='Новые лоты без назначенной даты торгов не сохраняются' if locale=='ru' else 'Нові лоти без призначеної дати торгів не зберігаються'
+                    page.get_by_text(copy,exact=False).wait_for()
+                    page.get_by_text('Сохранённых лотов нет' if locale=='ru' else 'Збережених лотів немає',exact=True).wait_for()
+                    assert not page.locator('.auction-card').count()
+                    assert page.evaluate('document.documentElement.scrollWidth<=innerWidth'), 'Feedback must fit the viewport'
+                    page.screenshot(path=str(report/f'undated-results-{locale}-{width}.png'),full_page=True)
+        finally:
+            mode.update(locale='ru',collections_fixture=False,collection_empty=False,runs=[])
+    check('search feedback: rounded settings selection and undated results RU/UK',search_feedback)
+
     def backend_disconnection():
         try:
             for locale in ['ru','uk']:

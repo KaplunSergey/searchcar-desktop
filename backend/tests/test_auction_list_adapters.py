@@ -474,6 +474,41 @@ def test_worker_manual_wait_can_be_cancelled_from_another_connection_and_restart
     assert closed==['context','browser','context','browser']
 
 
+@pytest.mark.parametrize('dated_count', [0, 1, 3])
+def test_copart_worker_resumes_after_captcha_and_reports_undated_filtering(adapters, caplog, dated_count):
+    source = get_source('copart')
+    rows = [{**ROWS['copart'][0], 'source_car_id': str(80000100+i),
+             'url': f'https://www.copart.com/lot/{80000100+i}',
+             'date_text': ROWS['copart'][0]['date_text'] if i < dated_count else 'Upcoming lot'} for i in range(3)]
+    page = Page([{**snapshot('copart', [], total=0), 'ready': False, 'blocked': True},
+                 snapshot('copart', rows, total=3)])
+    page.wait_for_timeout = lambda *_: setattr(page, 'index', 1)  # User solves the challenge.
+    adapters.monkeypatch.setattr(source, '_interactive_page', page, raising=False)
+    adapters.monkeypatch.setattr(source, 'open_browser', lambda *a, **k:
+                                (SimpleNamespace(close=lambda: None), SimpleNamespace(close=lambda: None), page))
+    adapters.monkeypatch.setattr('app.worker.desktop_playwright', _fake_playwright)
+    with adapters.factory() as db:
+        owner = db.get(User, adapters.user_id)
+        project = create_project(ProjectIn(name='Private project name', source_key='copart',
+            search_url='https://www.copart.com/lotSearchResults?searchCriteria=%7B%7D'), owner, db)
+        job = scan_projects(ScanProjectsIn(project_ids=[project['id']]), owner, db)
+    caplog.set_level('INFO', logger='app.worker')
+    process_job(job['id'])
+    with adapters.factory() as db:
+        run = db.get(ScanRun, job['id'])
+        assert run.status == 'SUCCEEDED', run.error
+        info = run.payload['pagination'][str(project['id'])]
+        assert info['complete'] is True and info['ads_seen'] == 3
+        assert info['interaction'] is None
+        assert info['read_summary']['without_date'] == 3-dated_count
+        assert len(list(db.scalars(select(Car)))) == dated_count
+    messages = [record.getMessage() for record in caplog.records if record.name == 'app.worker']
+    assert any('source=copart state=WAITING_FOR_USER' in msg for msg in messages)
+    assert any('source=copart state=RESUMED' in msg for msg in messages)
+    assert any(f'state=COMPLETE pages=1 lots_read=3 dated={dated_count} undated={3-dated_count}' in msg for msg in messages)
+    assert not any('Private project name' in msg or 'searchCriteria' in msg for msg in messages)
+
+
 @pytest.mark.parametrize("key", ["copart", "iaa"])
 def test_pagination_is_verified_and_first_page_is_deliberate_coverage(adapters, key):
     source = get_source(key)

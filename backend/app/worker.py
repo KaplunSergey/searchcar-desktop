@@ -932,6 +932,7 @@ def process_job(job_id: int, *, runtime_pool=None) -> None:
                             pagination = dict(
                                 (job.payload or {}).get("pagination") or {}
                             )
+                            previous_interaction = (pagination.get(str(project.id)) or {}).get('interaction')
                             pagination[str(project.id)] = {
                                 **info,
                                 "mode": page_mode,
@@ -960,6 +961,15 @@ def process_job(job_id: int, *, runtime_pool=None) -> None:
                             )
                             db.commit()
                             publish_scan_update(job.owner_id, job.id)
+                            interaction = info.get('interaction')
+                            if list_only and (info.get('complete') or bool(previous_interaction) != bool(interaction)):
+                                summary = info.get('read_summary') or {}
+                                state = 'COMPLETE' if info.get('complete') else 'WAITING_FOR_USER' if interaction else 'RESUMED'
+                                logging.getLogger(__name__).info(
+                                    'Auction list read: source=%s state=%s pages=%s lots_read=%s dated=%s undated=%s schedule_unknown=%s',
+                                    project.source_key, state, info.get('pages_visited', 0), info.get('ads_seen', 0),
+                                    summary.get('dated', 0), summary.get('without_date', 0), summary.get('unrecognized_schedule', 0),
+                                )
 
                         def collection_checkpoint() -> None:
                             if runtime_pool:

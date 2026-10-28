@@ -56,6 +56,9 @@ export function AuctionSearchNotice({ run, projectId, locale }: { run: Pick<Acti
     <b>{partial ? l("Неполный поиск", "Неповний пошук") : info.complete ? l("Выбранный охват проверен", "Вибране охоплення перевірено") : l("Обход выдачи", "Обхід видачі")}</b>
     <p>{info.mode === "FIRST_PAGE" ? l("Первая страница", "Перша сторінка") : `${l("Страниц", "Сторінок")}: ${count(info.pages_visited)} / ${count(info.total_pages)}`} · {l("Прочитано лотов", "Прочитано лотів")}: {count(info.ads_seen)}</p>
     {summary && <p>{l("С датой", "З датою")}: {count(summary.dated)} · {l("С точным временем", "З точним часом")}: {count(summary.exact_time)} · {l("Без назначенной даты", "Без призначеної дати")}: {count(summary.without_date)} · {l("Расписание не подтверждено", "Розклад не підтверджено")}: {count(summary.unrecognized_schedule)} · {l("Вне рынка USA", "Поза ринком USA")}: {count(summary.unsupported_market)}</p>}
+    {summary && Number.isSafeInteger(summary.without_date) && summary.without_date > 0 && <p>{l(
+      "Новые лоты без назначенной даты торгов не сохраняются. Они появятся в проекте после назначения даты и повторного поиска.",
+      "Нові лоти без призначеної дати торгів не зберігаються. Вони з’являться в проєкті після призначення дати й повторного пошуку.")}</p>}
     {info.stop_reason && <p>{reasons[info.stop_reason] || l("Обход остановлен. Подробности — в ошибке запуска.", "Обхід зупинено. Подробиці — у помилці запуску.")}</p>}
     {run.payload?.failures?.filter(failure => failure.project_id === projectId).map((failure, index) =>
       <details className="auction-search-error" key={index}><summary>{l("Подробности ошибки", "Подробиці помилки")} · {failure.code}</summary>

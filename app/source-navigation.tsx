@@ -90,11 +90,11 @@ export function SourceNavigation({ source, view, locale, navigate, selectSource,
         </div>}
       </div>; })}
     </div>)}
-    <button type="button" className={`application-settings ${view === "settings" ? "active" : ""}`} aria-current={view === "settings" ? "page" : undefined}
+    <div className="application-settings"><button type="button" className={view === "settings" ? "active" : ""} aria-current={view === "settings" ? "page" : undefined}
       onClick={() => navigate("settings")}>
       <svg className="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16M8 4v6M16 14v6" /></svg>
       <span className="nav-label">{uk ? "Налаштування застосунку" : "Настройки приложения"}</span>
-    </button>
+    </button></div>
   </nav>;
 }
 

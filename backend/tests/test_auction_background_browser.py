@@ -586,3 +586,37 @@ def test_cookie_prompt_arriving_during_classic_view_click_requests_manual_choice
     source.prepare_page(page, checkpoint=lambda: None, verification=verification)
     assert confirmations == ['COOKIE_CONSENT']
     assert len(clicks) == 2 and state['ready']
+
+
+@pytest.mark.parametrize('outcome', ['loaded', 'timeout', 'cancel'])
+def test_copart_cold_interface_has_its_own_bounded_cancellable_load_budget(adapters, outcome):
+    source = get_source('copart')
+    clock, clicks = [0.0], []
+    adapters.monkeypatch.setattr('app.sources.copart.monotonic', lambda: clock[0])
+    class Classic:
+        def count(self): return int(outcome == 'loaded' and clock[0] >= 40)
+        def click(self, **kwargs): clicks.append(clock[0])
+    page = SimpleNamespace(
+        locator=lambda selector: SimpleNamespace(count=lambda: 0),
+        evaluate=lambda script: {'ready':False,'blocked':False,'consent_required':False,'document_loaded':True},
+        get_by_role=lambda *args, **kwargs: Classic(),
+        wait_for_timeout=lambda ms: clock.__setitem__(0, clock[0]+ms/1000),
+    )
+    def checkpoint():
+        if outcome == 'cancel' and clock[0] >= 1:
+            raise RuntimeError('cancel loading')
+    def verification(reason):
+        pytest.fail('Loading alone must not be presented as a CAPTCHA')
+    if outcome == 'loaded':
+        source.prepare_page(page,checkpoint=checkpoint,verification=verification)
+        assert clicks == [40.0]
+    elif outcome == 'timeout':
+        with pytest.raises(ScanError) as caught:
+            source.prepare_page(page,checkpoint=checkpoint,verification=verification)
+        assert caught.value.code == 'SEARCH_PAGE_NOT_READY'
+        assert clock[0] == 90.0 and not clicks
+    else:
+        with pytest.raises(RuntimeError,match='cancel loading'):
+            source.prepare_page(page,checkpoint=checkpoint,verification=verification)
+        assert clock[0] == 1.0 and not clicks
+    assert source.read_timeout_seconds == 30, 'Later result pages must retain their existing budget'

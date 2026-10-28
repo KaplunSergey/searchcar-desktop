@@ -18,6 +18,8 @@ class CopartSource(AuctionListSource):
     default_mileage_unit = 'mi'
     next_selector = '#serverSideDataTable_next a'
     selection_entry_url = 'https://www.copart.com/vehicleFinder'
+    # Copart bootstraps its newer UI before exposing the Classic switch.
+    prepare_timeout_seconds = 90
 
     def read_selection_dom(self, page):
         state = self.read_dom(page)
@@ -93,7 +95,7 @@ class CopartSource(AuctionListSource):
         return bool(state and state[1] in 'AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC'.split())
 
     def prepare_page(self, page, *, checkpoint, verification):
-        deadline=monotonic()+self.read_timeout_seconds
+        deadline=monotonic()+self.prepare_timeout_seconds
         while not page.locator('#serverSideDataTable').count():
             checkpoint()
             if page.locator('#serverSideDataTable').count():
@@ -101,7 +103,7 @@ class CopartSource(AuctionListSource):
             state=self.read_dom(page)
             if state.get('blocked') or state.get('consent_required'):
                 verification('CAPTCHA' if state.get('blocked') else 'COOKIE_CONSENT')
-                deadline=monotonic()+self.read_timeout_seconds
+                deadline=monotonic()+self.prepare_timeout_seconds
                 continue
             classic=page.get_by_role('button',name=re.compile('Classic view',re.I))
             if classic.count():
@@ -116,11 +118,13 @@ class CopartSource(AuctionListSource):
                     if not self.read_dom(page).get('consent_required'):
                         raise
                     verification('COOKIE_CONSENT')
-                    deadline=monotonic()+self.read_timeout_seconds
+                    deadline=monotonic()+self.prepare_timeout_seconds
                     continue
                 return
             if monotonic()>=deadline:
-                raise AuctionListError('SEARCH_PAGE_NOT_READY','Copart search interface did not finish loading')
+                raise AuctionListError('SEARCH_PAGE_NOT_READY',
+                    f'Copart search interface did not finish loading after {self.prepare_timeout_seconds}s '
+                    f'(document_loaded={bool(state.get("document_loaded"))}; Classic view/table unavailable)')
             page.wait_for_timeout(250)
 
     dom_script = r"""() => {

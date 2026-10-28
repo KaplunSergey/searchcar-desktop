@@ -232,6 +232,19 @@ test("completed first-page search is not presented as failed full coverage", () 
   assert.match(html,/Первая страница/);
   assert.doesNotMatch(html,/Неполный поиск|1 \/ 4/);
 });
+test('undated search results explain why new cars are not saved, without confusing an unknown schedule with an absent date', () => {
+  const run={status:'SUCCEEDED',payload:{pagination:{'9':{mode:'ALL_PAGES',pages_visited:1,total_pages:1,ads_seen:3,complete:true,
+    read_summary:{dated:0,exact_time:0,without_date:3,unrecognized_schedule:0,unsupported_market:0}}}}};
+  for(const [locale,copy] of [['ru','Новые лоты без назначенной даты торгов не сохраняются'],['uk','Нові лоти без призначеної дати торгів не зберігаються']]) {
+    const render=()=>renderToStaticMarkup(React.createElement(AuctionSearchNotice,{run,projectId:9,locale}));
+    assert.ok(render().includes(copy));
+    run.payload.pagination['9'].read_summary.without_date=0;
+    run.payload.pagination['9'].read_summary.unrecognized_schedule=3;
+    assert.ok(!render().includes(copy), 'An unrecognized schedule is not proof the source has not assigned a date');
+    run.payload.pagination['9'].read_summary.without_date=3;
+    run.payload.pagination['9'].read_summary.unrecognized_schedule=0;
+  }
+});
 test('a waiting project in the expanded journal is still active, not an incomplete result',()=>{
   const html=renderToStaticMarkup(React.createElement(AuctionSearchNotice,{locale:'ru',projectId:9,
     run:{status:'WAITING_FOR_USER',payload:{pagination:{'9':{pages_visited:0,total_pages:2,ads_seen:0,complete:false}}}}}));
