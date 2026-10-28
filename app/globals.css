@@ -4,6 +4,8 @@
 @import "./auction-projects.css";
 @import "./auction-telegram-preview.css";
 @import "./telegram-connection.css";
+.source-nav .source-pending{display:inline-block;width:12px;height:12px;border:2px solid currentColor;border-radius:50%;box-sizing:border-box}
+.source-nav .source-pending:is(.source-ready,.source-running,.source-waiting){background:currentColor}
 .auction-search-error{margin-top:12px;min-width:0;overflow-wrap:anywhere}.auction-search-error summary{cursor:pointer}.auction-search-error pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:12rem;overflow:auto;font-size:12px}
 @media(min-width:1101px){.auction-projects-panel .project-list .project-row.auction-project{grid-template-columns:minmax(170px,1.6fr) 110px 85px minmax(110px,1fr) 145px 118px}}
 .auction-projects-panel .project-list .project-row>.count{padding-left:24px;padding-right:8px}.auction-projects-panel .project-actions{gap:8px}.auction-projects-panel .project-actions .icon-button{flex-shrink:0}.auction-projects-panel .project-actions .auction-project-delete{color:var(--red)}

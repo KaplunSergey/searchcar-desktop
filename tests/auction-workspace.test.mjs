@@ -13,6 +13,17 @@ const base = { id: 40, title: "Saved car", source_key: "copart", source_listing_
   details: {}, money_values: [], round: { id: "current", last_observed_at: "2026-10-11T09:00:00Z" }, schedule: {},
   time: { event_kind: "START", precision: "EXACT", local_date: "2026-10-11", local_datetime: "2026-10-11T15:30:00+02:00", is_today: true, remaining_seconds: 12600, time_state: "UPCOMING_START" } };
 const card = (overrides = {}, locale = "ru") => renderToStaticMarkup(React.createElement(AuctionCard, { lot: { ...base, ...overrides }, context, locale, imageUrl: (value) => value }));
+test('source-check timestamps use the computer timezone and minute precision, including historical snapshots',()=>{
+  for(const locale of ['ru','uk']) {
+    const raw='2026-10-25T11:44:19.841334+00:00';
+    const html=card({round:{...base.round,last_observed_at:raw}},locale);
+    assert.match(html,/25\.10\.2026,?\s+12:44/);
+    assert.doesNotMatch(html.replace(/<[^>]*>/g,''),/2026-10-25T|12:44:19|841334/);
+    const historical=renderToStaticMarkup(React.createElement(AuctionCard,{lot:base,context,locale,imageUrl:v=>v,historicalAt:raw}));
+    assert.match(historical,/25\.10\.2026,?\s+12:44/);
+    assert.doesNotMatch(card({round:{...base.round,last_observed_at:'invalid-date'}},locale),/Invalid Date|invalid-date/);
+  }
+});
 const renderWorkspace=(props={})=>{
     const client=new QueryClient();
     try{return renderToStaticMarkup(React.createElement(QueryClientProvider,{client},React.createElement(AuctionWorkspace,{

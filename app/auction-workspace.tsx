@@ -109,6 +109,17 @@ export function auctionDate(lot: AuctionLot, context: AuctionClockContext, local
   return `${lot.time.is_today === true ? (locale === "uk" ? "Сьогодні · " : "Сегодня · ") : ""}${part("day")} ${part("month")}${value.slice(0, 4) === context.local_date.slice(0, 4) ? "" : ` ${part("year")}`}`;
 }
 
+function checkedAt(value: string | undefined | null, context: AuctionClockContext, locale: Locale) {
+  if (!value || !/(?:Z|[+-]\d{2}:\d{2})$/i.test(value)) return "—";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "—";
+  try {
+    return new Intl.DateTimeFormat(locale === "uk" ? "uk-UA" : "ru-RU", {
+      timeZone: context.computer_timezone, day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit",
+    }).format(date);
+  } catch { return "—"; }
+}
+
 export function AuctionCard({ lot, context, locale, open, imageUrl, openListing, nowMs, onRemove, historicalAt, historicalRoundId, telegramAction, catalog = SOURCE_CATALOG, listingValidators = LISTING_VALIDATORS }: {
   lot: AuctionLot; context: AuctionClockContext; locale: Locale; open?: () => void; imageUrl: (path: string) => string; openListing?: (url: string) => void;
   catalog?: SourceCatalog;
@@ -148,7 +159,7 @@ export function AuctionCard({ lot, context, locale, open, imageUrl, openListing,
       <div className="auction-condition"><b>{value(lot.details.engine_status)}</b><span>{lot.details.keys === true ? l("Ключи есть", "Ключі є") : lot.details.keys === false ? l("Ключей нет", "Ключів немає") : l("Ключи: нет данных", "Ключі: немає даних")}</span>
         {lot.details.title != null && <span>{l("Документ", "Документ")}: {value(lot.details.title)}</span>}</div>
       <p className="auction-snapshot">{l("Сохранённые сведения — не гарантия состояния машины.", "Збережені відомості — не гарантія стану автомобіля.")}</p>
-      <p className="auction-snapshot">{historicalAt ? l("Сведения на момент проверки", "Відомості на момент перевірки") : l("Последняя проверка источника", "Остання перевірка джерела")}: {historicalAt || lot.round?.last_observed_at || lot.schedule.observed_at || "—"}</p>
+      <p className="auction-snapshot">{historicalAt ? l("Сведения на момент проверки", "Відомості на момент перевірки") : l("Последняя проверка источника", "Остання перевірка джерела")}: {checkedAt(historicalAt || lot.round?.last_observed_at || lot.schedule.observed_at, context, locale)}</p>
       {frozen && lot.image && <p className="auction-snapshot">{l("Фото по сохранённой ссылке; изображение не архивируется и может измениться на сайте.", "Фото за збереженим посиланням; зображення не архівується й може змінитися на сайті.")}</p>}
     </div>
     <div className="auction-time"><span>{l("Аукцион", "Аукціон")}</span><b>{unavailable ? l("Последнее известное расписание", "Останній відомий розклад") : historicalAt ? (phaseLabel ? `${l("На момент проверки", "На момент перевірки")}: ${phaseLabel}` : event) : phaseLabel || (passed ? l("Время по расписанию наступило", "Час за розкладом настав") : event)}</b>
@@ -395,6 +406,21 @@ export function AuctionWorkspace({ source, view, projectId, carId, locale, proje
         <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7" /></svg>
       </button> : undefined}
       readState={<ReadState error={projectsError} loading={projectsLoading} retry={retryProjects} locale={locale} />} />
-    {collectionNotice}{collection !== "active" && collectionQueries.map((query, index) => <section key={ownProjects[index].id}><h2>{ownProjects[index].name}</h2>{updateStatus(ownProjects[index].id)}<ReadState error={query.isError} loading={query.isPending} retry={() => { void query.refetch(); }} locale={locale} />{query.data?.source_key === source && <><p className="auction-snapshot">{query.data.local_date} · {query.data.computer_timezone}</p><div className="auction-list">{cards(query.data)}</div>{!query.isError && !query.data.lots.length && <p>{emptyCollection}</p>}</>}</section>)}
+    {collectionNotice}{collection !== "active" && collectionQueries.map((query, index) => {
+      const project = ownProjects[index];
+      const data = query.data?.source_key === source && query.data.project_id === project.id ? query.data : null;
+      const count = data ? data.lots.filter(lot => lot.source_key === source).length : null;
+      return <section className={`auction-project-group${count === 0 ? " is-empty" : ""}`} data-project-id={project.id}
+        aria-labelledby={`auction-project-group-${project.id}`} key={project.id}>
+        <header className="auction-project-group-header"><div><small>{l("Проект", "Проєкт")}</small>
+          <h2 className="auction-project-group-title" id={`auction-project-group-${project.id}`}><button type="button"
+            aria-label={`${l("Открыть проект", "Відкрити проєкт")}: ${project.name}`} onClick={() => navigate("project", project.id)}>{project.name}<span aria-hidden="true"> →</span></button></h2>
+          {data && <p className="auction-snapshot">{data.local_date} · {data.computer_timezone}</p>}</div>
+          <div className="auction-project-group-meta"><span className="auction-project-group-count">{l("Авто", "Авто")}: {count ?? "—"}</span>{updateStatus(project.id)}</div>
+        </header>
+        <ReadState error={query.isError || !!query.data && !data} loading={query.isPending} retry={() => { void query.refetch(); }} locale={locale} />
+        {data && <><div className="auction-list">{cards(data)}</div>{!query.isError && count === 0 && <p className="auction-project-group-empty">{emptyCollection}</p>}</>}
+      </section>;
+    })}
   </>;
 }

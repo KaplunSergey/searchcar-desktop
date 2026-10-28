@@ -22,7 +22,7 @@
   align-self: start;
 }
 .auction-projects-panel .project-grid .project-row.auction-project .auction-project-name b {
-  font-size: 18px;
+  font-size: 20px;
 }
 .auction-projects-panel .project-grid .project-row.auction-project > .count {
   grid-column: 2;
@@ -99,4 +99,75 @@
   .auction-projects-panel .project-grid .project-row.auction-project > .auction-project-state {
     max-width: 120px;
   }
+}
+
+.auction-projects-panel .project-row.auction-project .auction-project-name b {
+  font-size: 19px;
+}
+.auction-projects-panel.collapsed .projects-toolbar-controls { display: none; }
+.auction-project-group {
+  min-width: 0;
+  margin: 24px 0;
+  padding: 20px;
+  border: 1px solid #ccd9ee;
+  border-radius: 16px;
+  background: #edf2fa;
+}
+.auction-project-group-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #ccd9ee;
+}
+.auction-project-group-header > div { min-width: 0; }
+.auction-project-group-header small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.auction-project-group-title { margin: 4px 0; }
+.auction-project-group-title button {
+  padding: 0;
+  color: var(--ink);
+  font-size: 21px;
+  font-weight: 750;
+  line-height: 1.35;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.auction-project-group-title button:hover { color: var(--blue); }
+.auction-project-group-title button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+.auction-project-group-header .auction-snapshot { margin: 6px 0 0; }
+.auction-project-group-meta {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+  flex: none;
+}
+.auction-project-group-count {
+  padding: 7px 11px;
+  border: 1px solid #ccd9ee;
+  border-radius: 8px;
+  background: white;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.auction-project-group .auction-list { margin: 0; }
+.auction-project-group.is-empty { background: #f8fafc; }
+.auction-project-group-empty { margin: 0; color: var(--muted); }
+@media (max-width: 600px) {
+  .auction-project-group { padding: 12px; margin: 18px 0; }
+  .auction-project-group-header { flex-wrap: wrap; gap: 10px; }
+  .auction-project-group-meta { display: flex; flex-wrap: wrap; align-items: center; }
+  .auction-project-group-title button { font-size: 19px; }
 }

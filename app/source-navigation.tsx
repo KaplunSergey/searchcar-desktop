@@ -76,7 +76,7 @@ export function SourceNavigation({ source, view, locale, navigate, selectSource,
           aria-label={`${name}: ${label}`} aria-expanded={key === source} aria-controls={key === source ? `source-${key}-sections` : undefined}>
           <span className="source-monogram" aria-hidden="true">{name[0]}</span>
           <span className="nav-label">{name}</span>
-          <span className={`source-pending ${dotClass}`} role="img" aria-label={`${name}: ${label}`} title={label}>{dotClass ? "●" : "○"}</span>
+          <span className={`source-pending ${dotClass}`} role="img" aria-label={`${name}: ${label}`} title={label} />
         </button>
         {key === source && <div className="source-sections" id={`source-${key}-sections`}>
           {sections.map((section) => {

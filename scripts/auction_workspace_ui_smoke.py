@@ -274,6 +274,7 @@ with desktop_playwright() as pw:
             if mode.get('collections_fixture'):
                 collection=parse_qs(urlsplit(req.url).query).get('collection',['active'])[0]
                 value['collection']=collection
+                if mode.get('collection_wrong_project'): value['project_id']=999
                 value['lots']=[{**lot,'id':pid*10,'source_key':mode['source'],'title':f'{collection} car {pid}',
                     'url':lot['url'] if mode['source']=='copart' else 'https://www.iaai.com/VehicleDetail/65507986~US',
                     'project_search_status':'NOT_FOUND_IN_SEARCH' if collection=='archive' else 'FOUND'}]
@@ -361,6 +362,53 @@ with desktop_playwright() as pw:
         finally:
             mode.update(locale='ru',collections_fixture=False,collection_empty=False,runs=[])
     check('opening search feedback: stages and diagnostic window RU/UK',opening_search_feedback)
+
+    def project_collection_groups():
+        try:
+            for source,locale in [('copart','ru'),('iaa','uk')]:
+                mode.update(source=source,locale=locale,can_search=True,collections_fixture=True,collection_empty=False,runs=[],collection_error=None,
+                    bulk_projects=[dict(project,id=9,source_key=source,name='Audi · Длинное название проекта для проверки переносов'),
+                                   dict(project,id=10,source_key=source,name='BMW'),dict(project,id=11,source_key='encar',name='Foreign')])
+                page.goto(BASE+f'?source={source}')
+                for tab in (['Сегодня','Будущие','Без даты','Архив'] if locale=='ru' else ['Сьогодні','Майбутні','Без дати','Архів']):
+                    page.locator('.auction-tabs').get_by_role('button',name=tab,exact=True).click()
+                    page.wait_for_function("document.querySelector('.projects-collapsible-content').getBoundingClientRect().height<1")
+                    groups=page.locator('.auction-project-group')
+                    assert groups.count()==2, 'Every same-site project needs its own visible group'
+                    for pid in [9,10]:
+                        group=page.locator(f'.auction-project-group[data-project-id="{pid}"]')
+                        group.locator('.auction-card').wait_for()
+                        assert group.get_by_role('button',name='Открыть проект: ' + ('Audi · Длинное название проекта для проверки переносов' if pid==9 else 'BMW') if locale=='ru' else 'Відкрити проєкт: ' + ('Audi · Длинное название проекта для проверки переносов' if pid==9 else 'BMW'),exact=True).count()==1
+                        assert group.locator('.auction-project-group-count').inner_text()=='Авто: 1'
+                    assert not page.get_by_role('heading',name='Foreign',exact=True).count()
+                    for width in [1280,800,360]:
+                        page.set_viewport_size({'width':width,'height':900})
+                        assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+                        dot=page.locator('.source-button[aria-expanded="true"] .source-pending')
+                        assert page.locator('.auction-projects-panel').bounding_box()['height']<150, 'Hidden project controls must not leave a large blank toolbar'
+                        assert dot.evaluate('(e)=>e.getBoundingClientRect().width>=12&&e.getBoundingClientRect().height>=12')
+                        assert dot.evaluate('(e)=>getComputedStyle(e).backgroundColor===getComputedStyle(e).borderTopColor'), 'Ready status must be a solid circle, not a font glyph'
+                        assert page.locator('.auction-project-group-title button').first.evaluate('(e)=>parseFloat(getComputedStyle(e).fontSize)>=19')
+                        if tab in ['Сегодня','Сьогодні']: page.screenshot(path=str(report/f'project-groups-{source}-{width}.png'),full_page=True)
+                mode['collection_wrong_project']=True
+                page.locator('.auction-tabs').get_by_role('button',name='Проекты' if locale=='ru' else 'Проєкти',exact=True).click()
+                page.locator('.auction-tabs').get_by_role('button',name='Архив' if locale=='ru' else 'Архів',exact=True).click()
+                page.get_by_role('button',name='Повторить' if locale=='ru' else 'Повторити',exact=True).first.wait_for()
+                assert not page.locator('.auction-card').count(), 'A mismatched response must not place cars in the wrong project'
+                assert page.locator('.auction-project-group-count').all_text_contents()==['Авто: —','Авто: —']
+                mode['collection_wrong_project']=False
+                page.get_by_role('button',name='Повторить' if locale=='ru' else 'Повторити',exact=True).first.click()
+                page.locator('.auction-project-group[data-project-id="9"] .auction-card').wait_for()
+                mode['collection_empty']=True
+                page.locator('.auction-tabs').get_by_role('button',name='Сегодня' if locale=='ru' else 'Сьогодні',exact=True).click()
+                page.get_by_text('Сегодня сохранённых аукционов нет' if locale=='ru' else 'Сьогодні збережених аукціонів немає',exact=True).first.wait_for()
+                assert not page.locator('.auction-card').count()
+                assert page.locator('.auction-project-group-count').all_text_contents()==['Авто: 0','Авто: 0']
+                page.locator('.auction-project-group-title button').first.click()
+                page.wait_for_url(f'**/?source={source}&view=project&project=9')
+        finally:
+            mode.update(locale='ru',source='copart',collections_fixture=False,collection_empty=False,collection_wrong_project=False,collection_error=None,bulk_projects=None,can_search=True)
+    check('project collection groups: ownership, large titles and status dots RU/UK',project_collection_groups)
 
     def backend_disconnection():
         try:
