@@ -90,10 +90,18 @@ with desktop_playwright() as pw:
             if mode.get('runtime_offline'):
                 route.abort('connectionfailed');return
             value={'desktop':True,'source_test_mode':True,'updater':False,'telegram_delivery_enabled':bool(mode.get('delivery_enabled'))}
-        elif path=='/settings': value={'enabled':False,'paused':False,'project_ids':[],'interval_minutes':180,'performance_mode':'FAST'}
+        elif path=='/settings':
+            if req.method=='PUT' and mode.get('license_fixture'): mode['settings_fixture']=json.loads(req.post_data)
+            value=mode.get('settings_fixture') or {'enabled':False,'paused':False,'project_ids':[],'interval_minutes':180,'performance_mode':'FAST'}
+        elif path in ('/desktop/license','/desktop/license/refresh') and mode.get('license_fixture'):
+            if req.method=='POST': mode['licensed_sources']=mode['refreshed_sources']
+            value=dict(status='active',mode='required',service_configured=True,license_id='fixture-license',device_id='fixture-device',
+                license_type='SUBSCRIPTION',can_search=bool(mode['licensed_sources']),sources=mode['licensed_sources'],
+                reason=None if mode['licensed_sources'] else 'LICENSE_SEARCH_DISABLED')
         elif path=='/scans/launch-options':
             value={'sources':mode.get('bulk_sources') or [{'source_key':s,'family':'AUCTION','can_search':mode['can_search'],'reason':None} for s in ['copart','iaa']],
                 'projects':mode.get('bulk_projects') if mode.get('bulk_projects') is not None else mode.get('progress_projects') or [{'id':9,'source_key':mode['source'],'name':project['name'],'can_search':mode['can_search'],'active_status':None,'reason':None}]}
+            if 'licensed_sources' in mode: value['licensed_sources']=mode['licensed_sources']
             if mode.get('availability_error'): status=503;value={'detail':'fixture_unavailable'}
         elif path=='/scans/projects':
             if mode.get('hold_bulk'):
@@ -307,6 +315,70 @@ with desktop_playwright() as pw:
         except Exception as error:
             results.append({'name':name,'status':'failed','error':str(error)[:400],'url':page.url,'traceback':traceback.format_exc()[-1800:]})
             page.screenshot(path=str(report/f'failure-{len(results)}.png'),full_page=True)
+    def licensed_sources():
+        try:
+            for locale in ['ru','uk']:
+                for width in [1280,360]:
+                    mode.update(locale=locale,source='copart',license_fixture=True,licensed_sources=['encar','copart','iaa'],
+                        bulk_projects=[dict(project,id=1,source_key='encar',name='Encar saved'),dict(project,name='Copart saved'),
+                            dict(project,id=10,source_key='iaa',name='IAA saved')],
+                        settings_fixture=dict(enabled=True,paused=False,project_ids=[1],interval_minutes=180,performance_mode='FAST'))
+                    page.set_viewport_size({'width':width,'height':1100})
+                    page.goto(BASE+'?source=encar')
+                    page.locator('.source-nav-site').filter(has=page.get_by_role('button',name='Encar:',exact=False)).wait_for()
+                    page.locator('.source-button').filter(has_text='Copart').click()
+                    page.locator('.application-settings button').click()
+                    refresh=page.get_by_role('button',name='Проверить сейчас' if locale=='ru' else 'Перевірити зараз',exact=True)
+                    refresh.wait_for()
+                    assert page.locator('.telegram-settings option[value="encar:1"]').count()==1
+                    mode['refreshed_sources']=['copart','iaa']
+                    refresh.click()
+                    page.wait_for_function('!document.querySelector(".source-encar-sections") && ![...document.querySelectorAll(".source-button")].some(e=>e.textContent.includes("Encar"))')
+                    assert not page.locator('.source-group-label').filter(has_text='Площадки' if locale=='ru' else 'Майданчики').count()
+                    assert not page.locator('.telegram-settings').count()
+                    assert not page.get_by_text('Encar saved',exact=True).count()
+                    save=page.get_by_role('button',name='Сохранить планировщик' if locale=='ru' else 'Зберегти планувальник',exact=True)
+                    assert save.is_disabled(), 'A hidden selected project cannot enable scheduling'
+                    page.locator('label').filter(has=page.get_by_text('Copart saved',exact=True)).get_by_role('checkbox').check()
+                    save.click()
+                    page.wait_for_function('document.querySelector(".setting-footer button")?.disabled===false')
+                    assert sorted(mode['settings_fixture']['project_ids'])==[1,9], 'Do not erase hidden saved selections'
+                    page.screenshot(path=str(report/f'licensed-settings-{locale}-{width}.png'),full_page=True)
+                    page.locator('.shell-refresh').click()
+                    page.locator('.launch-dialog[open]').wait_for()
+                    assert not page.locator('.launch-site').filter(has_text='Encar').count()
+                    assert not page.locator('.launch-family h3').filter(has_text='Площадки' if locale=='ru' else 'Майданчики').count()
+                    page.locator('.launch-dialog .modal-head button').click()
+                    page.go_back();page.go_back()
+                    page.wait_for_url('**/?source=copart')
+                    assert not page.locator('.source-button').filter(has_text='Encar').count()
+                    page.goto(BASE+'?source=encar&view=project&project=1')
+                    page.wait_for_url('**/?source=copart')
+                    assert not page.get_by_text('Encar saved',exact=True).count()
+                    page.locator('.application-settings button').click()
+                    mode['refreshed_sources']=[]
+                    refresh.click()
+                    page.get_by_text('Нет доступных источников' if locale=='ru' else 'Немає доступних джерел',exact=True).wait_for()
+                    assert not page.locator('.source-group-label,.source-button').count()
+                    page.screenshot(path=str(report/f'licensed-none-{locale}-{width}.png'),full_page=True)
+                    mode['refreshed_sources']=['encar']
+                    refresh.click()
+                    page.locator('.source-button').filter(has_text='Encar').wait_for()
+                    assert not page.locator('.source-group-label').filter(has_text='Аукционы' if locale=='ru' else 'Аукціони').count()
+                    page.get_by_text('Encar saved',exact=True).wait_for()
+                    mode['availability_error']=True
+                    page.goto(BASE+'?source=encar')
+                    page.get_by_text('Не удалось проверить доступные источники.' if locale=='ru' else 'Не вдалося перевірити доступні джерела.',exact=True).wait_for()
+                    assert not page.locator('.source-button').count()
+                    assert not page.get_by_text('Нет доступных источников' if locale=='ru' else 'Немає доступних джерел',exact=True).count()
+                    mode['availability_error']=False
+                    page.get_by_role('button',name='Повторить' if locale=='ru' else 'Повторити',exact=True).click()
+                    page.locator('.source-button').filter(has_text='Encar').wait_for()
+            assert not any(method in ('POST','DELETE') and (path.startswith('/scans/') or path.startswith('/projects/')) for method,path,_ in calls), 'Visibility changes must not start scans or delete projects'
+        finally:
+            for key in ['license_fixture','licensed_sources','refreshed_sources','settings_fixture','bulk_projects','availability_error']:mode.pop(key,None)
+            mode.update(locale='ru',source='copart')
+    check('licensed sources: refresh, navigation, empty families, settings, retained selections, history, errors RU/UK',licensed_sources)
     def search_feedback():
         try:
             for locale in ['ru','uk']:

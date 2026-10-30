@@ -16,5 +16,8 @@ export const SourceCatalogContext = createContext<SourceCatalog>(SOURCE_CATALOG)
 export const useSourceCatalog = () => useContext(SourceCatalogContext);
 export const sourceDefinition = (key: string, catalog = SOURCE_CATALOG) => catalog.find((site) => site.key === key);
 export const sourceName = (key: string, catalog = SOURCE_CATALOG) => sourceDefinition(key, catalog)?.name || key;
+// Older servers omit this field; only an explicit policy hides registered sites.
+export const licensedSourceCatalog = (keys: readonly string[] | undefined, catalog = SOURCE_CATALOG): SourceCatalog =>
+  keys === undefined ? catalog : catalog.filter((site) => keys.includes(site.key));
 export const sourceGroups = (catalog = SOURCE_CATALOG) => (["MARKETPLACE", "AUCTION"] as const)
   .map((family) => ({ family, sites: catalog.filter((site) => site.family === family) })).filter((group) => group.sites.length);

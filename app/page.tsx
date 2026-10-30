@@ -26,10 +26,10 @@ import { filterReportItems, reportProjectIds } from "./report-filter";
 import { formatSeatCount, translateOptionCode, translateVehicleSpec } from "./vehicle-dictionary";
 import { APP_VERSION } from "./version";
 import { AUCTION_QUERY_KEY, watchAuctionClock, withAuctionTimeZone } from "./auction-time-client";
-import { initialWorkspace, initialSiteRoutes, persistWorkspace, normalizeRoute, sourceRead, workspaceUrl, type SourceKey, type View } from "./source-workspace";
+import { initialWorkspace, initialSiteRoutes, persistWorkspace, normalizeRoute, licensedWorkspace, sourceRead, workspaceUrl, type SourceKey, type View } from "./source-workspace";
 import { SourceNavigation, SourceContextMismatch, SourceAvailabilityNotice, sourceAvailability } from "./source-navigation";
 import { LaunchDialog, launchSummary, reasonText, type LaunchOptions, type LaunchResult } from "./launch-dialog";
-import { SOURCE_CATALOG, SourceCatalogContext, sourceDefinition, sourceName, type SourceCatalog } from "./source-catalog";
+import { SOURCE_CATALOG, SourceCatalogContext, sourceDefinition, sourceName, licensedSourceCatalog, type SourceCatalog } from "./source-catalog";
 import { WORKSPACE_MODULES, MissingWorkspace, type WorkspaceModules } from "./source-modules";
 
 type Translate = (key: Key) => string;
@@ -646,7 +646,17 @@ export function App({
     void client.invalidateQueries({ queryKey: AUCTION_QUERY_KEY });
   }), [client]);
   const [locale, setLocale] = useState<Locale>(currentUser.preferred_locale || "ru");
-  const [route, setRoute] = useState(() => initialWorkspace(currentUser.workspace, sourceCatalog));
+  const [requestedRoute, setRoute] = useState(() => initialWorkspace(currentUser.workspace, sourceCatalog));
+  const [showLaunch, setShowLaunch] = useState(false);
+  const launchOptionsQuery = useQuery<LaunchOptions>({
+    queryKey: ["launch-options"], queryFn: () => request("/scans/launch-options"),
+    refetchInterval: (query) => showLaunch || query.state.data?.projects.some((project) => project.active_status) ? 5000 : 30_000,
+    refetchOnWindowFocus: true,
+    retry: false, staleTime: 0,
+  });
+  const accessLoaded = !!launchOptionsQuery.data;
+  const visibleCatalog = useMemo(() => licensedSourceCatalog(accessLoaded ? launchOptionsQuery.data?.licensed_sources : [], sourceCatalog), [accessLoaded, launchOptionsQuery.data?.licensed_sources, sourceCatalog]);
+  const route = useMemo(() => licensedWorkspace(requestedRoute, visibleCatalog), [requestedRoute, visibleCatalog]);
   const [sectionVisit, setSectionVisit] = useState(0);
   const { source, view, projectId: activeProjectId, carId: activeCarId } = route;
   const [restoredRoutes] = useState(() => initialSiteRoutes(route, currentUser.workspace, sourceCatalog));
@@ -662,7 +672,6 @@ export function App({
   const [formProject, setFormProject] = useState<ProjectRecord | "new" | null>(null);
   const [deleteProject, setDeleteProject] = useState<ProjectRecord | null>(null);
   const [showPassword, setShowPassword] = useState(currentUser.must_change_password);
-  const [showLaunch, setShowLaunch] = useState(false);
   const launchTrigger = useRef<HTMLButtonElement>(null);
   const [showActivity, setShowActivity] = useState(false);
   const activityTrigger = useRef<HTMLButtonElement>(null);
@@ -698,12 +707,6 @@ export function App({
     queryKey: ["scans", "active"],
     queryFn: () => request("/scans/active"),
     refetchInterval: 5000,
-  });
-  const launchOptionsQuery = useQuery<LaunchOptions>({
-    queryKey: ["launch-options"], queryFn: () => request("/scans/launch-options"),
-    refetchInterval: (query) => showLaunch || query.state.data?.projects.some((project) => project.active_status) ? 5000 : 30_000,
-    refetchOnWindowFocus: true,
-    retry: false, staleTime: 0,
   });
   const searchAvailability = sourceAvailability(launchOptionsQuery.data, source, launchOptionsQuery.isError);
   const projectAvailability = view === "project" ? launchOptionsQuery.data?.projects.find((project) => project.id === activeProjectId && project.source_key === source) : undefined;
@@ -779,16 +782,16 @@ export function App({
   }, [client]);
 
   useEffect(() => {
-    const initial = initialWorkspace(currentUser.workspace, sourceCatalog);
-    window.history.replaceState(initial, "", workspaceUrl(window.location.pathname, initial));
     const onPopState = (event: PopStateEvent) => {
       setRoute(event.state ? normalizeRoute(event.state, sourceCatalog) : initialWorkspace(workspaceSnapshot.current, sourceCatalog));
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, []);
+  }, [sourceCatalog]);
 
   useEffect(() => {
+    if (!accessLoaded) return;
+    window.history.replaceState(route, "", workspaceUrl(window.location.pathname, route));
     const snapshot = persistWorkspace(route, lastRoutes.current);
     if (currentUser.workspace !== undefined) {
       workspaceSnapshot.current = snapshot;
@@ -797,7 +800,7 @@ export function App({
         method: "PUT", body: snapshot, keepalive: true,
       })).then(() => setWorkspaceSaveError(false)).catch(() => setWorkspaceSaveError(true));
     }
-  }, [route]);
+  }, [route, accessLoaded, currentUser.workspace]);
 
   const navigate = (next: View, projectId?: number | null, carId?: number | null, nextSource = source) => {
     const state = {
@@ -941,7 +944,7 @@ export function App({
   const uiKey = sourceDefinition(source, sourceCatalog)?.ui || "";
   const Workspace = Object.hasOwn(workspaceModules, uiKey) ? workspaceModules[uiKey] : MissingWorkspace;
   return (
-    <SourceCatalogContext.Provider value={sourceCatalog}><div className="app-shell">
+    <SourceCatalogContext.Provider value={visibleCatalog}><div className="app-shell">
       <TelegramAutomaticClock enabled={desktopRuntimeQuery.data?.desktop === true && !backendDisconnected} write={telegramClockWrite} />
       <aside>
         <button className="brand" onClick={() => navigate("projects")}>
@@ -1064,6 +1067,17 @@ export function App({
           </div>
         </header>
         <main>
+          {!launchOptionsQuery.data && <section className="panel" role={launchOptionsQuery.isError ? "alert" : "status"}>
+            <p>{launchOptionsQuery.isError
+              ? locale === "uk" ? "Не вдалося перевірити доступні джерела." : "Не удалось проверить доступные источники."
+              : locale === "uk" ? "Перевіряємо доступні джерела…" : "Проверяем доступные источники…"}</p>
+            {launchOptionsQuery.isError && <Button onClick={retryAvailability}>{locale === "uk" ? "Повторити" : "Повторить"}</Button>}
+          </section>}
+          {launchOptionsQuery.data && !visibleCatalog.length && <section className="panel" role="status">
+            <h2>{locale === "uk" ? "Немає доступних джерел" : "Нет доступных источников"}</h2>
+            <p>{locale === "uk" ? "Перевірте ліцензію нижче. Доступ до сайтів налаштовує власник ліцензії; збережені проєкти та автомобілі не видаляються."
+              : "Проверьте лицензию ниже. Доступ к сайтам настраивает владелец лицензии; сохранённые проекты и автомобили не удаляются."}</p>
+          </section>}
           {backendDisconnected && <div className="warning-text" role="alert" data-backend-disconnected>
             <strong>{locale === "uk" ? "Немає зв’язку з локальним сервісом SearchCar." : "Нет связи с локальным сервисом SearchCar."}</strong>
             <p>{locale === "uk"
@@ -1191,7 +1205,7 @@ export function App({
             <Settings
               t={t}
               locale={locale}
-              projects={allProjectsQuery.data || []}
+              projects={(allProjectsQuery.data || []).filter((project) => sourceDefinition(project.source_key, visibleCatalog))}
               projectsLoading={allProjectsQuery.isPending}
               projectsError={allProjectsQuery.isError}
               retryProjects={() => { void allProjectsQuery.refetch(); }}
@@ -1227,7 +1241,7 @@ export function App({
         failed={allScansQuery.isError || allProjectsQuery.isError}
         retry={() => { void allScansQuery.refetch(); void allProjectsQuery.refetch(); }}
         cancel={(target) => activityCancelMutation.mutateAsync(target)} close={() => setShowActivity(false)} />}
-      {formProject && (
+      {formProject && sourceDefinition("encar", visibleCatalog) && (
         <ProjectModal
           t={t}
           project={formProject === "new" ? undefined : formProject}
@@ -1241,7 +1255,7 @@ export function App({
           }
         />
       )}
-      {deleteProject && (
+      {deleteProject && sourceDefinition(deleteProject.source_key, visibleCatalog) && (
         <ConfirmModal
           t={t}
           project={deleteProject}
@@ -4015,6 +4029,7 @@ function Settings({
     project_ids: [],
     ...(schedulerDraft ?? schedulerQuery.data),
   };
+  const hasScheduledProjects = projects.some((project) => scheduler.project_ids.includes(project.id));
   const restorePresentation = desktopDataQuery.data?.restore_result
     ? restoreResultPresentation(desktopDataQuery.data.restore_result, t)
     : null;
@@ -4315,9 +4330,11 @@ function Settings({
             <h3>{t("schedulerTitle")}</h3>
             <p>{t(desktop ? "automaticDesktopHelp" : "automaticHelp")}</p>
             <div className="scheduler-state">
-              <span className={`source-state ${scheduler.enabled && !scheduler.paused ? "ready" : ""}`}>
+              <span className={`source-state ${scheduler.enabled && !scheduler.paused && hasScheduledProjects ? "ready" : ""}`}>
                 {scheduler.paused
                   ? t("schedulerPaused")
+                  : scheduler.enabled && !hasScheduledProjects
+                    ? locale === "uk" ? "Очікує доступних проєктів" : "Ожидает доступных проектов"
                   : scheduler.enabled
                     ? t("schedulerEnabled")
                     : t("schedulerDisabled")}
@@ -4402,20 +4419,24 @@ function Settings({
               />
               <span>
                 <b>{project.name}</b>
-                <small>{t(project.scan_mode === "FAST" ? "fast" : "accurate")}</small>
+                <small>{sourceName(project.source_key)} · {t(project.scan_mode === "FAST" ? "fast" : "accurate")}</small>
               </span>
             </label>
           ))}
+          {!projects.length && <p>{locale === "uk" ? "Немає доступних проєктів для розкладу." : "Нет доступных проектов для расписания."}</p>}
+          {scheduler.project_ids.some((id) => !projects.some((project) => project.id === id)) && <p role="status">{locale === "uk"
+            ? "Частина збереженого вибору недоступна й не запускатиметься. Вибір збережено на випадок повернення доступу."
+            : "Часть сохранённого выбора недоступна и не будет запускаться. Выбор сохранён на случай возврата доступа."}</p>}
         </fieldset>
         <div className="setting-footer">
           <span>
-            {scheduler.enabled && !scheduler.project_ids.length
+            {scheduler.enabled && !hasScheduledProjects
               ? t("chooseAtLeastOneProject")
               : t("firstScanHelp")}
           </span>
           <Button
             kind="primary"
-            disabled={scheduler.enabled && !scheduler.project_ids.length}
+            disabled={scheduler.enabled && !hasScheduledProjects}
             onClick={() => saveScheduler.mutate()}
           >
             {t("saveSettings")}
@@ -4443,7 +4464,7 @@ function Settings({
               <div><dt>{t("licenseExpires")}</dt><dd>{formatDate(desktopLicenseQuery.data.subscription_expires_at, locale)}</dd></div>
               <div><dt>{t("licenseOfflineUntil")}</dt><dd>{formatDate(desktopLicenseQuery.data.lease_expires_at, locale)}</dd></div>
               <div><dt>{t("licenseDevice")}</dt><dd>{desktopLicenseQuery.data.device_id?.slice(0, 8) || "—"}</dd></div>
-              <div><dt>{t("licenseSources")}</dt><dd>{desktopLicenseQuery.data.sources?.join(", ") || "—"}</dd></div>
+              <div><dt>{t("licenseSources")}</dt><dd>{desktopLicenseQuery.data.sources?.map((key) => sourceName(key)).join(", ") || "—"}</dd></div>
             </dl>
           ) : null}
           {desktopLicenseQuery.data.reason ? (

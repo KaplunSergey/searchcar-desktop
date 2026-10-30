@@ -335,9 +335,9 @@ def evaluate_search_entitlement(
             entitlements.get("search"), bool
         ):
             raise LicenseStateError("LICENSE_ENTITLEMENTS_INVALID")
-        # Validate the signed policy even while per-site enforcement is deferred.
         raw_sources = entitlements.get("sources", ["*"])
-        if raw_sources == ["*"]:
+        all_sources = raw_sources == ["*"]
+        if all_sources:
             raw_sources = []
         if (
             not isinstance(raw_sources, list)
@@ -360,10 +360,9 @@ def evaluate_search_entitlement(
             if effective_time >= subscription_expires_at:
                 raise LicenseStateError("LICENSE_SUBSCRIPTION_EXPIRED")
 
-        # shortcut: allow all shipped sites until the owner site-policy rollout;
-        # restore signed per-site filtering together with that server/client release.
         from .sources.registry import list_sources
-        sources = tuple(sorted(source.key for source in list_sources())) if entitlements["search"] else ()
+        sources = tuple(sorted(source.key for source in list_sources()
+                               if all_sources or source.key in raw_sources)) if entitlements["search"] else ()
         can_search = entitlements["search"] is True and bool(sources)
         return EntitlementDecision(
             mode="required",

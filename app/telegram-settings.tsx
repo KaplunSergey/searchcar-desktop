@@ -21,8 +21,9 @@ export function TelegramSettings({ locale, projects, read, write, saveLegacy, na
   const [selected, setSelected] = useState(initialProjectId ? `${source || "encar"}:${initialProjectId}` : "");
   const catalog = useSourceCatalog();
   const l = (ru: string, uk: string) => locale === "uk" ? uk : ru;
-  const availableProjects = projects.filter(item => item.source_key === (source || "encar"));
+  const availableProjects = projects.filter(item => item.source_key === (source || "encar") && sourceDefinition(item.source_key, catalog));
   const project = availableProjects.find(item => `${item.source_key}:${item.id}` === selected);
+  if (!sourceDefinition(source || "encar", catalog)) return null;
   if (!source && !availableProjects.length && !projectsLoading && !projectsError) return null;
   return <>
     {native && source && <TelegramSharedSetup locale={locale} open={url => write("/desktop/open-external", { url })} />}

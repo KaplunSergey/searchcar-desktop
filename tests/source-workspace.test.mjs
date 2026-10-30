@@ -12,7 +12,7 @@ const user = { id: 1, username: "fixture", role: "USER", preferred_locale: "ru",
 const available = { sources: [{ source_key: "encar", family: "MARKETPLACE", can_search: true, reason: null }],
   projects: [{ id: 1, source_key: "encar", name: "Encar fixture", can_search: true, reason: null, active_status: null, scan_run_id: null }] };
 function render(t, { search = "", stored = null, locale = "ru", storage = {}, projectOverride = null, carOverride = null,
-  scanError = false, runtimeError = false, availabilityError = false, launchOptions = available, activeRuns = [], projectsOverride, auctionProject, auctionCar, auctionError = false, nativeWorkspace, sourceTestMode = false, deliveryEnabled = false } = {}) {
+  scanError = false, runtimeError = false, availabilityError = false, launchOptions = available, activeRuns = [], projectsOverride, auctionProject, auctionCar, auctionError = false, nativeWorkspace, sourceTestMode = false, deliveryEnabled = false, schedulerOverride, licenseStatus } = {}) {
   const previousWindow = globalThis.window;
   globalThis.window = {
     location: { search, pathname: "/" },
@@ -22,6 +22,7 @@ function render(t, { search = "", stored = null, locale = "ru", storage = {}, pr
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const project = { id: 1, source_key: "encar", name: "Encar fixture", updated_at: "2026-10-11T10:00:00Z", cars: 0 };
   client.setQueryData(["projects"], [project]);
+  client.setQueryData(["projects", "all"], projectsOverride || [project]);
   client.setQueryData(["projects", "encar"], projectsOverride || [project]);
   const requestedSource = readWorkspace(search, nativeWorkspace !== undefined ? nativeWorkspace : stored).source;
   if (projectsOverride && requestedSource !== "encar") client.setQueryData(["projects", requestedSource], projectsOverride);
@@ -32,6 +33,8 @@ function render(t, { search = "", stored = null, locale = "ru", storage = {}, pr
   client.setQueryData(["desktop-runtime"], { desktop: true, updater: !sourceTestMode, source_test_mode: sourceTestMode, telegram_delivery_enabled: deliveryEnabled });
   if (runtimeError) client.getQueryCache().find({ queryKey: ["desktop-runtime"], exact: true }).setState({ status: "error", error: new Error("fixture disconnected") });
   if (launchOptions) client.setQueryData(["launch-options"], launchOptions);
+  if (schedulerOverride) client.setQueryData(['scheduler'], schedulerOverride);
+  if (licenseStatus) client.setQueryData(['desktop-license'], licenseStatus);
   if (availabilityError) client.getQueryCache().find({ queryKey: ["launch-options"], exact: true }).setState({ status: "error", error: new Error("fixture unavailable") });
   if (scanError) client.getQueryCache().find({ queryKey: ["scans", "encar"], exact: true }).setState({ status: "error", error: new Error("fixture offline") });
   if (projectOverride) client.setQueryData(["project", projectOverride.id], projectOverride);
@@ -135,6 +138,34 @@ test("the real app groups three sites and separates application settings", (t) =
   assert.match(html, /Copart/);
   assert.match(html, /IAA/);
   assert.match(html, /Настройки приложения/);
+});
+
+test('signed source visibility hides empty families and redirects a revoked deep link without mixing projects', (t) => {
+  const launchOptions = { ...available, licensed_sources: ['copart', 'iaa'] };
+  const { html } = render(t, { search: '?source=encar&view=project&project=1', launchOptions });
+  assert.doesNotMatch(html, /Площадки|Encar fixture|source-encar-sections/);
+  assert.match(html, /Аукционы/);
+  assert.match(html, /Проекты · Copart/);
+  const empty = render(t, { launchOptions: { ...available, licensed_sources: [] }, licenseStatus: {
+    status: 'active', service_configured: true, license_id: 'fixture', sources: [], reason: 'LICENSE_SEARCH_DISABLED',
+  } }).html;
+  assert.doesNotMatch(empty, /Площадки|Аукционы|Encar fixture|projects-toolbar-controls/);
+  assert.match(empty, /Нет доступных источников/);
+  assert.match(empty, /Лицензия/);
+});
+
+test('app settings hide disabled source projects in scheduling and Telegram without losing saved selections', (t) => {
+  const launchOptions = { ...available, licensed_sources: ['copart'] };
+  const { html } = render(t, { search: '?view=settings', launchOptions,
+    projectsOverride: [{ id: 1, source_key: 'encar', name: 'Hidden Encar project' }, { id: 4, source_key: 'copart', name: 'Visible auction' }],
+    schedulerOverride: {enabled: true, paused: false, project_ids: [1], interval_minutes: 180, performance_mode: 'FAST'},
+  });
+  assert.doesNotMatch(html, /Ссылка на Telegram-канал Encar|Hidden Encar project|telegram-settings/);
+  assert.match(html, /Visible auction/);
+  assert.match(html, /Выбор сохранён на случай возврата доступа/);
+  assert.match(html, /Ожидает доступных проектов/);
+  assert.match(html, /disabled=""[^>]*>Сохранить планировщик/);
+  assert.match(html, /Настройки/);
 });
 test("test auction project creation stays enabled when search is denied", (t) => {
   for (const source of ['copart', 'iaa']) {
@@ -256,8 +287,8 @@ test("availability errors and initial loading cannot masquerade as a connected E
   assert.doesNotMatch(html, /<h2>Поиск подключён/);
   assert.match(html, /role="alert"/);
   const loading = render(t, { launchOptions: null }).html;
-  assert.match(loading, /Проверяем доступность/);
-  assert.match(loading, /projects-refresh-button[^>]*disabled/);
+  assert.match(loading, /Проверяем доступные источники/);
+  assert.doesNotMatch(loading, /source-button|projects-refresh-button|Encar fixture/);
 });
 test("one blocked source does not disable another and unavailable-source settings are truthful", (t) => {
   const options = { ...available, sources: [...available.sources,

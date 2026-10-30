@@ -79,12 +79,59 @@ An existing binding is checked shortly after application startup and every six
 hours. Each response lease is verified locally before `binding.json` or
 `lease.json` is replaced.
 
+### Historical temporary all-sites client policy — 15 October 2026
+
+Superseded in the local 29 October candidate below. Already compiled older
+applications still retain this exception until updated.
+
+By the owner's request, until the license-management server is updated, every
+valid license with `entitlements.search=true` can use all adapters connected in
+the running profile. The signed subset or empty `sources` list is validated but
+not enforced as a site restriction. Actual adapter registration still applies:
+Copart/IAA are experimental source-test adapters, not production-enabled sites.
+No site list, lease, binding, expiry or device secret on disk is rewritten.
+Signature, device binding, trusted clock, subscription/lease expiry and global
+`search=false` enforcement are unchanged. No new activation or server deploy
+is needed, but an older compiled app needs a new client build to use this change.
+Auction project creation is independent of search permission; launching scans
+remains guarded. Server refresh/offline caching retain the original signed
+policy, ready for the future paired server/client rollout.
+
+The site checkboxes already present in the local owner UI are not deployed by
+this task. Restore signed per-site filtering with that rollout, then verify
+all/subset/none, manual/scheduled/queued jobs, offline expiry and no term changes.
+Older clients with this temporary policy will **not** enforce new site revocations
+merely because the server has been updated; they must also be updated.
+
+### Per-site enforcement and visible workspaces — local candidate 29 October 2026
+
 The signed `entitlements.sources` policy controls site access. Missing legacy
 policy or a standalone `["*"]` permits all built-in sources shipped in the
 current application; an explicit list permits only those keys, and `[]` permits
 none. Null, mixed wildcard lists and malformed keys fail closed. Wildcards do
 not load unshipped adapters. Changing local JSON without re-signing cannot
 grant access.
+
+The temporary client override has been removed. The read-only launch-options
+response carries `licensed_sources` separately from module/search readiness.
+Navigation and the global launch picker hide sites outside that signed policy
+and omit empty families. A licensed source with a failed module stays visible
+with its actual availability error. Before the first successful local policy
+read, no source workspace is shown; failure has an explicit retry. A later
+read failure keeps the last successful visible set, but disables new searches.
+Older API responses without the new field keep their legacy visibility behavior.
+
+Revoked current/deep-linked/back-stack workspaces resolve to the first available
+site's base project list, never reusing the former project's IDs. With no sites,
+the application opens its general settings and explains that local data is
+retained. License activation/check/transfer, backups and shared settings remain
+available. General Telegram and scheduler selectors omit disabled-source
+projects; stored scheduler IDs are retained, while a hidden-only selection
+cannot enable a new schedule from the UI. The scheduler's existing per-source
+authorization still skips these projects. Re-granting restores their visibility.
+This change does not deploy the owner service, mutate production grants, or
+rebuild an installed application; server rollout and platform acceptance remain
+separate steps.
 
 Normal six-hour synchronization (and “Check now”) installs site access changes
 without reactivation or reinstall. Network failure keeps the last verified

@@ -3,13 +3,14 @@ import { useQueries } from "@tanstack/react-query";
 import type { ActivityProject, ActivityRun } from "./activity-dialog";
 import { latestProjectUpdate, ProjectUpdateStatus, updateActive } from "./scan-progress";
 import type { Locale } from "./translations";
-import { SOURCE_CATALOG, sourceDefinition, sourceName, sourceGroups, useSourceCatalog, type SourceCatalog } from "./source-catalog";
+import { SOURCE_CATALOG, sourceDefinition, sourceName, sourceGroups, useSourceCatalog, licensedSourceCatalog, type SourceCatalog } from "./source-catalog";
 
 export type LaunchProject = {
   id: number; name: string; source_key: string; can_search: boolean;
   reason: string | null; active_status: string | null; scan_run_id: number | null;
 };
 export type LaunchOptions = {
+  licensed_sources?: string[];
   sources: { source_key: string; family: string; can_search: boolean; reason: string | null }[];
   projects: LaunchProject[];
 };
@@ -20,7 +21,7 @@ export type LaunchResult = {
 
 export function launchableProjects(options?: LaunchOptions, catalog = SOURCE_CATALOG) {
   return options?.projects.filter((project) => project.can_search && !project.active_status
-    && sourceDefinition(project.source_key, catalog)
+    && sourceDefinition(project.source_key, licensedSourceCatalog(options.licensed_sources, catalog))
     && options.sources.some((site) => site.source_key === project.source_key && site.can_search)) || [];
 }
 
@@ -92,7 +93,7 @@ export function LaunchDialog({ locale, options, loading, failed, retry, launch, 
 }) {
   const uk = locale === "uk";
   const inheritedCatalog = useSourceCatalog();
-  const catalog = providedCatalog ?? inheritedCatalog;
+  const catalog = licensedSourceCatalog(options?.licensed_sources, providedCatalog ?? inheritedCatalog);
   const dialog = useRef<HTMLDialogElement>(null);
   const resultHeading = useRef<HTMLHeadingElement>(null);
   const errorNotice = useRef<HTMLParagraphElement>(null);

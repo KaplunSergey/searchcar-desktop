@@ -42,6 +42,22 @@ test("navigation groups added sites by family and keeps unavailable modules visi
   assert.match(html, /Пошук ще не підключено/);
 });
 
+test('license visibility applies to navigation and the launch picker, not module readiness', () => {
+  const restricted = { ...options, licensed_sources: ['sampleauction'], sources: options.sources.map(site => ({ ...site, can_search: false, reason: 'SOURCE_UNAVAILABLE' })) };
+  const nav = renderToStaticMarkup(React.createElement(SourceNavigation, {
+    source: 'sampleauction', view: 'projects', locale: 'ru', catalog, options: restricted, navigate() {}, selectSource() {},
+  }));
+  assert.match(nav, /Sample Auction/);
+  assert.doesNotMatch(nav, /Площадки|Encar|Copart|Sample Market/);
+  const picker = renderToStaticMarkup(React.createElement(LaunchDialog, {
+    catalog, locale: 'ru', options: restricted, loading: false, failed: false, retry() {}, close() {},
+    launch() { throw new Error('render must never launch'); }, errorMessage: () => 'failure',
+  }));
+  assert.match(picker, /Sample Auction/);
+  assert.doesNotMatch(picker, /Площадки|Encar|Copart|Sample Market/);
+  assert.deepEqual(launchableProjects({ ...options, licensed_sources: [] }, catalog), []);
+});
+
 test("a registered extra source participates in the picker, but missing source availability cannot enable it", () => {
   assert.deepEqual(launchableProjects(options, catalog).map((project) => project.id), [41]);
   assert.deepEqual(launchableProjects({ ...options, sources: [] }, catalog), []);

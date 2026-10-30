@@ -123,15 +123,19 @@ def test_refresh_installs_signed_source_changes_and_offline_keeps_last_policy(tm
                                   store=MemoryStore(), transport=httpx.MockTransport(handler))
     assert client.activate_trial("source-policy@example.test")["sources"] == allowed
     policy = ["copart"]
-    assert client.refresh()["sources"] == allowed
+    assert client.refresh()["sources"] == ("copart",)
     cached = (tmp_path / "license" / "lease.json").read_bytes()
     assert json.loads(cached)['payload']['entitlements']['sources'] == ['copart']
     offline = True
     with pytest.raises(LicenseClientError):
         client.refresh()
     assert (tmp_path / "license" / "lease.json").read_bytes() == cached
-    assert evaluate_search_entitlement(data_dir=tmp_path, mode="required").sources == allowed
+    assert evaluate_search_entitlement(data_dir=tmp_path, mode="required").sources == ("copart",)
     offline = False
+    policy = []
+    disabled = client.refresh()
+    assert disabled["status"] == "active" and disabled["license_id"] == "license-test"
+    assert disabled["sources"] == () and disabled["can_search"] is False
     policy = ["*"]
     assert client.refresh()["sources"] == allowed
     assert evaluate_search_entitlement(data_dir=tmp_path, mode="required", now=now + timedelta(hours=49)).can_search is False

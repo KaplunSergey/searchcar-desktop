@@ -1,6 +1,6 @@
 import type { Locale } from "./translations";
 import { workspaceUrl, type SourceKey, type View } from "./source-workspace";
-import { sourceName, sourceGroups, useSourceCatalog, type SourceCatalog } from "./source-catalog";
+import { sourceName, sourceGroups, useSourceCatalog, licensedSourceCatalog, type SourceCatalog } from "./source-catalog";
 import { reasonText, type LaunchOptions } from "./launch-dialog";
 import { activityProjects, statusLabel, type ActivityRun } from "./activity-dialog";
 import { latestProjectUpdate } from "./scan-progress";
@@ -46,7 +46,7 @@ export function SourceNavigation({ source, view, locale, navigate, selectSource,
 }) {
   const uk = locale === "uk";
   const inheritedCatalog = useSourceCatalog();
-  const catalog = providedCatalog ?? inheritedCatalog;
+  const catalog = licensedSourceCatalog(options?.licensed_sources, providedCatalog ?? inheritedCatalog);
   const sections = [
     { view: "projects" as const, label: uk ? "Проєкти" : "Проекты", path: "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z" },
     { view: "scans" as const, label: uk ? "Запуски" : "Запуски", path: "m9 5 10 7-10 7V5Z" },

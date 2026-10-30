@@ -7,6 +7,11 @@ export const WORKSPACE_STORAGE_KEY = "searchcar-workspace";
 const views: View[] = ["projects", "project", "favorites", "car", "scans", "source-settings", "settings", "admin"];
 const emptyRoute: WorkspaceRoute = { source: "encar", view: "projects", projectId: null, carId: null };
 
+export function licensedWorkspace(route: WorkspaceRoute, catalog: SourceCatalog): WorkspaceRoute {
+  if (["settings", "admin"].includes(route.view) || sourceDefinition(route.source, catalog)) return route;
+  return { source: catalog[0]?.key || route.source, view: catalog.length ? "projects" : "settings", projectId: null, carId: null };
+}
+
 export function normalizeRoute(value: Partial<WorkspaceRoute> | null, catalog = SOURCE_CATALOG): WorkspaceRoute {
   if (!value || !sourceDefinition(value.source || "encar", catalog)) return { ...emptyRoute };
   const view = views.includes(value.view as View) ? value.view as View : "projects";

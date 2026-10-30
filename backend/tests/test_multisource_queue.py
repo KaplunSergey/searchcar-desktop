@@ -231,7 +231,7 @@ def test_legacy_manual_enqueue_checks_real_project_source(queue, monkeypatch):
         assert db.scalar(select(ScanRun)) is None
 
 
-def test_queued_job_keeps_all_shipped_sites_during_temporary_client_policy(queue, tmp_path, monkeypatch):
+def test_queued_job_rechecks_signed_source_revocation_without_losing_other_projects(queue, tmp_path, monkeypatch):
     from test_desktop_license import license_state, install_sources
     state = license_state(tmp_path)
     monkeypatch.setattr('app.sources.registry.list_sources', lambda: tuple(queue.descriptors.values()))
@@ -244,14 +244,15 @@ def test_queued_job_keeps_all_shipped_sites_during_temporary_client_policy(queue
     process_job(run_id)
     with queue.factory() as db:
         run = db.get(ScanRun, run_id)
-        assert not run.payload.get("failures")
+        assert [(failure["project_id"], failure["code"]) for failure in run.payload["failures"]] == [
+            (queue.plans["alpha1"]["project_id"], "LICENSE_SOURCE_NOT_ALLOWED")]
         assert db.get(Project, queue.plans["alpha1"]["project_id"]) is not None
         rows = list(db.scalars(select(ProjectScanRun).where(ProjectScanRun.scan_run_id == run_id)))
         assert {row.project_id: row.status for row in rows} == {
-            queue.plans["alpha1"]["project_id"]: "SUCCEEDED",
+            queue.plans["alpha1"]["project_id"]: "FAILED",
             queue.plans["bravo1"]["project_id"]: "SUCCEEDED",
         }
-    assert ("collect", "alpha1") in queue.events
+    assert ("collect", "alpha1") not in queue.events
     assert ("collect", "bravo1") in queue.events
 
 

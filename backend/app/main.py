@@ -2608,7 +2608,7 @@ def scan_launch_options(current: User = Depends(require_user), db: Session = Dep
     """Read-only launch preview; POST still rechecks license, scope and duplicates."""
     from .desktop_license import evaluate_search_entitlement
     from .maintenance import maintenance_active
-    from .sources.registry import list_sources
+    from .sources.registry import list_sources, source_catalog
 
     decision = evaluate_search_entitlement(update_trusted_time=False)
     maintenance = maintenance_active()
@@ -2659,7 +2659,9 @@ def scan_launch_options(current: User = Depends(require_user), db: Session = Dep
         projects.append({"id": project.id, "name": project.name, "source_key": project.source_key,
                          "can_search": reason is None, "reason": reason,
                          "active_status": active_status, "scan_run_id": run.id if run else None})
-    return {"sources": list(sources.values()), "projects": projects}
+    return {"sources": list(sources.values()), "projects": projects,
+            "licensed_sources": list(decision.sources) if decision.mode == "required"
+            else [source["key"] for source in source_catalog()]}
 
 
 @app.post("/api/scans/projects", status_code=202)

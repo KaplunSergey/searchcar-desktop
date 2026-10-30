@@ -61,6 +61,7 @@ def test_launch_options_are_owner_scoped_read_only_and_separate_license_from_bus
     response = api.get("/api/scans/launch-options")
     assert response.status_code == 200, response.text
     options = response.json()
+    assert options["licensed_sources"] == ["alpha", "charlie"]
     assert {row["source_key"]: row["can_search"] for row in options["sources"]} == {"alpha": True, "bravo": False, "charlie": True}
     projects = {row["name"]: row for row in options["projects"]}
     assert "Secret" not in projects
@@ -110,7 +111,7 @@ def test_launch_options_failed_adapter_does_not_block_another_source(api, queue,
     from app.sources.contracts import SourceUnavailableError
     monkeypatch.setattr("app.sources.registry.list_sources", lambda: tuple(queue.descriptors.values()))
     monkeypatch.setattr("app.desktop_license.evaluate_search_entitlement", lambda **kwargs:
-        EntitlementDecision(mode="disabled", status="pilot", can_search=True))
+        EntitlementDecision(mode="required", status="active", can_search=True, sources=tuple(queue.descriptors)))
     def source(key):
         if key == "alpha":
             raise SourceUnavailableError("fixture load failed")
@@ -119,6 +120,7 @@ def test_launch_options_failed_adapter_does_not_block_another_source(api, queue,
     response = api.get("/api/scans/launch-options")
     assert response.status_code == 200, response.text
     options = response.json()
+    assert "alpha" in options["licensed_sources"], "module failure must not revoke a license grant"
     sources = {row["source_key"]: row for row in options["sources"]}
     assert sources["alpha"]["reason"] == "SOURCE_UNAVAILABLE"
     assert sources["bravo"]["can_search"] is True
