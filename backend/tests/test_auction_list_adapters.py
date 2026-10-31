@@ -440,6 +440,49 @@ def test_optional_fetch_failure_does_not_override_verified_rows(adapters,key):
     assert 'secret' not in json.dumps(progress)
 
 
+@pytest.mark.parametrize('key', ['copart', 'iaa'])
+@pytest.mark.parametrize('status', [401, 403])
+def test_denied_stylesheet_does_not_override_verified_search_results(adapters, key, status):
+    source = get_source(key)
+    page = Page([snapshot(key, [ROWS[key][0]], total=1)])
+    original = page.goto
+    def goto(url, **kwargs):
+        original(url, **kwargs)
+        page.listeners['response'](SimpleNamespace(status=status,
+            url=f'https://{source.descriptor.domains[0]}/assets/site.css?token=private',
+            request=SimpleNamespace(resource_type='stylesheet')))
+        return SimpleNamespace(status=200)
+    page.goto = goto
+    progress = []
+    url = 'https://www.copart.com/lotSearchResults?searchCriteria=%7B%7D' if key == 'copart' else 'https://www.iaai.com/Search?url=x'
+    result = source.collect_search_pages(page, url, progress=progress.append)
+    assert result.pages_visited == 1 and len(result.rows) == 1
+    assert progress[-1]['complete'] is True
+    assert progress[-1]['browser_diagnostics']['http_failures'] == [
+        dict(resource_type='stylesheet', status=status, site_resource=True)]
+    assert progress[-1]['network_failures'][0]['resource_type'] == 'stylesheet'
+    assert 'private' not in json.dumps(progress)
+    assert not page.listeners
+
+
+def test_denied_stylesheet_without_verified_results_is_not_success_or_source_block(adapters):
+    source = get_source('copart')
+    adapters.monkeypatch.setattr(source, 'read_timeout_seconds', 0.001)
+    page = Page([{**snapshot('copart', [], total=0), 'ready':False, 'empty':False}])
+    original = page.goto
+    def goto(url, **kwargs):
+        original(url, **kwargs)
+        page.listeners['response'](SimpleNamespace(status=403, url='https://www.copart.com/site.css',
+            request=SimpleNamespace(resource_type='stylesheet')))
+    page.goto = goto
+    progress = []
+    with pytest.raises(ScanError) as caught:
+        source.collect_search_pages(page, 'https://www.copart.com/lotSearchResults?searchCriteria=%7B%7D', progress=progress.append)
+    assert caught.value.code == 'SEARCH_PAGE_NOT_READY'
+    assert progress[-1]['complete'] is False
+    assert not caught.value.partial_collection.rows
+
+
 def test_failed_fetch_without_new_page_is_access_failure_not_empty(adapters):
     source=get_source('iaa')
     adapters.monkeypatch.setattr(source,'read_timeout_seconds',0.001)
@@ -835,6 +878,47 @@ def test_denied_source_stops_its_remaining_projects_in_the_same_batch(adapters,s
         assert len(run.payload['failures'])==2
         assert all(f['code']==code for f in run.payload['failures'])
         assert not list(db.scalars(select(Car)))
+
+
+@pytest.mark.parametrize('first_ready', [True, False])
+def test_bulk_copart_stylesheet_failure_does_not_poison_remaining_projects(adapters, first_ready):
+    source = get_source('copart')
+    adapters.monkeypatch.setattr(source, 'read_timeout_seconds', 0.001)
+    page = Page([snapshot('copart', [ROWS['copart'][0]], total=1)])
+    opened, navigations = [], []
+    def goto(url, **kwargs):
+        page.url = url
+        navigations.append(url)
+        page.snapshots = [snapshot('copart', [ROWS['copart'][0]], total=1)]
+        if len(navigations) == 1:
+            if not first_ready:
+                page.snapshots = [{**snapshot('copart', [], total=0), 'ready':False, 'empty':False}]
+            page.listeners['response'](SimpleNamespace(status=403, url='https://www.copart.com/site.css',
+                request=SimpleNamespace(resource_type='stylesheet')))
+        return SimpleNamespace(status=200)
+    page.goto = goto
+    def open_browser(*args, **kwargs):
+        opened.append(True)
+        return SimpleNamespace(close=lambda:None), SimpleNamespace(close=lambda:None), page
+    adapters.monkeypatch.setattr(source, 'open_browser', open_browser)
+    adapters.monkeypatch.setattr('app.worker.desktop_playwright', _fake_playwright)
+    with adapters.factory() as db:
+        owner = db.get(User, adapters.user_id)
+        projects = [create_project(ProjectIn(name=f'Bulk stylesheet {index}',source_key='copart',
+            search_url=f'https://www.copart.com/lotSearchResults?searchCriteria=%7B%22query%22%3A%5B%22{index}%22%5D%7D'),owner,db) for index in range(3)]
+        job = scan_projects(ScanProjectsIn(project_ids=[project['id'] for project in projects]), owner, db)
+    process_job(job['id'])
+    assert len(navigations) == 3, 'Do not skip untouched projects because a CSS file returned 403'
+    assert len(opened) == (1 if first_ready else 2), 'Retain normal reuse and close failed contexts'
+    with adapters.factory() as db:
+        run = db.get(ScanRun, job['id'])
+        states = run.payload['project_statuses']
+        assert [states[str(project['id'])] for project in projects] == [
+            'SUCCEEDED' if first_ready else 'FAILED', 'SUCCEEDED', 'SUCCEEDED']
+        failures = run.payload.get('failures', [])
+        assert [failure['code'] for failure in failures] == ([] if first_ready else ['SEARCH_PAGE_NOT_READY'])
+        assert run.payload['pagination'][str(projects[1]['id'])]['complete'] is True
+        assert len(list(db.scalars(select(ProjectCar).where(ProjectCar.project_id == projects[2]['id'])))) == 1
 
 
 @pytest.mark.parametrize('key',['copart','iaa'])

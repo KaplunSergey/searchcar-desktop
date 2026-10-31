@@ -709,9 +709,10 @@ class AuctionListSource:
             if failure not in network_failures:
                 network_failures.append(failure)
                 del network_failures[:-20]
+            # CSS failures remain diagnostic: the public DOM still needs verification.
             if response.status == 429:
                 rate_limited = True  # A challenge/reload is not a remedy for rate limits.
-            elif resource_type in ('document','script','stylesheet'):
+            elif resource_type in ('document','script'):
                 denied.append(failure)
             elif resource_type in ('xhr','fetch'):
                 # A denied optional fetch does not invalidate a newly verified
