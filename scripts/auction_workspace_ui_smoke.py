@@ -87,7 +87,8 @@ with desktop_playwright() as pw:
         if path=='/auth/me': value={'user':user,'csrf_token':'fixture'}
         elif path=='/auth/workspace': value={'saved':True}
         elif path=='/desktop/runtime':
-            if mode.get('runtime_offline'):
+            if mode.get('runtime_offline') or mode.get('runtime_failures',0)>0:
+                mode['runtime_failures']=max(0,mode.get('runtime_failures',0)-1)
                 route.abort('connectionfailed');return
             value={'desktop':True,'source_test_mode':True,'updater':False,'telegram_delivery_enabled':bool(mode.get('delivery_enabled'))}
         elif path=='/settings':
@@ -279,6 +280,8 @@ with desktop_playwright() as pw:
         elif path.endswith('/auction-lots'):
             pid=int(path.split('/')[2])
             value=dict(project_id=pid,source_key=mode['source'],local_date='2026-10-16',computer_timezone='Europe/Warsaw',generated_at='2026-10-16T10:00:00Z',lots=[] if pid in removed_projects else [{**lot,'source_key':mode['source']}])
+            if mode.get('long_list_count'):
+                value['lots']=[{**lot,'id':41+i,'source_key':mode['source'],'title':f'Long list car {i+1}'} for i in range(mode['long_list_count'])]
             if mode.get('collections_fixture'):
                 collection=parse_qs(urlsplit(req.url).query).get('collection',['active'])[0]
                 value['collection']=collection
@@ -458,7 +461,7 @@ with desktop_playwright() as pw:
                         assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
                         dot=page.locator('.source-button[aria-expanded="true"] .source-pending')
                         assert page.locator('.auction-projects-panel').bounding_box()['height']<150, 'Hidden project controls must not leave a large blank toolbar'
-                        assert dot.evaluate('(e)=>e.getBoundingClientRect().width>=12&&e.getBoundingClientRect().height>=12')
+                        assert dot.evaluate('(e)=>e.getBoundingClientRect().width===10&&e.getBoundingClientRect().height===10')
                         assert dot.evaluate('(e)=>getComputedStyle(e).backgroundColor===getComputedStyle(e).borderTopColor'), 'Ready status must be a solid circle, not a font glyph'
                         assert page.locator('.auction-project-group-title button').first.evaluate('(e)=>parseFloat(getComputedStyle(e).fontSize)>=19')
                         if tab in ['Сегодня','Сьогодні']: page.screenshot(path=str(report/f'project-groups-{source}-{width}.png'),full_page=True)
@@ -513,6 +516,65 @@ with desktop_playwright() as pw:
         finally:
             mode.update(locale='ru',runtime_offline=False,runs=[])
     check('backend disconnection: cached projects retained, worker offline, retry recovers without a new scan RU/UK',backend_disconnection)
+
+    def desktop_connection_recovery():
+        try:
+            mode.update(locale='ru',source='copart',runtime_offline=False,runtime_failures=0,runs=[])
+            page.set_viewport_size({'width':1280,'height':672})
+            page.goto(BASE+'?source=copart')
+            page.locator('.worker').get_by_text('Готов к работе',exact=True).wait_for()
+            posts=len([call for call in calls if call[0]=='POST' and call[1]=='/scans/projects'])
+            page.evaluate('''() => {
+                window.fixtureSawDisconnect=false;
+                window.fixtureObserver=new MutationObserver(()=>{
+                    if(document.querySelector('[data-backend-disconnected]'))window.fixtureSawDisconnect=true;
+                });
+                window.fixtureObserver.observe(document.body,{childList:true,subtree:true});
+            }''')
+            mode['runtime_failures']=1
+            page.wait_for_timeout(2600)
+            assert mode['runtime_failures']==0
+            assert not page.evaluate('window.fixtureSawDisconnect'), 'One transient read must not flash a disconnect'
+            mode['runtime_offline']=True
+            alert=page.locator('[data-backend-disconnected]')
+            alert.wait_for()
+            mode['runtime_offline']=False
+            page.evaluate("window.dispatchEvent(new Event('searchcar:window-focus'))")
+            alert.wait_for(state='detached')
+            page.locator('.worker').get_by_text('Готов к работе',exact=True).wait_for()
+            assert len([call for call in calls if call[0]=='POST' and call[1]=='/scans/projects'])==posts
+        finally:
+            page.evaluate('window.fixtureObserver?.disconnect()')
+            mode.update(runtime_offline=False,runtime_failures=0)
+    check('desktop connection recovery: transient timeout and native-focus recovery without a manual retry',desktop_connection_recovery)
+
+    def desktop_fixed_navigation():
+        try:
+            mode.update(locale='ru',source='copart',long_list_count=14,runs=[])
+            for width,height in [(1280,672),(980,600),(800,500),(360,640)]:
+                page.set_viewport_size({'width':width,'height':height})
+                page.goto(BASE+'?source=copart&view=project&project=9')
+                page.get_by_role('heading',name='Long list car 14',exact=True).wait_for(state='attached')
+                main=page.locator('.workspace > main')
+                header=page.locator('.workspace > header')
+                nav=page.locator('aside')
+                before=(header.bounding_box(),nav.bounding_box())
+                main.evaluate('(e)=>e.scrollTop=e.scrollHeight')
+                assert main.evaluate('(e)=>e.scrollTop>1000')
+                assert header.bounding_box()==before[0] and nav.bounding_box()==before[1]
+                assert page.evaluate('document.documentElement.scrollHeight<=innerHeight && document.documentElement.scrollWidth<=innerWidth')
+                nav.locator('.application-settings button').scroll_into_view_if_needed()
+                assert nav.locator('.application-settings button').is_visible()
+                dot=page.locator('.source-button[aria-expanded="true"] .source-pending')
+                assert dot.evaluate('(e)=>e.getBoundingClientRect().width===10')
+                page.screenshot(path=str(report/f'desktop-fixed-navigation-{width}.png'))
+                nav.locator('.application-settings button').click()
+                page.get_by_role('heading',name='Настройки',exact=True).wait_for()
+                assert main.evaluate('(e)=>e.scrollTop===0'), 'Opening settings must start at the top, not the old project scroll offset'
+            mode['long_list_count']=0
+        finally:
+            mode['long_list_count']=0
+    check('desktop fixed navigation: 14 cars, short windows and independent scrolling',desktop_fixed_navigation)
     def telegram_reschedule_option():
         try:
             for locale,source,width in [('ru','copart',1280),('uk','iaa',360)]:

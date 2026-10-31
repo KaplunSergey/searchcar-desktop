@@ -116,33 +116,25 @@ class DesktopUpdateStateRelay:
             return {"state": self._state, "progress": self._progress}
 
 
+def active_desktop_scan_count() -> int:
+    from sqlalchemy import func, select
+    from .database import SessionLocal
+    from .models import ScanRun
+
+    with SessionLocal() as database:
+        return int(database.scalar(select(func.count()).select_from(ScanRun).where(
+            ScanRun.status.in_(("QUEUED", "RUNNING", "CANCEL_REQUESTED"))
+        )) or 0)
+
+
 def prepare_desktop_update(data_dir: Path) -> dict:
     """Block new scans and create a verified rollback point for an update."""
 
-    from sqlalchemy import func, select
-
-    from .database import SessionLocal
     from .desktop_backup import export_backup
     from .maintenance import begin_update_install, finish_update_install
-    from .models import ScanRun
     from .version import APP_VERSION
 
-    def active_scan_count() -> int:
-        with SessionLocal() as database:
-            return int(
-                database.scalar(
-                    select(func.count())
-                    .select_from(ScanRun)
-                    .where(
-                        ScanRun.status.in_(
-                            ("QUEUED", "RUNNING", "CANCEL_REQUESTED")
-                        )
-                    )
-                )
-                or 0
-            )
-
-    active = active_scan_count()
+    active = active_desktop_scan_count()
     if active:
         return {"status": "active_scan", "count": active}
 
@@ -151,7 +143,7 @@ def prepare_desktop_update(data_dir: Path) -> dict:
         # Close the enqueue/claim race: once the guard exists, both manual and
         # scheduled scans are refused. Recheck work that may have committed
         # immediately before the guard became visible.
-        active = active_scan_count()
+        active = active_desktop_scan_count()
         if active:
             finish_update_install()
             return {"status": "active_scan", "count": active}
@@ -724,6 +716,12 @@ def create_desktop_app(
         if shutdown_handler is None:
             raise HTTPException(503, "desktop_shutdown_unavailable")
         return shutdown_handler()
+
+    @app.get("/desktop/active-scans", include_in_schema=False)
+    def desktop_active_scans(token: str):
+        if not hmac.compare_digest(token, session_secret):
+            raise HTTPException(403, "invalid_desktop_session")
+        return PlainTextResponse(str(active_desktop_scan_count()), headers={"Cache-Control": "no-store"})
 
     @app.get("/desktop/tray-status", include_in_schema=False)
     def desktop_tray_status(token: str):

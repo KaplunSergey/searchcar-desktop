@@ -1,5 +1,36 @@
 /* Desktop reuses the shared dropdown styling from app/globals.css. */
 
+/* Keep navigation/header in view while long project lists scroll independently. */
+.app-shell {
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+.app-shell > aside {
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.app-shell > aside > * { flex-shrink: 0; }
+.app-shell .app-version { position: static; margin-top: auto; padding-top: 18px; }
+.app-shell > .workspace {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.workspace > header { flex: none; }
+.workspace > main {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow-y: auto;
+}
+@media (max-width: 600px) {
+  .app-shell { grid-template-rows: auto minmax(0, 1fr); }
+  .app-shell > aside { max-height: 45dvh; }
+}
+
 /* Keep the navigation glyphs clearly separated from their labels. */
 nav button {
   display: flex;

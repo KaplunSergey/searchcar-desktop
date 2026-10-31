@@ -40,6 +40,7 @@ struct SidecarState(Mutex<Option<SidecarProcess>>);
 struct LifecycleState {
     explicit_exit: AtomicBool,
     confirmation_open: AtomicBool,
+    main_maximized: AtomicBool,
 }
 
 struct UpdaterState {
@@ -563,12 +564,38 @@ fn finish_confirmed_exit(app: &tauri::AppHandle) {
     }
     let app_handle = app.clone();
     thread::spawn(move || {
+        if app_handle.get_webview_window("main").is_some() {
+            if let Ok(directory) = app_handle.path().app_config_dir() {
+                let maximized = app_handle.state::<LifecycleState>().main_maximized.load(Ordering::SeqCst);
+                if let Err(error) = save_main_window_state(&directory, maximized) {
+                    eprintln!("Could not save main window state: {error}");
+                }
+            }
+        }
         // The sidecar first marks queued work cancelled and active work as
         // cancellation-requested. It then waits for the worker to persist the
         // partial report before the native process exits.
         stop_sidecar(&app_handle);
         app_handle.exit(0);
     });
+}
+
+fn load_main_window_state(directory: &Path) -> bool {
+    fs::read(directory.join("main-window.json")).ok()
+        .and_then(|bytes| serde_json::from_slice::<bool>(&bytes).ok()).unwrap_or(false)
+}
+
+fn save_main_window_state(directory: &Path, maximized: bool) -> std::io::Result<()> {
+    fs::create_dir_all(directory)?;
+    fs::write(directory.join("main-window.json"), if maximized { "true" } else { "false" })
+}
+
+fn exit_confirmation_text(active: Option<u64>) -> (&'static str, &'static str) {
+    match active {
+        Some(0) => ("Закрыть приложение? Сохранённые проекты и машины останутся на компьютере.", "Выйти"),
+        Some(_) => ("Текущий поиск будет остановлен. Уже обработанные машины останутся в отчёте.", "Выйти и остановить поиск"),
+        None => ("Не удалось проверить состояние поиска. При выходе активный поиск, если он есть, будет остановлен. Сохранённые данные останутся на компьютере.", "Выйти"),
+    }
 }
 
 fn request_exit_confirmation(app: &tauri::AppHandle) {
@@ -582,25 +609,29 @@ fn request_exit_confirmation(app: &tauri::AppHandle) {
     }
     show_main_window(app);
     let app_handle = app.clone();
-    app.dialog()
-        .message(
-            "Текущий поиск будет остановлен. Уже обработанные машины останутся в отчёте.",
-        )
-        .title("Выйти из SearchCar?")
-        .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Выйти и остановить поиск".to_string(),
-            "Остаться".to_string(),
-        ))
-        .show(move |confirmed| {
-            app_handle
-                .state::<LifecycleState>()
-                .confirmation_open
-                .store(false, Ordering::SeqCst);
-            if confirmed {
-                finish_confirmed_exit(&app_handle);
-            }
-        });
+    thread::spawn(move || {
+        let active = sidecar_request(&app_handle, "GET", "/desktop/active-scans")
+            .and_then(|body| body.parse().ok());
+        let (message, button) = exit_confirmation_text(active);
+        let app_for_callback = app_handle.clone();
+        app_handle.dialog()
+            .message(message)
+            .title("Выйти из SearchCar?")
+            .kind(if active == Some(0) { MessageDialogKind::Info } else { MessageDialogKind::Warning })
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                button.to_string(),
+                "Остаться".to_string(),
+            ))
+            .show(move |confirmed| {
+                app_for_callback
+                    .state::<LifecycleState>()
+                    .confirmation_open
+                    .store(false, Ordering::SeqCst);
+                if confirmed {
+                    finish_confirmed_exit(&app_for_callback);
+                }
+            });
+    });
 }
 
 fn request_startup_exit_confirmation(app: &tauri::AppHandle) {
@@ -905,6 +936,7 @@ pub fn run() {
         .manage(LifecycleState {
             explicit_exit: AtomicBool::new(false),
             confirmation_open: AtomicBool::new(false),
+            main_maximized: AtomicBool::new(false),
         })
         .manage(UpdaterState {
             busy: AtomicBool::new(false),
@@ -1120,15 +1152,33 @@ pub fn run() {
                     format!("http://127.0.0.1:{port}/desktop/bootstrap?token={secret}");
                 let window_handle = app_handle.clone();
                 let _ = app_handle.run_on_main_thread(move || {
-                    match WebviewWindowBuilder::new(
+                    let maximized = window_handle.path().app_config_dir().ok()
+                        .is_some_and(|directory| load_main_window_state(&directory));
+                    window_handle.state::<LifecycleState>().main_maximized.store(maximized, Ordering::SeqCst);
+                    let mut builder = WebviewWindowBuilder::new(
                         &window_handle,
                         "main",
                         WebviewUrl::External(target.parse().expect("valid desktop URL")),
                     )
                     .title("SearchCar Desktop")
                     .inner_size(1280.0, 820.0)
-                    .min_inner_size(980.0, 680.0)
-                    .build()
+                    .min_inner_size(640.0, 480.0)
+                    .maximized(maximized)
+                    .prevent_overflow()
+                    .center();
+                    if let Some(startup) = window_handle.get_webview_window("startup") {
+                        if let Ok(Some(monitor)) = startup.current_monitor() {
+                            let area = monitor.work_area();
+                            let scale = monitor.scale_factor();
+                            builder = builder.position(area.position.x as f64 / scale + 16.0, area.position.y as f64 / scale + 16.0);
+                            if let (Ok(outer), Ok(inner)) = (startup.outer_size(), startup.inner_size()) {
+                                let width = area.size.width.saturating_sub(outer.width.saturating_sub(inner.width)) as f64 / scale;
+                                let height = area.size.height.saturating_sub(outer.height.saturating_sub(inner.height)) as f64 / scale;
+                                builder = builder.min_inner_size(width.clamp(1.0, 640.0), height.clamp(1.0, 480.0));
+                            }
+                        }
+                    }
+                    match builder.build()
                     {
                         Ok(_) => hide_startup_window(&window_handle),
                         Err(error) => show_startup_failure(
@@ -1182,6 +1232,21 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() == "main" {
+                match event {
+                    WindowEvent::Resized(_) if window.is_minimized().ok() == Some(false) => {
+                        if let Ok(maximized) = window.is_maximized() {
+                            window.app_handle().state::<LifecycleState>().main_maximized.store(maximized, Ordering::SeqCst);
+                        }
+                    }
+                    WindowEvent::Focused(true) => {
+                        if let Some(webview) = window.app_handle().get_webview_window("main") {
+                            let _ = webview.eval("window.dispatchEvent(new Event('searchcar:window-focus'));");
+                        }
+                    }
+                    _ => {}
+                }
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 if window
@@ -1230,6 +1295,28 @@ mod tests {
         fs,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn exit_copy_only_claims_an_active_search_after_a_fresh_check() {
+        let (message, button) = exit_confirmation_text(Some(0));
+        assert_eq!(button, "Выйти");
+        assert!(!message.contains("остановлен"));
+        assert!(exit_confirmation_text(Some(1)).0.contains("остановлен"));
+        assert!(exit_confirmation_text(None).0.contains("Не удалось проверить"));
+    }
+
+    #[test]
+    fn main_window_remembers_maximized_and_handles_missing_or_corrupt_state() {
+        let directory = temporary_directory();
+        assert!(!load_main_window_state(&directory));
+        save_main_window_state(&directory, true).unwrap();
+        assert!(load_main_window_state(&directory));
+        save_main_window_state(&directory, false).unwrap();
+        assert!(!load_main_window_state(&directory));
+        fs::write(directory.join("main-window.json"), "broken").unwrap();
+        assert!(!load_main_window_state(&directory));
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn auction_preview_uses_same_profile_for_license_and_sidecar() {

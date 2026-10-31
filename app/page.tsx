@@ -3,6 +3,7 @@
 import { ActivityDialog, activityProjects, cancellationBody, type CancellationTarget } from "./activity-dialog";
 import { TelegramSettings } from "./telegram-settings";
 import { TelegramAutomaticClock } from "./telegram-automatic";
+import { desktopRuntimeOptions, watchDesktopConnection } from "./desktop-connection";
 
 import {
   QueryClient,
@@ -673,6 +674,8 @@ export function App({
   const [deleteProject, setDeleteProject] = useState<ProjectRecord | null>(null);
   const [showPassword, setShowPassword] = useState(currentUser.must_change_password);
   const launchTrigger = useRef<HTMLButtonElement>(null);
+  const workspaceMain = useRef<HTMLElement>(null);
+  useEffect(() => { workspaceMain.current?.scrollTo(0, 0); }, [source, view, activeProjectId, activeCarId]);
   const [showActivity, setShowActivity] = useState(false);
   const activityTrigger = useRef<HTMLButtonElement>(null);
   const t: Translate = (key) => dict[locale][key];
@@ -717,14 +720,16 @@ export function App({
     queryFn: () => request("/settings"),
     refetchInterval: 5000,
   });
-  const desktopRuntimeQuery = useQuery<DesktopRuntimeInfo>({
-    queryKey: ["desktop-runtime"],
-    queryFn: () => request("/desktop/runtime", { signal: AbortSignal.timeout(3000) }),
-    retry: false,
-    staleTime: Number.POSITIVE_INFINITY,
-    refetchInterval: (query) => query.state.data?.desktop ? 1000 : false,
-  });
+  const desktopRuntimeQuery = useQuery(desktopRuntimeOptions(() =>
+    request<DesktopRuntimeInfo>("/desktop/runtime", { signal: AbortSignal.timeout(3000) })));
   const backendDisconnected = desktopRuntimeQuery.isError && desktopRuntimeQuery.data?.desktop === true;
+  useEffect(() => {
+    if (!desktopRuntimeQuery.data?.desktop) return;
+    return watchDesktopConnection(() => {
+      void client.refetchQueries({ type: "active", predicate: query =>
+        ["desktop-runtime", "scans"].includes(String(query.queryKey[0])) || query.state.status === "error" });
+    });
+  }, [client, desktopRuntimeQuery.data?.desktop]);
   const workerUnavailable = backendDisconnected || projectsQuery.isError || allScansQuery.isError;
   const updateState = desktopRuntimeQuery.data?.update_status?.state || "idle";
   const updateBusy = ["checking", "available", "preparing", "downloading", "retrying", "installing"].includes(updateState);
@@ -1066,7 +1071,7 @@ export function App({
             ) : null}
           </div>
         </header>
-        <main>
+        <main ref={workspaceMain}>
           {!launchOptionsQuery.data && <section className="panel" role={launchOptionsQuery.isError ? "alert" : "status"}>
             <p>{launchOptionsQuery.isError
               ? locale === "uk" ? "Не вдалося перевірити доступні джерела." : "Не удалось проверить доступные источники."

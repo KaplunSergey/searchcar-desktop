@@ -165,6 +165,39 @@ def _update_test_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return data_dir, engine
 
 
+def test_native_exit_activity_check_is_authenticated_and_counts_pending_work(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.desktop_runtime import create_desktop_app
+
+    _, engine = _update_test_engine(tmp_path, monkeypatch)
+    monkeypatch.setattr(database_module.settings, "storage_root", str(tmp_path / "storage"))
+    monkeypatch.setattr("app.main.app", FastAPI())
+    frontend = tmp_path / "frontend"
+    frontend.mkdir()
+    (frontend / "index.html").write_text("<html>Fixture</html>")
+    secret = "fixture-native-secret-0123456789abcdef"
+    app = create_desktop_app(frontend, secret)
+    try:
+        with TestClient(app) as client:
+            assert client.get("/desktop/active-scans", params={"token": "wrong"}).status_code == 403
+            def count():
+                response = client.get("/desktop/active-scans", params={"token": secret})
+                assert response.status_code == 200
+                return response.text
+            assert count() == "0"
+            with Session(engine) as db:
+                user = User(username="exit-fixture", username_key="exit-fixture", password_hash="unused")
+                db.add(user)
+                db.flush()
+                for status in ["QUEUED", "RUNNING", "CANCEL_REQUESTED", "SUCCEEDED", "FAILED"]:
+                    db.add(ScanRun(owner_id=user.id, kind="PROJECTS", status=status, payload={}))
+                db.commit()
+            assert count() == "3"
+    finally:
+        engine.dispose()
+
+
 def test_update_preparation_creates_backup_and_blocks_new_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
