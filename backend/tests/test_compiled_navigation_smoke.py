@@ -28,6 +28,12 @@ from app.sqlite_migrations import migrate_sqlite
 pytestmark = pytest.mark.skipif(not os.environ.get("SEARCHCAR_COMPILED_SIDECAR"), reason="opt-in compiled sidecar smoke")
 
 
+def assert_sse_finished(lines):
+    # Long checks can leave normal heartbeats buffered before the shutdown EOF.
+    remaining = list(lines)
+    assert all(line in ("", ": keep-alive") for line in remaining), "SSE must finish before the UI disconnects"
+
+
 def test_compiled_authenticated_reads_survive_a_busy_scan_writer(tmp_path):
     report_dir = Path(os.environ['SEARCHCAR_COMPILED_REPORT_DIR']).resolve()
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -151,7 +157,7 @@ def compiled_server(data, frontend, report_dir, index, previous_ports, *, source
                             response = client.post("/desktop/shutdown", params={"token": secret})
                             assert response.status_code == 202
                             assert process.wait(timeout=5) == 0, "idle compiled shutdown waited for the open SSE connection"
-                            assert list(lines) == [""], "SSE must finish before the UI disconnects"
+                            assert_sse_finished(lines)
                     except Exception as cleanup_error:
                         if failure is None:
                             raise

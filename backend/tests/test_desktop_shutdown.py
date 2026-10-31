@@ -19,6 +19,7 @@ from app.desktop_runtime import GracefulShutdownController
 from app.live_updates import LiveUpdateBroker
 from app.models import ScanRun
 from app.sqlite_migrations import migrate_sqlite
+from test_compiled_navigation_smoke import assert_sse_finished
 
 
 def test_idle_desktop_exits_with_an_open_event_stream_and_releases_data_lock(tmp_path):
@@ -70,7 +71,7 @@ def test_idle_desktop_exits_with_an_open_event_stream_and_releases_data_lock(tmp
                     assert client.post("/desktop/shutdown", params={"token": secret}).status_code == 202
                     # Keep the UI connection open until AFTER the server exits.
                     assert process.wait(timeout=5) == 0, "idle shutdown must not wait for the UI/SSE connection"
-                    assert list(lines) == [""], "event stream must end cleanly, not require client disconnect"
+                    assert_sse_finished(lines)
                     print(f"Idle desktop shutdown with open SSE: {monotonic() - shutdown_started:.3f}s")
         finally:
             if process.poll() is None:

@@ -7,6 +7,32 @@ import sys
 from xml.etree import ElementTree
 
 import pytest
+import httpx
+
+from test_compiled_navigation_smoke import assert_sse_finished
+
+
+@pytest.mark.parametrize("lines", [
+    [""],
+    ["", ": keep-alive", ""],
+    ["", ": keep-alive", "", ": keep-alive", ""],
+])
+def test_compiled_shutdown_accepts_buffered_heartbeats_before_eof(lines):
+    assert_sse_finished(iter(lines))
+
+
+def test_compiled_shutdown_rejects_unexpected_events():
+    with pytest.raises(AssertionError):
+        assert_sse_finished(iter(["", "event: scan", "data: {}", ""]))
+
+
+def test_compiled_shutdown_requires_eof_not_just_a_heartbeat():
+    def still_open():
+        yield ""
+        yield ": keep-alive"
+        raise httpx.ReadTimeout("stream did not close")
+    with pytest.raises(httpx.ReadTimeout):
+        assert_sse_finished(still_open())
 
 
 @pytest.mark.parametrize("missing_sidecar", [False, True])
