@@ -12,9 +12,10 @@ const user = { id: 1, username: "fixture", role: "USER", preferred_locale: "ru",
 const available = { sources: [{ source_key: "encar", family: "MARKETPLACE", can_search: true, reason: null }],
   projects: [{ id: 1, source_key: "encar", name: "Encar fixture", can_search: true, reason: null, active_status: null, scan_run_id: null }] };
 function render(t, { search = "", stored = null, locale = "ru", storage = {}, projectOverride = null, carOverride = null,
-  scanError = false, runtimeError = false, availabilityError = false, launchOptions = available, activeRuns = [], projectsOverride, auctionProject, auctionCar, auctionError = false, nativeWorkspace, sourceTestMode = false, deliveryEnabled = false, schedulerOverride, licenseStatus } = {}) {
+  scanError = false, activityError = false, runtimeError = false, nativeHealth, availabilityError = false, launchOptions = available, activeRuns = [], projectsOverride, auctionProject, auctionCar, auctionError = false, nativeWorkspace, sourceTestMode = false, deliveryEnabled = false, schedulerOverride, licenseStatus } = {}) {
   const previousWindow = globalThis.window;
   globalThis.window = {
+    __searchcarServiceHealth: nativeHealth,
     location: { search, pathname: "/" },
     localStorage: { getItem: (key) => key === "searchcar-workspace" ? stored : storage[key] || null },
   };
@@ -30,6 +31,7 @@ function render(t, { search = "", stored = null, locale = "ru", storage = {}, pr
   client.setQueryData(["scans", "encar"], activeRuns);
   client.setQueryData(["scans", requestedSource], activeRuns);
   client.setQueryData(["scans", "active"], activeRuns);
+  if (activityError) client.getQueryCache().find({queryKey:["scans","active"],exact:true}).setState({status:"error",error:new Error("fixture transport pause")});
   client.setQueryData(["desktop-runtime"], { desktop: true, updater: !sourceTestMode, source_test_mode: sourceTestMode, telegram_delivery_enabled: deliveryEnabled });
   if (runtimeError) client.getQueryCache().find({ queryKey: ["desktop-runtime"], exact: true }).setState({ status: "error", error: new Error("fixture disconnected") });
   if (launchOptions) client.setQueryData(["launch-options"], launchOptions);
@@ -63,6 +65,29 @@ test('a disconnected desktop never presents cached scans as a healthy worker', (
     assert.match(html, locale === 'ru' ? /заново откройте приложение/ : /знову відкрийте застосунок/);
     assert.match(html, /Encar fixture/, 'a disconnect must not discard cached projects');
   }
+});
+
+test('a native menu transport pause shows uncertainty, not offline or a fabricated healthy worker', t => {
+  for (const locale of ['ru','uk']) {
+    const {html} = render(t, {runtimeError:true, locale, nativeHealth:{ready:true,checked_at:Date.now()},
+      activeRuns:[{id:49,status:'RUNNING',payload:{project_ids:[1]}}]});
+    assert.doesNotMatch(html, /data-backend-disconnected|class="dot offline"/);
+    assert.match(html, /role="status"[^>]*data-backend-checking/);
+    const worker = html.match(/class="worker"[\s\S]*?<\/strong>/)?.[0];
+    assert.match(worker, /Уточняем состояние|Уточнюємо стан/);
+    assert.doesNotMatch(worker, /Готов к работе|Готовий до роботи|Выполняет сканирование|Виконує сканування/);
+    assert.match(html, /class="activity-trigger"[\s\S]*?<b>\?<\/b>/);
+    assert.match(html, /class="button shell-refresh"[^>]*disabled/);
+    assert.match(html, /Encar fixture/);
+  }
+});
+
+test('a stalled active-count read does not override a healthy native service with Backend unavailable', t => {
+  const {html} = render(t, {activityError:true,nativeHealth:{ready:true,checked_at:Date.now()}});
+  const worker = html.match(/class="worker"[\s\S]*?<\/strong>/)?.[0];
+  assert.match(worker, /Уточняем состояние/);
+  assert.doesNotMatch(worker, /Backend недоступен/);
+  assert.match(html, /class="activity-trigger"[\s\S]*?<b>\?<\/b>/);
 });
 
 test("Encar still renders the original projects toolbar and project rows", (t) => {

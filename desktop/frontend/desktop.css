@@ -20,6 +20,7 @@
   flex-direction: column;
 }
 .workspace > header { flex: none; }
+.app-shell .worker .dot.pending { background: var(--orange); }
 .workspace > main {
   flex: 1;
   min-height: 0;

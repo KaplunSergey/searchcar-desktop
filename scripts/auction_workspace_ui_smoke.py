@@ -548,6 +548,47 @@ with desktop_playwright() as pw:
             mode.update(runtime_offline=False,runtime_failures=0)
     check('desktop connection recovery: transient timeout and native-focus recovery without a manual retry',desktop_connection_recovery)
 
+    def native_service_health():
+        def pulse(ready, age=0):
+            page.evaluate('''([ready,age])=>{
+                window.__searchcarServiceHealth={ready,checked_at:Date.now()-age};
+                window.dispatchEvent(new Event('searchcar:service-health'));
+            }''',[ready,age])
+        try:
+            for locale in ['ru','uk']:
+                mode.update(locale=locale,source='copart',runtime_offline=False,runs=[])
+                page.set_viewport_size({'width':1280,'height':672})
+                page.goto(BASE+'?source=copart')
+                worker=page.locator('.worker')
+                worker.get_by_text('Готов к работе' if locale=='ru' else 'Готовий до роботи',exact=True).wait_for()
+                posts=len([call for call in calls if call[0]=='POST' and call[1]=='/scans/projects'])
+                pulse(True)
+                mode['runtime_offline']=True
+                checking=page.locator('[data-backend-checking]')
+                checking.wait_for()
+                assert not page.locator('[data-backend-disconnected]').count()
+                assert worker.locator('.dot.pending').count()==1
+                assert page.locator('.shell-refresh').is_disabled()
+                assert page.locator('.activity-trigger b').inner_text()=='?'
+                assert page.get_by_text(project['name'],exact=True).count()
+                pulse(False,39_000)
+                assert checking.is_visible(), 'A delayed native failure is not current outage evidence'
+                assert not page.locator('[data-backend-disconnected]').count()
+                page.screenshot(path=str(report/f'native-service-checking-{locale}.png'))
+                pulse(False)
+                page.locator('[data-backend-disconnected]').wait_for()
+                assert worker.locator('.dot.offline').count()==1
+                mode['runtime_offline']=False
+                page.keyboard.press('Escape')
+                pulse(True)
+                page.locator('[data-backend-disconnected]').wait_for(state='detached')
+                checking.wait_for(state='detached')
+                worker.get_by_text('Готов к работе' if locale=='ru' else 'Готовий до роботи',exact=True).wait_for()
+                assert len([call for call in calls if call[0]=='POST' and call[1]=='/scans/projects'])==posts
+        finally:
+            mode.update(locale='ru',runtime_offline=False,runs=[])
+    check('native service health: stalled UI transport, stale probe, actual outage and recovery without click RU/UK',native_service_health)
+
     def desktop_fixed_navigation():
         try:
             mode.update(locale='ru',source='copart',long_list_count=14,runs=[])

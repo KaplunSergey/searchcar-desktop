@@ -1,3 +1,18 @@
+export function nativeServiceHealth(win = window): unknown {
+  return (win as Window & { __searchcarServiceHealth?: unknown }).__searchcarServiceHealth;
+}
+
+export function desktopConnectionState(failed: boolean, snapshot?: unknown, now = Date.now()) {
+  if (!failed) return "connected";
+  if (snapshot === undefined) return "disconnected";
+  if (snapshot && typeof snapshot === "object") {
+    const { ready, checked_at } = snapshot as { ready?: unknown; checked_at?: unknown };
+    if (ready === false && typeof checked_at === "number" && Number.isFinite(checked_at)
+      && now >= checked_at && now - checked_at <= 10_000) return "disconnected";
+  }
+  return "checking";
+}
+
 export function desktopRuntimeOptions<T extends { desktop: boolean }>(read: () => Promise<T>) {
   return {
     queryKey: ["desktop-runtime"],

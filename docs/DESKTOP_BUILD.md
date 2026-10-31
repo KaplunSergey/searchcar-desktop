@@ -508,6 +508,19 @@ recheck without starting another scan. Cached projects remain visible. The
 `backend disconnection` scenario in the existing auction UI fixture runner
 checks loss/recovery in RU/UK at desktop widths without using customer data.
 
+The native shell independently polls the local `/api/health` from a Rust thread
+every two seconds, bypassing WebView HTTP transport. It requires two failed
+probes (or a terminated sidecar) before reporting unavailable. Only a boolean
+and observation timestamp reach the UI; no secret, user data or new IPC
+permission is exposed. A failed UI read with a healthy, pending or stale native
+snapshot shows a neutral state check, unknown active count and disabled new
+search, not a false offline/ready claim. Snapshots expire after ten seconds;
+queued delivery retains the original observation time. Native health events
+retry failed UI reads, including after a menu pause without a focus/click.
+The `native service health` browser fixture covers RU/UK transport stalls,
+stale snapshots, confirmed failure and recovery; native Windows Alt+Space
+acceptance is still required after building.
+
 ## Background scheduler and tray checks
 
 Closing the main window must always ask for confirmation. Confirming stops the

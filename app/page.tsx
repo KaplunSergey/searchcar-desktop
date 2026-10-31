@@ -3,7 +3,7 @@
 import { ActivityDialog, activityProjects, cancellationBody, type CancellationTarget } from "./activity-dialog";
 import { TelegramSettings } from "./telegram-settings";
 import { TelegramAutomaticClock } from "./telegram-automatic";
-import { desktopRuntimeOptions, watchDesktopConnection } from "./desktop-connection";
+import { desktopConnectionState, desktopRuntimeOptions, nativeServiceHealth, watchDesktopConnection } from "./desktop-connection";
 
 import {
   QueryClient,
@@ -722,15 +722,30 @@ export function App({
   });
   const desktopRuntimeQuery = useQuery(desktopRuntimeOptions(() =>
     request<DesktopRuntimeInfo>("/desktop/runtime", { signal: AbortSignal.timeout(3000) })));
-  const backendDisconnected = desktopRuntimeQuery.isError && desktopRuntimeQuery.data?.desktop === true;
+  const [nativeHealth, setNativeHealth] = useState(() => typeof window === "undefined" ? undefined : nativeServiceHealth());
+  const backendReadFailed = desktopRuntimeQuery.isError && desktopRuntimeQuery.data?.desktop === true;
+  const connectionState = desktopConnectionState(backendReadFailed, nativeHealth);
+  const backendDisconnected = connectionState === "disconnected";
+  const backendChecking = connectionState === "checking";
   useEffect(() => {
     if (!desktopRuntimeQuery.data?.desktop) return;
-    return watchDesktopConnection(() => {
+    const recheck = () => {
       void client.refetchQueries({ type: "active", predicate: query =>
         ["desktop-runtime", "scans"].includes(String(query.queryKey[0])) || query.state.status === "error" });
-    });
+    };
+    const healthChanged = () => {
+      setNativeHealth(nativeServiceHealth());
+      if (client.getQueryCache().findAll({ type: "active", predicate: query =>
+        ["desktop-runtime", "scans", "projects"].includes(String(query.queryKey[0])) && query.state.status === "error" }).length) recheck();
+    };
+    healthChanged();
+    window.addEventListener("searchcar:service-health", healthChanged);
+    const stop = watchDesktopConnection(recheck);
+    return () => { stop(); window.removeEventListener("searchcar:service-health", healthChanged); };
   }, [client, desktopRuntimeQuery.data?.desktop]);
-  const workerUnavailable = backendDisconnected || projectsQuery.isError || allScansQuery.isError;
+  const workerConnection = desktopConnectionState(backendReadFailed || projectsQuery.isError || allScansQuery.isError, nativeHealth);
+  const workerUnavailable = workerConnection === "disconnected";
+  const workerChecking = workerConnection === "checking";
   const updateState = desktopRuntimeQuery.data?.update_status?.state || "idle";
   const updateBusy = ["checking", "available", "preparing", "downloading", "retrying", "installing"].includes(updateState);
   const updateProgress = desktopRuntimeQuery.data?.update_status?.progress;
@@ -950,7 +965,7 @@ export function App({
   const Workspace = Object.hasOwn(workspaceModules, uiKey) ? workspaceModules[uiKey] : MissingWorkspace;
   return (
     <SourceCatalogContext.Provider value={visibleCatalog}><div className="app-shell">
-      <TelegramAutomaticClock enabled={desktopRuntimeQuery.data?.desktop === true && !backendDisconnected} write={telegramClockWrite} />
+      <TelegramAutomaticClock enabled={desktopRuntimeQuery.data?.desktop === true && !backendReadFailed} write={telegramClockWrite} />
       <aside>
         <button className="brand" onClick={() => navigate("projects")}>
           <span>S</span> SearchCar
@@ -962,7 +977,7 @@ export function App({
           navigate(next);
         }} selectSource={selectSource}
           options={launchOptionsQuery.data} failed={launchOptionsQuery.isError} runs={activeScans}
-          activityFailed={allScansQuery.isError || backendDisconnected} activityPending={allScansQuery.isPending} />
+          activityFailed={allScansQuery.isError || backendReadFailed} activityPending={allScansQuery.isPending} />
         <nav aria-label={locale === "uk" ? "Адміністрування" : "Администрирование"}>
           {localAdminEnabled ? (
             <button
@@ -975,11 +990,11 @@ export function App({
           ) : null}
         </nav>
         <div className="worker">
-          <span className={`dot ${workerUnavailable ? "offline" : ""}`} />
+          <span className={`dot ${workerChecking ? "pending" : workerUnavailable ? "offline" : ""}`} />
           <div>
             <small>{t("backgroundWorker")}</small>
             <strong>
-              {workerUnavailable
+              {workerChecking ? locale === "uk" ? "Уточнюємо стан" : "Уточняем состояние" : workerUnavailable
                 ? t("backendUnavailable")
                 : activeScans.length
                   ? t("scanInProgress")
@@ -1011,7 +1026,7 @@ export function App({
               : t(view === "car" ? "car" : view === "favorites" ? "favorites" : view === "settings" || view === "source-settings" ? "settings" : view === "scans" ? "scans" : "projects")}
           </div>
           <div className="top-actions">
-            <button ref={launchTrigger} type="button" className="button shell-refresh" disabled={backendDisconnected} aria-haspopup="dialog" onClick={() => setShowLaunch(true)}>{locale === "uk" ? "Оновити дані" : "Обновить данные"}</button>
+            <button ref={launchTrigger} type="button" className="button shell-refresh" disabled={backendReadFailed} aria-haspopup="dialog" onClick={() => setShowLaunch(true)}>{locale === "uk" ? "Оновити дані" : "Обновить данные"}</button>
             {schedulerQuery.data?.enabled && schedulerQuery.data.next_run_at ? (
               <span className="next-update">
                 {schedulerQuery.data.paused ? t("schedulerTitle") : t("nextUpdateIn")}
@@ -1026,7 +1041,7 @@ export function App({
               aria-label={locale === "uk" ? "Активні запуски — відкрити чергу" : "Активные запуски — открыть очередь"}
               onClick={() => setShowActivity(true)}>
               {t("activeScans")}
-              <b>{allScansQuery.isError || backendDisconnected ? "?" : activeScans.length}</b>
+              <b>{allScansQuery.isError || backendReadFailed ? "?" : activeScans.length}</b>
             </button>
             {!currentUser.passwordless_workspace ? (
               <span className="current-user">
@@ -1083,6 +1098,11 @@ export function App({
             <p>{locale === "uk" ? "Перевірте ліцензію нижче. Доступ до сайтів налаштовує власник ліцензії; збережені проєкти та автомобілі не видаляються."
               : "Проверьте лицензию ниже. Доступ к сайтам настраивает владелец лицензии; сохранённые проекты и автомобили не удаляются."}</p>
           </section>}
+          {backendChecking && <div className="panel" role="status" data-backend-checking>
+            <strong>{locale === "uk" ? "Уточнюємо стан локального сервісу…" : "Уточняем состояние локального сервиса…"}</strong>
+            <p>{locale === "uk" ? "Інтерфейс очікує відповідь. Оновимо стан автоматично; повторно запускати пошук не потрібно."
+              : "Интерфейс ожидает ответ. Обновим состояние автоматически; повторно запускать поиск не нужно."}</p>
+          </div>}
           {backendDisconnected && <div className="warning-text" role="alert" data-backend-disconnected>
             <strong>{locale === "uk" ? "Немає зв’язку з локальним сервісом SearchCar." : "Нет связи с локальным сервисом SearchCar."}</strong>
             <p>{locale === "uk"

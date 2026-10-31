@@ -290,7 +290,33 @@ fn health_is_ready(port: u16) -> bool {
         return false;
     }
     let mut response = String::new();
-    stream.read_to_string(&mut response).is_ok() && response.contains(" 200 ")
+    stream.read_to_string(&mut response).is_ok()
+        && response.lines().next().and_then(|line| line.split_whitespace().nth(1)) == Some("200")
+}
+
+fn service_health_script(ready: Option<bool>, observed_at: u128) -> String {
+    let snapshot = serde_json::json!({"ready": ready, "checked_at": observed_at});
+    format!("window.__searchcarServiceHealth={snapshot};window.dispatchEvent(new Event('searchcar:service-health'));")
+}
+
+fn monitor_service_health(app: tauri::AppHandle, port: u16, terminated: Arc<AtomicBool>) {
+    thread::spawn(move || {
+        let mut failures = 0_u8;
+        loop {
+            if app.state::<LifecycleState>().explicit_exit.load(Ordering::SeqCst) { break; }
+            let stopped = terminated.load(Ordering::SeqCst);
+            let healthy = !stopped && health_is_ready(port);
+            failures = if healthy { 0 } else { failures.saturating_add(1) };
+            let ready = if healthy { Some(true) } else if stopped || failures >= 2 { Some(false) } else { None };
+            let observed_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.eval(service_health_script(ready, observed_at));
+            }
+            if stopped { break; }
+            thread::sleep(Duration::from_secs(2));
+        }
+    });
 }
 
 fn wait_for_health(port: u16, timeout: Duration, terminated: &AtomicBool) -> StartupWait {
@@ -1151,6 +1177,7 @@ pub fn run() {
                 let target =
                     format!("http://127.0.0.1:{port}/desktop/bootstrap?token={secret}");
                 let window_handle = app_handle.clone();
+                let health_terminated = Arc::clone(&sidecar_terminated);
                 let _ = app_handle.run_on_main_thread(move || {
                     let maximized = window_handle.path().app_config_dir().ok()
                         .is_some_and(|directory| load_main_window_state(&directory));
@@ -1161,6 +1188,7 @@ pub fn run() {
                         WebviewUrl::External(target.parse().expect("valid desktop URL")),
                     )
                     .title("SearchCar Desktop")
+                    .initialization_script("window.__searchcarServiceHealth={ready:null,checked_at:0};")
                     .inner_size(1280.0, 820.0)
                     .min_inner_size(640.0, 480.0)
                     .maximized(maximized)
@@ -1180,7 +1208,10 @@ pub fn run() {
                     }
                     match builder.build()
                     {
-                        Ok(_) => hide_startup_window(&window_handle),
+                        Ok(_) => {
+                            hide_startup_window(&window_handle);
+                            monitor_service_health(window_handle.clone(), port, health_terminated);
+                        }
                         Err(error) => show_startup_failure(
                             &window_handle,
                             &format!("Не удалось открыть главное окно: {error}"),
@@ -1295,6 +1326,38 @@ mod tests {
         fs,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn native_health_checks_http_status_independently_of_webview() {
+        for (status, expected) in [("200 OK", true), ("503 Unavailable", false)] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut bytes = [0_u8; 1024];
+                let count = stream.read(&mut bytes).unwrap();
+                assert!(String::from_utf8_lossy(&bytes[..count]).starts_with("GET /api/health "));
+                let body = " 200 ";
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            });
+            assert_eq!(health_is_ready(port), expected);
+            server.join().unwrap();
+            assert!(!health_is_ready(port));
+        }
+    }
+
+    #[test]
+    fn native_health_snapshot_keeps_observation_time_if_webview_delivery_is_delayed() {
+        for ready in [None, Some(true), Some(false)] {
+            let script = service_health_script(ready, 123_456);
+            let payload = script.strip_prefix("window.__searchcarServiceHealth=").unwrap().split_once(';').unwrap().0;
+            let snapshot: Value = serde_json::from_str(payload).unwrap();
+            assert_eq!(snapshot["ready"], serde_json::json!(ready));
+            assert_eq!(snapshot["checked_at"], 123_456);
+            assert!(!script.contains("Date.now"));
+        }
+    }
 
     #[test]
     fn exit_copy_only_claims_an_active_search_after_a_fresh_check() {

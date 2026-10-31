@@ -1,7 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { QueryClient, QueryObserver } from '@tanstack/react-query';
-import { desktopRuntimeOptions, watchDesktopConnection } from '../app/desktop-connection.ts';
+import { desktopConnectionState, desktopRuntimeOptions, watchDesktopConnection } from '../app/desktop-connection.ts';
+
+test('paused WebView reads are not a backend outage when the native probe is healthy or stale', () => {
+  const now = 100_000;
+  assert.equal(desktopConnectionState(true, { ready: true, checked_at: now }, now), 'checking');
+  assert.equal(desktopConnectionState(true, { ready: false, checked_at: now - 11_000 }, now), 'checking');
+  assert.equal(desktopConnectionState(true, { ready: null, checked_at: 0 }, now), 'checking');
+  assert.equal(desktopConnectionState(true, { ready: false, checked_at: now }, now), 'disconnected');
+  assert.equal(desktopConnectionState(true, undefined, now), 'disconnected', 'web/older shells retain error handling');
+  assert.equal(desktopConnectionState(false, { ready: false, checked_at: now }, now), 'connected', 'a successful runtime read wins');
+  for (const snapshot of [null, {}, {ready:false,checked_at:NaN}, {ready:false,checked_at:now+1}]) {
+    assert.equal(desktopConnectionState(true, snapshot, now), 'checking');
+  }
+});
 
 test('a single stalled WebView request is rechecked before declaring the sidecar disconnected', async () => {
   const client = new QueryClient();
