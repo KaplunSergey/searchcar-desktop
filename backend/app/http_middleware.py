@@ -39,7 +39,7 @@ class RequestLogMiddleware:
 
 class DesktopSessionMiddleware:
     PUBLIC_PATHS = frozenset({
-        '/api/health', '/desktop/bootstrap', '/desktop/shutdown', '/desktop/tray-status', '/desktop/active-scans',
+        '/api/health', '/desktop/bootstrap', '/desktop/shutdown', '/desktop/tray-status', '/desktop/active-scans', '/desktop/locale',
         '/desktop/scheduler/toggle', '/desktop/scheduler/resumed', '/desktop/update-check/consume',
         '/desktop/update/status', '/desktop/update/prepare', '/desktop/update/abort',
     })

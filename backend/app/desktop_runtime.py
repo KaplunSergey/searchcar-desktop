@@ -723,6 +723,18 @@ def create_desktop_app(
             raise HTTPException(403, "invalid_desktop_session")
         return PlainTextResponse(str(active_desktop_scan_count()), headers={"Cache-Control": "no-store"})
 
+    @app.get("/desktop/locale", include_in_schema=False)
+    def desktop_locale(token: str):
+        if not hmac.compare_digest(token, session_secret):
+            raise HTTPException(403, "invalid_desktop_session")
+        from .database import SessionLocal
+        from .desktop_onboarding import desktop_workspace_user
+
+        with SessionLocal() as db:
+            user = desktop_workspace_user(db)
+            locale = "uk" if user and user.preferred_locale == "uk" else "ru"
+        return PlainTextResponse(locale, headers={"Cache-Control": "no-store"})
+
     @app.get("/desktop/tray-status", include_in_schema=False)
     def desktop_tray_status(token: str):
         if not hmac.compare_digest(token, session_secret):

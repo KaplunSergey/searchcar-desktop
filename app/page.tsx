@@ -3,7 +3,7 @@
 import { ActivityDialog, activityProjects, cancellationBody, type CancellationTarget } from "./activity-dialog";
 import { TelegramSettings } from "./telegram-settings";
 import { TelegramAutomaticClock } from "./telegram-automatic";
-import { desktopConnectionState, desktopRuntimeOptions, nativeServiceHealth, watchDesktopConnection } from "./desktop-connection";
+import { desktopConnectionState, desktopRuntimeOptions, nativeServiceHealth, recheckDesktopConnection, watchDesktopConnection } from "./desktop-connection";
 
 import {
   QueryClient,
@@ -467,6 +467,7 @@ function licenseErrorMessage(error: unknown, t: Translate): string {
 
 export function scanActionErrorMessage(error: unknown, t: Translate): string {
   const code = error instanceof ApiError ? error.code : undefined;
+  if (code === "source_test_manual_only") return t("previewCarRefreshHelp");
   return code?.startsWith("license_")
     ? licenseErrorMessage(error, t)
     : t(code?.endsWith("_scan_already_active") ? "scanAlreadyActive" : "actionFailed");
@@ -730,8 +731,7 @@ export function App({
   useEffect(() => {
     if (!desktopRuntimeQuery.data?.desktop) return;
     const recheck = () => {
-      void client.refetchQueries({ type: "active", predicate: query =>
-        ["desktop-runtime", "scans"].includes(String(query.queryKey[0])) || query.state.status === "error" });
+      void recheckDesktopConnection(client);
     };
     const healthChanged = () => {
       setNativeHealth(nativeServiceHealth());
@@ -1205,6 +1205,7 @@ export function App({
               locale={locale}
               carId={activeCarId}
               searchEnabled={searchAvailability.can_search}
+              sourceTestMode={desktopRuntimeQuery.data?.source_test_mode === true}
               projectId={activeProjectId}
               activeScan={sourceActiveScans.find((scan) =>
                 scan.payload?.car_ids?.includes(activeCarId),
@@ -1293,7 +1294,6 @@ export function App({
       )}
       {toast && (
         <div className="toast" role="status">
-          <span>✓</span>
           {toast}
           <small>{t("justNow")}</small>
         </div>
@@ -3312,6 +3312,7 @@ function Car({
   locale,
   carId,
   searchEnabled,
+  sourceTestMode = false,
   projectId,
   activeScan,
   cancelScan,
@@ -3322,6 +3323,7 @@ function Car({
   locale: Locale;
   carId: number;
   searchEnabled: boolean;
+  sourceTestMode?: boolean;
   projectId: number | null;
   activeScan?: ScanRecord;
   cancelScan: (scanId: number) => void;
@@ -3606,7 +3608,7 @@ function Car({
                 {t(activeScan.status === "CANCEL_REQUESTED" ? "cancelling" : "cancelUpdate")}
               </Button>
             ) : (
-              <Button kind="primary" disabled={!searchEnabled} onClick={() => refreshMutation.mutate()}>
+              <Button kind="primary" disabled={!searchEnabled || sourceTestMode || refreshMutation.isPending} onClick={() => refreshMutation.mutate()}>
                 ↻ {t("refresh")}
               </Button>
             )
@@ -3614,6 +3616,7 @@ function Car({
           <Button onClick={() => void openExternalUrl(car.url)}>{t("openEncar")} ↗</Button>
         </div>
       </div>
+      {sourceTestMode && projectId ? <p className="source-availability-note" role="note">{t("previewCarRefreshHelp")}</p> : null}
       <section className="vehicle-hero panel">
         <button
           className="vehicle-photo"

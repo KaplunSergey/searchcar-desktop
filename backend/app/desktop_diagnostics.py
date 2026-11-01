@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import json
 import re
 import subprocess
@@ -64,40 +65,46 @@ def _timestamp(value: object) -> datetime | None:
 
 
 def _sanitized_entries(logs_dir: Path, since: datetime) -> list[dict]:
-    entries: list[dict] = []
+    entries: list[tuple] = []
     used_bytes = 0
+    sequence = 0
     for path in sorted(logs_dir.glob("searchcar-core.jsonl*"), key=lambda item: item.stat().st_mtime if item.is_file() else 0):
         if not path.is_file() or path.is_symlink():
             continue
         try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            stream = path.open(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        for line in lines:
-            try:
-                raw = json.loads(line)
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(raw, dict):
-                continue
-            timestamp = _timestamp(raw.get("timestamp"))
-            if timestamp is None or timestamp < since:
-                continue
-            entry = {
-                "timestamp": timestamp.isoformat(),
-                "level": str(raw.get("level", "INFO"))[:16],
-                "logger": str(raw.get("logger", "searchcar"))[:160],
-                "message": _safe_message(raw.get("message", "")),
-            }
-            correlation_id = raw.get("correlation_id")
-            if isinstance(correlation_id, str) and correlation_id:
-                entry["correlation_id"] = correlation_id[:80]
-            encoded = (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8")
-            if used_bytes + len(encoded) > MAX_REPORT_LOG_BYTES:
-                return entries
-            used_bytes += len(encoded)
-            entries.append(entry)
-    return entries
+        with stream:
+            for line in stream:
+                try:
+                    raw = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(raw, dict):
+                    continue
+                timestamp = _timestamp(raw.get("timestamp"))
+                if timestamp is None or timestamp < since:
+                    continue
+                entry = {
+                    "timestamp": timestamp.isoformat(),
+                    "level": str(raw.get("level", "INFO"))[:16],
+                    "logger": str(raw.get("logger", "searchcar"))[:160],
+                    "message": _safe_message(raw.get("message", "")),
+                }
+                correlation_id = raw.get("correlation_id")
+                if isinstance(correlation_id, str) and correlation_id:
+                    entry["correlation_id"] = correlation_id[:80]
+                encoded = (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8")
+                if len(encoded) > MAX_REPORT_LOG_BYTES:
+                    continue
+                sequence += 1
+                used_bytes += len(encoded)
+                heapq.heappush(entries, (timestamp, sequence, len(encoded), entry))
+                # Retain the newest events, even when rotations have misleading mtimes.
+                while used_bytes > MAX_REPORT_LOG_BYTES:
+                    used_bytes -= heapq.heappop(entries)[2]
+    return [item[3] for item in sorted(entries)]
 
 
 def _remove_expired_reports(reports_dir: Path) -> None:

@@ -616,7 +616,14 @@ fn save_main_window_state(directory: &Path, maximized: bool) -> std::io::Result<
     fs::write(directory.join("main-window.json"), if maximized { "true" } else { "false" })
 }
 
-fn exit_confirmation_text(active: Option<u64>) -> (&'static str, &'static str) {
+fn exit_confirmation_text(active: Option<u64>, uk: bool) -> (&'static str, &'static str) {
+    if uk {
+        return match active {
+            Some(0) => ("Закрити застосунок? Збережені проєкти та автомобілі залишаться на комп’ютері.", "Вийти"),
+            Some(_) => ("Поточний пошук буде зупинено. Уже оброблені автомобілі залишаться у звіті.", "Вийти та зупинити пошук"),
+            None => ("Не вдалося перевірити стан пошуку. Під час виходу активний пошук, якщо він є, буде зупинено. Збережені дані залишаться на комп’ютері.", "Вийти"),
+        };
+    }
     match active {
         Some(0) => ("Закрыть приложение? Сохранённые проекты и машины останутся на компьютере.", "Выйти"),
         Some(_) => ("Текущий поиск будет остановлен. Уже обработанные машины останутся в отчёте.", "Выйти и остановить поиск"),
@@ -638,15 +645,16 @@ fn request_exit_confirmation(app: &tauri::AppHandle) {
     thread::spawn(move || {
         let active = sidecar_request(&app_handle, "GET", "/desktop/active-scans")
             .and_then(|body| body.parse().ok());
-        let (message, button) = exit_confirmation_text(active);
+        let uk = sidecar_request(&app_handle, "GET", "/desktop/locale").as_deref() == Some("uk");
+        let (message, button) = exit_confirmation_text(active, uk);
         let app_for_callback = app_handle.clone();
         app_handle.dialog()
             .message(message)
-            .title("Выйти из SearchCar?")
+            .title(if uk { "Вийти із SearchCar?" } else { "Выйти из SearchCar?" })
             .kind(if active == Some(0) { MessageDialogKind::Info } else { MessageDialogKind::Warning })
             .buttons(MessageDialogButtons::OkCancelCustom(
                 button.to_string(),
-                "Остаться".to_string(),
+                if uk { "Залишитися" } else { "Остаться" }.to_string(),
             ))
             .show(move |confirmed| {
                 app_for_callback
@@ -1361,11 +1369,15 @@ mod tests {
 
     #[test]
     fn exit_copy_only_claims_an_active_search_after_a_fresh_check() {
-        let (message, button) = exit_confirmation_text(Some(0));
+        let (message, button) = exit_confirmation_text(Some(0), false);
         assert_eq!(button, "Выйти");
         assert!(!message.contains("остановлен"));
-        assert!(exit_confirmation_text(Some(1)).0.contains("остановлен"));
-        assert!(exit_confirmation_text(None).0.contains("Не удалось проверить"));
+        assert!(exit_confirmation_text(Some(1), false).0.contains("остановлен"));
+        assert!(exit_confirmation_text(None, false).0.contains("Не удалось проверить"));
+        assert_eq!(exit_confirmation_text(Some(0), true).1, "Вийти");
+        assert!(exit_confirmation_text(Some(0), true).0.contains("Закрити застосунок"));
+        assert!(exit_confirmation_text(Some(1), true).0.contains("зупинено"));
+        assert!(exit_confirmation_text(None, true).0.contains("Не вдалося перевірити"));
     }
 
     #[test]

@@ -1,3 +1,11 @@
+import type { QueryClient } from "@tanstack/react-query";
+
+export function recheckDesktopConnection(client: QueryClient) {
+  return client.refetchQueries({ type: "active", predicate: query =>
+    ["desktop-runtime", "scans"].includes(String(query.queryKey[0])) || query.state.status === "error" },
+    {cancelRefetch:false}); // Native pulses must not repeatedly cancel a slower recovery read.
+}
+
 export function nativeServiceHealth(win = window): unknown {
   return (win as Window & { __searchcarServiceHealth?: unknown }).__searchcarServiceHealth;
 }

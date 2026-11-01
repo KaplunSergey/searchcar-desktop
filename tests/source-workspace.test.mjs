@@ -297,6 +297,18 @@ test("a failed refresh is not misreported as an already active scan", () => {
   assert.equal(scanActionErrorMessage(new Error("fixture backend offline"), (key) => key), "actionFailed");
 });
 
+test('preview Encar explains and disables individual refresh, not ordinary project search', t => {
+  for (const locale of ['ru', 'uk']) {
+    const props = {search:'?source=encar&view=car&project=1&car=10',locale,
+      carOverride:{id:10,title:'Preview Encar',source_key:'encar',encar_id:'42688672',details:{}}};
+    const preview = render(t, {...props,sourceTestMode:true}).html;
+    assert.match(preview, /<button[^>]*disabled[^>]*>↻ (Обновить|Оновити)<\/button>/);
+    assert.match(preview, locale==='ru' ? /обновляйте весь проект/ : /оновлюйте весь проєкт/);
+    const ordinary = render(t, props).html;
+    assert.doesNotMatch(ordinary, /<button[^>]*disabled[^>]*>↻ (Обновить|Оновити)<\/button>/);
+  }
+});
+
 const blocked = (reason) => ({ sources: [{ ...available.sources[0], can_search: false, reason }],
   projects: [{ ...available.projects[0], can_search: false, reason }] });
 test("license-disabled Encar remains readable but local refresh is disabled with its reason", (t) => {

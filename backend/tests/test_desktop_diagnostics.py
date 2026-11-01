@@ -72,6 +72,32 @@ def test_support_report_accepts_one_hour_period(tmp_path) -> None:
     assert report.entries == 1
 
 
+def test_capped_report_keeps_latest_events_across_rotations_in_time_order(tmp_path, monkeypatch):
+    import os
+    from datetime import timedelta
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(desktop_diagnostics, "MAX_REPORT_LOG_BYTES", 700)
+    # File mtime is not an event timestamp (for example, after a log copy).
+    for index, name in enumerate(("searchcar-core.jsonl.1", "searchcar-core.jsonl")):
+        path = logs / name
+        path.write_text("".join(json.dumps({
+            "timestamp": (now - timedelta(minutes=20 - index * 10 - row)).isoformat(),
+            "message": f"{'older' if index == 0 else 'latest'}-{row} token=secret",
+        }) + "\n" for row in range(10)), encoding="utf-8")
+        os.utime(path, (200 - index, 200 - index))
+    report = build_support_report(logs, tmp_path / "reports", app_version="0.4.1", hours=24)
+    with zipfile.ZipFile(tmp_path / "reports" / report.name) as archive:
+        output = archive.read("logs.jsonl")
+    entries = [json.loads(line) for line in output.splitlines()]
+    assert len(output) <= 700
+    assert entries[-1]["message"].startswith("latest-9"), "current failure must not be dropped for older logs"
+    assert [entry["timestamp"] for entry in entries] == sorted(entry["timestamp"] for entry in entries)
+    assert b"secret" not in output
+
+
 def test_reveal_support_report_uses_a_validated_macos_command(tmp_path, monkeypatch) -> None:
     reports = tmp_path / "diagnostics"
     reports.mkdir()

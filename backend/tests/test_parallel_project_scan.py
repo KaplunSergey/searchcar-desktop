@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
+from app.database import create_database_engine
 
 from app.models import (
     Base,
@@ -49,7 +50,7 @@ def _fake_playwright():
 def test_project_scan_saves_parallel_detail_results_in_completion_order(
     tmp_path, monkeypatch
 ):
-    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'parallel.sqlite3'}")
+    engine = create_database_engine(f"sqlite+pysqlite:///{tmp_path / 'parallel.sqlite3'}")
     Base.metadata.create_all(engine)
     session_factory = sessionmaker(bind=engine, expire_on_commit=False)
     with session_factory() as db:
@@ -106,6 +107,18 @@ def test_project_scan_saves_parallel_detail_results_in_completion_order(
 
     monkeypatch.setattr("app.worker.SessionLocal", session_factory)
     monkeypatch.setattr("app.worker.desktop_playwright", _fake_playwright)
+    from app.detail_workers import DetailWorkerPool
+    original_results = DetailWorkerPool.results
+
+    def results_without_retained_writer(pool, count):
+        for result in original_results(pool, count):
+            yield result
+            # The coordinator is about to wait for the next browser result.
+            # A separate UI writer must be able to acquire SQLite immediately.
+            with engine.begin() as connection:
+                connection.exec_driver_sql("UPDATE users SET last_activity_at=last_activity_at")
+
+    monkeypatch.setattr(DetailWorkerPool, "results", results_without_retained_writer)
     progress_samples = []
 
     def record_progress(_owner_id, current_run_id):
@@ -469,7 +482,7 @@ def test_cancellation_during_search_preserves_results_and_closes_runtime(
     from app.worker import process_job
     from test_money_values import detail
 
-    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'cancellation.sqlite3'}")
+    engine = create_database_engine(f"sqlite+pysqlite:///{tmp_path / 'cancellation.sqlite3'}")
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory() as db:
@@ -510,6 +523,9 @@ def test_cancellation_during_search_preserves_results_and_closes_runtime(
     def collect(_page, _url, name, **kwargs):
         calls.append(name)
         if name == "Cancelled":
+            # Real collectors check before the network wait. This must not
+            # retain a heartbeat write lock that prevents the UI cancelling.
+            kwargs["checkpoint"]()
             with factory() as request_db:
                 cancel_scan(
                     run_id,

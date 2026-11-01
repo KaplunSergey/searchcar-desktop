@@ -976,9 +976,6 @@ def process_job(job_id: int, *, runtime_pool=None) -> None:
                         def collection_checkpoint() -> None:
                             if runtime_pool:
                                 runtime_pool.reap()  # Yield another site's idle profile to filter selection.
-                            if not list_only:
-                                _raise_if_project_cancelled(db, job, project.id)
-                                return
                             # A manual browser wait may last minutes. Never
                             # retain its flushed heartbeat write transaction
                             # while sleeping; serialize with the cancel API.
@@ -1418,9 +1415,6 @@ def process_job(job_id: int, *, runtime_pool=None) -> None:
                                         )
                                     processed_rows += 1
                                     publish_detail_progress()
-                                    _raise_if_project_cancelled(
-                                        db, job, project.id
-                                    )
                         _raise_if_project_cancelled(db, job, project.id)
                         if (
                             not price_filter_needs_baseline

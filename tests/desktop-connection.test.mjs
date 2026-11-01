@@ -1,7 +1,30 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { QueryClient, QueryObserver } from '@tanstack/react-query';
-import { desktopConnectionState, desktopRuntimeOptions, watchDesktopConnection } from '../app/desktop-connection.ts';
+import { desktopConnectionState, desktopRuntimeOptions, recheckDesktopConnection, watchDesktopConnection } from '../app/desktop-connection.ts';
+
+test('repeated native pulses must not restart a slower recovering UI read forever', async () => {
+  const client = new QueryClient();
+  client.setQueryData(['desktop-runtime'], {desktop:true});
+  const replies = [];
+  const observer = new QueryObserver(client, {queryKey:['desktop-runtime'],staleTime:Infinity,retry:false,
+    queryFn: async ({signal}) => {
+      await new Promise(resolve=>replies.push(resolve));
+      if (signal.aborted) throw new Error('cancelled recovery');
+      return {desktop:true,recovered:true};
+    }});
+  const stop = observer.subscribe(()=>{});
+  client.getQueryCache().find({queryKey:['desktop-runtime'],exact:true}).setState({status:'error',error:new Error('menu transport paused')});
+  try {
+    const recovered = recheckDesktopConnection(client);
+    for(let pulse=0;pulse<5;pulse++) void recheckDesktopConnection(client);
+    assert.equal(replies.length,1,'native pulses must share the pending read, not cancel it');
+    replies[0]();
+    await recovered;
+    assert.equal(client.getQueryState(['desktop-runtime']).status,'success');
+    assert.equal(client.getQueryData(['desktop-runtime']).recovered,true);
+  } finally {replies.forEach(resolve=>resolve());stop();client.clear();}
+});
 
 test('paused WebView reads are not a backend outage when the native probe is healthy or stale', () => {
   const now = 100_000;

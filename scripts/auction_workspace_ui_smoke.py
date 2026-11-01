@@ -309,7 +309,7 @@ with desktop_playwright() as pw:
         route.fulfill(status=status,content_type='application/json',body='' if status==204 else json.dumps(value))
     page.route('**/api/**',api)
     page.route('**/fixture-photo.svg',lambda route:route.fulfill(status=404 if mode.get('photo_error') else 200,
-        content_type='image/svg+xml',body='' if mode.get('photo_error') else '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="500"><rect fill="#dbeafe" width="800" height="500"/><text x="80" y="260" font-size="50">Photo fixture</text></svg>'))
+        content_type='image/svg+xml',body='' if mode.get('photo_error') else f'<svg xmlns="http://www.w3.org/2000/svg" width="{144 if mode.get("small_photo") else 800}" height="{108 if mode.get("small_photo") else 500}" viewBox="0 0 800 500"><rect fill="#dbeafe" width="800" height="500"/><text x="80" y="260" font-size="50">Photo fixture</text></svg>'))
     def check(name,fn):
         if args.only and args.only not in name: return
         try:
@@ -580,12 +580,28 @@ with desktop_playwright() as pw:
                 assert worker.locator('.dot.offline').count()==1
                 mode['runtime_offline']=False
                 page.keyboard.press('Escape')
+                # A healthy reply slower than the native pulse must finish,
+                # rather than being cancelled/restarted by every health event.
+                page.evaluate('''() => {
+                    const original=window.fetch;
+                    window.fixtureRestoreFetch=()=>{window.fetch=original;clearInterval(window.fixtureHealthTimer);};
+                    window.fetch=async (...args)=>{
+                        if(String(args[0]).includes('/desktop/runtime')) await new Promise(resolve=>setTimeout(resolve,2400));
+                        return original(...args);
+                    };
+                    window.fixtureHealthTimer=setInterval(()=>{
+                        window.__searchcarServiceHealth={ready:true,checked_at:Date.now()};
+                        window.dispatchEvent(new Event('searchcar:service-health'));
+                    },1500);
+                }''')
                 pulse(True)
                 page.locator('[data-backend-disconnected]').wait_for(state='detached')
                 checking.wait_for(state='detached')
                 worker.get_by_text('Готов к работе' if locale=='ru' else 'Готовий до роботи',exact=True).wait_for()
+                page.evaluate('window.fixtureRestoreFetch?.()')
                 assert len([call for call in calls if call[0]=='POST' and call[1]=='/scans/projects'])==posts
         finally:
+            page.evaluate('window.fixtureRestoreFetch?.()')
             mode.update(locale='ru',runtime_offline=False,runs=[])
     check('native service health: stalled UI transport, stale probe, actual outage and recovery without click RU/UK',native_service_health)
 
@@ -1310,16 +1326,26 @@ with desktop_playwright() as pw:
     check('queue failure does not become a project creation failure',launch_failure)
     mode['fail_launch']=False
     def preview():
-        page.goto(BASE+'?source=copart&view=project&project=9')
-        photo=page.get_by_role('button',name='Посмотреть фото: Audi fixture',exact=True)
-        photo.click(timeout=3000)
-        dialog=page.get_by_role('dialog',name='Фото автомобиля')
-        dialog.wait_for(state='visible')
-        assert dialog.locator('img').get_attribute('src').endswith('/fixture-photo.svg')
-        page.screenshot(path=str(report/'photo-preview.png'))
-        page.keyboard.press('Escape')
-        dialog.wait_for(state='detached')
-        assert photo.evaluate('(e)=>e===document.activeElement'),'Photo trigger did not regain focus'
+        mode['small_photo']=True
+        try:
+            for width,height in [(1280,900),(800,600),(360,640)]:
+                page.set_viewport_size({'width':width,'height':height})
+                page.goto(BASE+'?source=copart&view=project&project=9')
+                photo=page.get_by_role('button',name='Посмотреть фото: Audi fixture',exact=True)
+                photo.click(timeout=3000)
+                dialog=page.get_by_role('dialog',name='Фото автомобиля')
+                dialog.wait_for(state='visible')
+                assert dialog.locator('img').get_attribute('src').endswith('/fixture-photo.svg')
+                dialog.locator('img').evaluate('(img)=>img.decode()')
+                assert dialog.locator('img').bounding_box()['width'] > min(600,width*.7), 'Thumbnail must enlarge, not stay at its intrinsic 144px size'
+                assert dialog.evaluate('(e)=>e.scrollWidth<=e.clientWidth'), 'Preview must fit narrow screens'
+                page.screenshot(path=str(report/f'photo-preview-{width}.png'))
+                page.keyboard.press('Escape')
+                dialog.wait_for(state='detached')
+                assert photo.evaluate('(e)=>e===document.activeElement'),'Photo trigger did not regain focus'
+        finally:
+            mode.pop('small_photo',None)
+            page.set_viewport_size({'width':1280,'height':900})
     check('photo opens in modal, Escape closes it and restores focus',preview)
     def unfinished():
         mode.update(source='copart',selection_issue='LAST_CHANGE_UNCONFIRMED');calls.clear()

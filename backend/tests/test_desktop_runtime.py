@@ -181,19 +181,23 @@ def test_native_exit_activity_check_is_authenticated_and_counts_pending_work(tmp
     try:
         with TestClient(app) as client:
             assert client.get("/desktop/active-scans", params={"token": "wrong"}).status_code == 403
+            assert client.get("/desktop/locale", params={"token": "wrong"}).status_code == 403
+            assert client.get("/desktop/locale", params={"token": secret}).text == "ru"
             def count():
                 response = client.get("/desktop/active-scans", params={"token": secret})
                 assert response.status_code == 200
                 return response.text
             assert count() == "0"
             with Session(engine) as db:
-                user = User(username="exit-fixture", username_key="exit-fixture", password_hash="unused")
-                db.add(user)
-                db.flush()
+                from app.desktop_onboarding import create_desktop_workspace
+                user = create_desktop_workspace(db, preferred_locale="uk", source="EXIT_FIXTURE")
                 for status in ["QUEUED", "RUNNING", "CANCEL_REQUESTED", "SUCCEEDED", "FAILED"]:
                     db.add(ScanRun(owner_id=user.id, kind="PROJECTS", status=status, payload={}))
                 db.commit()
             assert count() == "3"
+            response = client.get("/desktop/locale", params={"token": secret})
+            assert response.text == "uk"
+            assert response.headers["cache-control"] == "no-store"
     finally:
         engine.dispose()
 
