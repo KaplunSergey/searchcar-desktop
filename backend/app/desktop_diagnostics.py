@@ -64,10 +64,11 @@ def _timestamp(value: object) -> datetime | None:
         return None
 
 
-def _sanitized_entries(logs_dir: Path, since: datetime) -> list[dict]:
+def _sanitized_entries(logs_dir: Path, since: datetime) -> tuple[list[dict], bool]:
     entries: list[tuple] = []
     used_bytes = 0
     sequence = 0
+    truncated = False
     for path in sorted(logs_dir.glob("searchcar-core.jsonl*"), key=lambda item: item.stat().st_mtime if item.is_file() else 0):
         if not path.is_file() or path.is_symlink():
             continue
@@ -97,14 +98,16 @@ def _sanitized_entries(logs_dir: Path, since: datetime) -> list[dict]:
                     entry["correlation_id"] = correlation_id[:80]
                 encoded = (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8")
                 if len(encoded) > MAX_REPORT_LOG_BYTES:
+                    truncated = True
                     continue
                 sequence += 1
                 used_bytes += len(encoded)
                 heapq.heappush(entries, (timestamp, sequence, len(encoded), entry))
                 # Retain the newest events, even when rotations have misleading mtimes.
                 while used_bytes > MAX_REPORT_LOG_BYTES:
+                    truncated = True
                     used_bytes -= heapq.heappop(entries)[2]
-    return [item[3] for item in sorted(entries)]
+    return [item[3] for item in sorted(entries)], truncated
 
 
 def _remove_expired_reports(reports_dir: Path) -> None:
@@ -132,7 +135,7 @@ def build_support_report(
     name = f"{REPORT_PREFIX}{now.strftime('%Y%m%dT%H%M%SZ')}-{report_id}.zip"
     destination = reports_dir / name
     temporary = reports_dir / f".{name}.tmp"
-    entries = _sanitized_entries(logs_dir, now - timedelta(hours=hours))
+    entries, truncated = _sanitized_entries(logs_dir, now - timedelta(hours=hours))
     manifest = {
         "format": "searchcar-support-report",
         "format_version": 1,
@@ -141,6 +144,9 @@ def build_support_report(
         "period_hours": hours,
         "app_version": app_version,
         "entries": len(entries),
+        "logs_truncated": truncated,
+        "logs_oldest_at": entries[0]["timestamp"] if entries else None,
+        "logs_newest_at": entries[-1]["timestamp"] if entries else None,
         "contains": ["manifest.json", "logs.jsonl"],
         "excludes": ["database", "backups", "images", "license_state", "cookies"],
     }

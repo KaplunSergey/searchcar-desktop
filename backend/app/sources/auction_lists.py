@@ -840,6 +840,16 @@ class AuctionListSource:
             exc.partial_collection = SearchCollection(rows,visited,expected_pages,total)
             exc.network_failures = list(network_failures)
             exc.browser_diagnostics = browser_diagnostics
+            if settings.source_test_mode:
+                try:
+                    from ..test_diagnostics import record_source_failure
+                    try:
+                        diagnostic_state = self.read_dom(page)
+                    except Exception:
+                        diagnostic_state = {}
+                    record_source_failure(self.key, getattr(exc, 'code', 'READ_ERROR'), diagnostic_state, network_failures)
+                except Exception:
+                    pass  # Diagnostics must never replace the original failure.
             try:
                 emit_progress(stop_reason=getattr(exc,'code','READ_ERROR'))
             except Exception:

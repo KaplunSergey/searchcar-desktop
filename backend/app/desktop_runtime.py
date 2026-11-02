@@ -735,6 +735,14 @@ def create_desktop_app(
             locale = "uk" if user and user.preferred_locale == "uk" else "ru"
         return PlainTextResponse(locale, headers={"Cache-Control": "no-store"})
 
+    @app.get("/desktop/test-diagnostics", include_in_schema=False)
+    def desktop_test_diagnostics(token: str, focused: bool, hidden: bool):
+        if not hmac.compare_digest(token, session_secret):
+            raise HTTPException(403, "invalid_desktop_session")
+        from .test_diagnostics import TestEvent, record_event
+        record_event(TestEvent(event='native', focused=focused, hidden=hidden))
+        return PlainTextResponse('ok', headers={"Cache-Control": "no-store"})
+
     @app.get("/desktop/tray-status", include_in_schema=False)
     def desktop_tray_status(token: str):
         if not hmac.compare_digest(token, session_secret):

@@ -91,10 +91,14 @@ def test_capped_report_keeps_latest_events_across_rotations_in_time_order(tmp_pa
     report = build_support_report(logs, tmp_path / "reports", app_version="0.4.1", hours=24)
     with zipfile.ZipFile(tmp_path / "reports" / report.name) as archive:
         output = archive.read("logs.jsonl")
+        manifest = json.loads(archive.read("manifest.json"))
     entries = [json.loads(line) for line in output.splitlines()]
     assert len(output) <= 700
     assert entries[-1]["message"].startswith("latest-9"), "current failure must not be dropped for older logs"
     assert [entry["timestamp"] for entry in entries] == sorted(entry["timestamp"] for entry in entries)
+    assert manifest['logs_truncated'] is True
+    assert manifest['logs_oldest_at'] == entries[0]['timestamp']
+    assert manifest['logs_newest_at'] == entries[-1]['timestamp']
     assert b"secret" not in output
 
 

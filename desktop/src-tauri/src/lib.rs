@@ -319,6 +319,28 @@ fn monitor_service_health(app: tauri::AppHandle, port: u16, terminated: Arc<Atom
     });
 }
 
+// Separate thread: diagnostic window queries must not delay the health probe.
+fn monitor_test_diagnostics(app: tauri::AppHandle, terminated: Arc<AtomicBool>) {
+    if !source_test_build() { return; }
+    thread::spawn(move || {
+        let mut diagnostic_state = None;
+        let mut diagnostic_at = Instant::now();
+        while !terminated.load(Ordering::SeqCst) && !app.state::<LifecycleState>().explicit_exit.load(Ordering::SeqCst) {
+            if let Some(window) = app.get_webview_window("main") {
+                if let (Ok(focused), Ok(hidden)) = (window.is_focused(), window.is_minimized()) {
+                    let state = (focused, hidden);
+                    if diagnostic_state != Some(state) || diagnostic_at.elapsed() >= Duration::from_secs(15) {
+                        let _ = sidecar_request(&app, "GET", &format!("/desktop/test-diagnostics?focused={focused}&hidden={hidden}"));
+                        diagnostic_state = Some(state);
+                        diagnostic_at = Instant::now();
+                    }
+                }
+            }
+            thread::sleep(Duration::from_secs(2));
+        }
+    });
+}
+
 fn wait_for_health(port: u16, timeout: Duration, terminated: &AtomicBool) -> StartupWait {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -1186,6 +1208,7 @@ pub fn run() {
                     format!("http://127.0.0.1:{port}/desktop/bootstrap?token={secret}");
                 let window_handle = app_handle.clone();
                 let health_terminated = Arc::clone(&sidecar_terminated);
+                let diagnostic_terminated = Arc::clone(&sidecar_terminated);
                 let _ = app_handle.run_on_main_thread(move || {
                     let maximized = window_handle.path().app_config_dir().ok()
                         .is_some_and(|directory| load_main_window_state(&directory));
@@ -1219,6 +1242,7 @@ pub fn run() {
                         Ok(_) => {
                             hide_startup_window(&window_handle);
                             monitor_service_health(window_handle.clone(), port, health_terminated);
+                            monitor_test_diagnostics(window_handle.clone(), diagnostic_terminated);
                         }
                         Err(error) => show_startup_failure(
                             &window_handle,

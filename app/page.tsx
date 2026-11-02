@@ -2,6 +2,7 @@
 
 import { ActivityDialog, activityProjects, cancellationBody, type CancellationTarget } from "./activity-dialog";
 import { TelegramSettings } from "./telegram-settings";
+import { watchTestDiagnostics } from "./test-diagnostics";
 import { TelegramAutomaticClock } from "./telegram-automatic";
 import { desktopConnectionState, desktopRuntimeOptions, nativeServiceHealth, recheckDesktopConnection, watchDesktopConnection } from "./desktop-connection";
 
@@ -724,6 +725,11 @@ export function App({
   const desktopRuntimeQuery = useQuery(desktopRuntimeOptions(() =>
     request<DesktopRuntimeInfo>("/desktop/runtime", { signal: AbortSignal.timeout(3000) })));
   const [nativeHealth, setNativeHealth] = useState(() => typeof window === "undefined" ? undefined : nativeServiceHealth());
+  useEffect(() => watchTestDiagnostics(desktopRuntimeQuery.data?.source_test_mode === true,
+    data => request('/desktop/diagnostics/test-event', {method:'POST',body:JSON.stringify(data),signal:AbortSignal.timeout(3000)}),
+    () => ({pending_queries:Math.min(1000,client.isFetching()),error_queries:Math.min(1000,
+      client.getQueryCache().findAll({predicate:q=>q.state.status==='error'}).length)})),
+    [client,desktopRuntimeQuery.data?.source_test_mode]);
   const backendReadFailed = desktopRuntimeQuery.isError && desktopRuntimeQuery.data?.desktop === true;
   const connectionState = desktopConnectionState(backendReadFailed, nativeHealth);
   const backendDisconnected = connectionState === "disconnected";

@@ -121,6 +121,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="SearchCar API", version=settings.app_version)
 app.include_router(telegram_router)
+from .test_diagnostics import router as test_diagnostics_router
+app.include_router(test_diagnostics_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[

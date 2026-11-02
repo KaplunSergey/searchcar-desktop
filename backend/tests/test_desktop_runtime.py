@@ -195,6 +195,10 @@ def test_native_exit_activity_check_is_authenticated_and_counts_pending_work(tmp
                     db.add(ScanRun(owner_id=user.id, kind="PROJECTS", status=status, payload={}))
                 db.commit()
             assert count() == "3"
+            assert client.get('/desktop/test-diagnostics', params={'token':'wrong','focused':'true','hidden':'false'}).status_code == 403
+            assert client.get('/desktop/test-diagnostics', params={'token':secret,'focused':'true','hidden':'false'}).status_code == 404
+            monkeypatch.setattr(database_module.settings, 'source_test_mode', True)
+            assert client.get('/desktop/test-diagnostics', params={'token':secret,'focused':'true','hidden':'false'}).status_code == 200
             response = client.get("/desktop/locale", params={"token": secret})
             assert response.text == "uk"
             assert response.headers["cache-control"] == "no-store"

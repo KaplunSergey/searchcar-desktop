@@ -8,6 +8,35 @@ from fastapi.testclient import TestClient
 
 from app import main
 from app.desktop_runtime import DESKTOP_COOKIE_NAME, _session_cookie, create_desktop_app, desktop_correlation_id
+from app.http_middleware import RequestLogMiddleware
+
+
+def test_successful_polling_is_sampled_but_failures_and_other_requests_are_logged(caplog, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr('app.http_middleware.monotonic', lambda: now[0])
+    app = FastAPI()
+    app.add_middleware(RequestLogMiddleware)
+
+    @app.get('/api/health')
+    def health(fail: bool = False):
+        from fastapi.responses import Response
+        return Response(status_code=503 if fail else 200)
+
+    @app.post('/api/health')
+    def changed():
+        return {'ok': True}
+
+    caplog.set_level(logging.INFO, logger='app.main')
+    with TestClient(app) as client:
+        assert client.get('/api/health').status_code == 200
+        assert client.get('/api/health').status_code == 200
+        assert client.get('/api/health?fail=true').status_code == 503
+        assert client.post('/api/health').status_code == 200
+        now[0] += 30
+        assert client.get('/api/health').status_code == 200
+    assert caplog.text.count('method=GET path=/api/health status=200') == 2
+    assert 'method=GET path=/api/health status=503' in caplog.text
+    assert 'method=POST path=/api/health status=200' in caplog.text
 
 
 def application():
