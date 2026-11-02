@@ -200,10 +200,12 @@ def test_installed_full_browser_channel_supports_both_background_and_manual_mode
 
 
 @pytest.mark.parametrize('key', ['copart', 'iaa'])
-def test_automatic_browser_choice_is_shared_by_filter_selection_and_background_search(adapters, key):
+def test_automatic_browser_choice_is_shared_by_filter_selection_and_background_search(adapters, key, tmp_path):
     adapters.monkeypatch.delenv('SEARCHCAR_SITE_BROWSER_CHANNEL', raising=False)
+    installed_chrome = tmp_path / 'Chrome Browser' / 'chrome.exe'
     adapters.monkeypatch.setattr('app.site_browser_choice._installed_browser',
-                                lambda channel: Path('/installed/chrome') if channel == 'chrome' else None)
+                                lambda channel: installed_chrome if channel == 'chrome' else None)
+    adapters.monkeypatch.setattr('app.site_browser_choice._default_browser', lambda: 'msedge')
     calls = []
     page = Page([])
     context = SimpleNamespace(pages=[page], close=lambda: None)
@@ -215,7 +217,7 @@ def test_automatic_browser_choice_is_shared_by_filter_selection_and_background_s
             executable_path='/bundle/headless_shell', interactive=interactive)
         session.close()
     assert [options['headless'] for _, options in calls] == [True, False]
-    assert all(options['executable_path'] == '/installed/chrome' for _, options in calls)
+    assert all(options['executable_path'] == str(installed_chrome) for _, options in calls)
     assert calls[0][0] == calls[1][0]
     assert Path(calls[0][0]).parts[-2:] == (key, 'chrome')
 

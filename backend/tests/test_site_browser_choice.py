@@ -1,4 +1,4 @@
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import sys
 from types import SimpleNamespace
 
@@ -11,10 +11,11 @@ from app.sources.auction_lists import AuctionBrowserSession
 @pytest.mark.parametrize('chrome', [False, True])
 @pytest.mark.parametrize('edge', [False, True])
 @pytest.mark.parametrize('default', ['chrome', 'msedge', 'firefox', None])
-def test_supported_default_then_chrome_then_edge(monkeypatch, chrome, default, edge):
+@pytest.mark.parametrize('path_type', [PurePosixPath, PureWindowsPath])
+def test_supported_default_then_chrome_then_edge(monkeypatch, chrome, default, edge, path_type):
     monkeypatch.setattr(choice.sys, 'platform', 'win32')
     monkeypatch.delenv('SEARCHCAR_SITE_BROWSER_CHANNEL', raising=False)
-    monkeypatch.setattr(choice, '_installed_browser', lambda channel: Path('/installed/'+channel) if
+    monkeypatch.setattr(choice, '_installed_browser', lambda channel: path_type('/installed/'+channel) if
                         (chrome if channel == 'chrome' else edge) else None)
     monkeypatch.setattr(choice, '_default_browser', lambda: default)
     installed = {'chrome': chrome, 'msedge': edge}
@@ -25,7 +26,7 @@ def test_supported_default_then_chrome_then_edge(monkeypatch, chrome, default, e
     else:
         key, options = choice.site_browser_options()
         assert key == expected
-        assert options == {'executable_path': '/installed/'+expected}
+        assert options == {'executable_path': str(path_type('/installed/'+expected))}
 
 
 def test_explicit_engineering_override_is_validated(monkeypatch):
