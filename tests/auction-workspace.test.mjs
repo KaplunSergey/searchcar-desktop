@@ -8,6 +8,21 @@ const { AuctionWorkspace, AuctionCard, auctionListingLink, AuctionSearchNotice }
 const { responseErrorCode } = await import('../app/page.tsx');
 const { SelectionSummary, selectionIssueMessage } = await import('../app/search-selection.tsx');
 const { AuctionRemovalDialog } = await import('../app/auction-removal.tsx');
+test('missing source browser asks to install Chrome in selection and scan, in RU/UK',()=>{
+  for (const [locale,install] of [['ru','Установите Google Chrome'],['uk','Установіть Google Chrome']]) {
+    const selection = {status:'FAILED',snapshot:null,issue:'SOURCE_BROWSER_NOT_INSTALLED',can_use:false};
+    const html=renderToStaticMarkup(React.createElement(SelectionSummary,{selection,locale}));
+    assert.ok(html.includes(install));
+    assert.doesNotMatch(html,/закройте другое окно|закрийте інше вікно/);
+    const run={status:'FAILED',payload:{pagination:{'9':{complete:false,pages_visited:0,
+      stop_reason:'SOURCE_BROWSER_NOT_INSTALLED'}}}};
+    const notice=renderToStaticMarkup(React.createElement(AuctionSearchNotice,{run,projectId:9,locale}));
+    assert.ok(notice.includes(install));
+    const beforeRead={status:'FAILED',payload:{failures:[{project_id:9,code:'SOURCE_BROWSER_NOT_INSTALLED'}]}};
+    assert.ok(renderToStaticMarkup(React.createElement(AuctionSearchNotice,{run:beforeRead,projectId:9,locale})).includes(install));
+    assert.equal(renderToStaticMarkup(React.createElement(AuctionSearchNotice,{run:beforeRead,projectId:10,locale})), '');
+  }
+});
 const context = { generated_at: "2026-10-11T10:00:00Z", local_date: "2026-10-11", computer_timezone: "Europe/Warsaw" };
 const base = { id: 40, title: "Saved car", source_key: "copart", source_listing_id: "65507986", url: "https://www.copart.com/lot/65507986", image: null,
   details: {}, money_values: [], round: { id: "current", last_observed_at: "2026-10-11T09:00:00Z" }, schedule: {},

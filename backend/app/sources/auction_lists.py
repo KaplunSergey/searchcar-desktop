@@ -3,9 +3,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
-import os
+import logging
 import re
-import sys
 from pathlib import Path
 from time import monotonic
 from threading import Event, Lock
@@ -183,6 +182,10 @@ class AuctionBrowserSession:
         self.next_request_at = monotonic() + self.request_interval_seconds
 
     def show(self, url, checkpoint):
+        if self.interactive and self.page.url == url:
+            checkpoint()
+            self.page.bring_to_front()
+            return False  # Showing the same page must not discard its live verification state.
         if self._hidden_cdp is not None:
             self.wait_for_request(checkpoint)
             hidden, cdp = self.page, self._hidden_cdp
@@ -491,10 +494,15 @@ class AuctionListSource:
         if not executable_path or Path(executable_path).name in ('headless_shell', 'headless_shell.exe'):
             # Desktop bundles only the non-visible shell. Use Playwright's
             # supported installed browser channel, never install/patch a browser.
-            profile_kind = os.environ.get('SEARCHCAR_SITE_BROWSER_CHANNEL', 'msedge' if sys.platform == 'win32' else 'chrome')
-            if profile_kind not in ('chrome', 'msedge'):
-                raise AuctionListError('SOURCE_VISIBLE_BROWSER_UNAVAILABLE', 'Choose the installed chrome or msedge browser channel')
-            options = {'channel': profile_kind}
+            from ..site_browser_choice import site_browser_options, SiteBrowserNotInstalledError
+            try:
+                profile_kind, options = site_browser_options()
+            except SiteBrowserNotInstalledError as exc:
+                raise AuctionListError('SOURCE_BROWSER_NOT_INSTALLED', str(exc)) from None
+            except ValueError as exc:
+                raise AuctionListError('SOURCE_VISIBLE_BROWSER_UNAVAILABLE', str(exc)) from None
+        logging.getLogger(__name__).info('Site browser selected: source=%s engine=%s interactive=%s',
+                                        self.key, profile_kind, interactive)
         root = Path(settings.storage_root).parent / 'runtime' / 'source-browsers'
         site_root = root / descriptor.key
         profile = site_root / profile_kind

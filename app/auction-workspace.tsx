@@ -22,15 +22,19 @@ import { sourceListingLink, LISTING_VALIDATORS, type ListingValidators } from ".
 import { SiteVerificationNotice } from "./activity-dialog";
 import type { ActivityRun } from "./activity-dialog";
 import { PhotoPreview } from "./photo-preview";
-import { SearchSelector, type SearchSelection } from "./search-selection";
+import { SearchSelector, selectionIssueMessage, type SearchSelection } from "./search-selection";
 
 export function AuctionSearchNotice({ run, projectId, locale }: { run: Pick<ActivityRun, "status" | "payload">; projectId: number; locale: Locale }) {
   const info = run.payload?.pagination?.[String(projectId)];
+  const missingBrowser = run.payload?.failures?.some(failure =>
+    failure.project_id === projectId && failure.code === 'SOURCE_BROWSER_NOT_INSTALLED');
+  if (!info && missingBrowser) return <p role="alert">{selectionIssueMessage('SOURCE_BROWSER_NOT_INSTALLED', locale)}</p>;
   if (!info) return null;
   const uk = locale === "uk", l = (ru: string, ua: string) => uk ? ua : ru;
   const count = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : "—";
   const partial = info.complete !== true && !updateActive(run.status);
   const reasons: Record<string, string> = {
+    SOURCE_BROWSER_NOT_INSTALLED: selectionIssueMessage('SOURCE_BROWSER_NOT_INSTALLED', locale),
     SEARCH_PAGE_LIMIT: l("Достигнут лимит страниц", "Досягнуто ліміту сторінок"),
     SEARCH_RESULTS_CHANGED: l("Выдача изменилась во время обхода. Запустите поиск повторно.", "Видача змінилася під час обходу. Запустіть пошук повторно."),
     SEARCH_INCOMPLETE: l("Конец выдачи не подтверждён", "Кінець видачі не підтверджено"),

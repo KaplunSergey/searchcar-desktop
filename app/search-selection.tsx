@@ -12,6 +12,7 @@ export type SearchSelection = {
 
 export function selectionIssueMessage(issue: string, locale: Locale) {
   const messages: Record<string, [string, string]> = {
+    SOURCE_BROWSER_NOT_INSTALLED: ['Установите Google Chrome, затем повторите выбор фильтров или поиск. Chrome и Edge не найдены.', 'Установіть Google Chrome, потім повторіть вибір фільтрів або пошук. Chrome і Edge не знайдено.'],
     NO_SEARCH_CAPTURED: ['Условия ещё не получены. Примените фильтр на сайте, чтобы обновить результаты.', 'Умови ще не отримано. Застосуйте фільтр на сайті, щоб оновити результати.'],
     SEARCH_RESULTS_NOT_READY: ['Фильтры получены. Ожидаем загрузки списка автомобилей.', 'Фільтри отримано. Очікуємо завантаження списку автомобілів.'],
     SITE_VERIFICATION_REQUIRED: ['Пройдите проверку сайта вручную. Затем дождитесь результатов.', 'Пройдіть перевірку сайту вручну. Потім дочекайтеся результатів.'],
@@ -32,7 +33,9 @@ export function SelectionSummary({ selection, locale }: { selection: SearchSelec
   const snapshot = selection.snapshot;
   return <>
     <p role="status">{selection.status === 'FAILED'
-      ? selection.issue === 'SOURCE_SELECTION_RESET_UNAVAILABLE'
+      ? selection.issue === 'SOURCE_BROWSER_NOT_INSTALLED'
+        ? l('Для поиска нужен браузер Chrome или Edge.', 'Для пошуку потрібен браузер Chrome або Edge.')
+        : selection.issue === 'SOURCE_SELECTION_RESET_UNAVAILABLE'
         ? l('Не удалось подготовить новый поиск IAA.', 'Не вдалося підготувати новий пошук IAA.')
         : l('Окно выбора недоступно. Дождитесь окончания поиска или закройте другое окно этого сайта в SearchCar и повторите.', 'Вікно вибору недоступне. Дочекайтеся завершення пошуку або закрийте інше вікно цього сайту в SearchCar та повторіть.')
       : selection.status === 'CLOSED'

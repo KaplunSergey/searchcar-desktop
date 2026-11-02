@@ -199,6 +199,39 @@ def test_installed_full_browser_channel_supports_both_background_and_manual_mode
     assert Path(path).name=='chrome'
 
 
+@pytest.mark.parametrize('key', ['copart', 'iaa'])
+def test_automatic_browser_choice_is_shared_by_filter_selection_and_background_search(adapters, key):
+    adapters.monkeypatch.delenv('SEARCHCAR_SITE_BROWSER_CHANNEL', raising=False)
+    adapters.monkeypatch.setattr('app.site_browser_choice._installed_browser',
+                                lambda channel: Path('/installed/chrome') if channel == 'chrome' else None)
+    calls = []
+    page = Page([])
+    context = SimpleNamespace(pages=[page], close=lambda: None)
+    chromium = SimpleNamespace(launch_persistent_context=lambda profile, **options:
+        (calls.append((profile, options)) or context))
+    source = get_source(key)
+    for interactive in (False, True):
+        _, session, _ = source.open_browser(SimpleNamespace(chromium=chromium), headless=True,
+            executable_path='/bundle/headless_shell', interactive=interactive)
+        session.close()
+    assert [options['headless'] for _, options in calls] == [True, False]
+    assert all(options['executable_path'] == '/installed/chrome' for _, options in calls)
+    assert calls[0][0] == calls[1][0]
+    assert Path(calls[0][0]).parts[-2:] == (key, 'chrome')
+
+
+@pytest.mark.parametrize('key', ['copart', 'iaa'])
+def test_missing_browsers_requests_installation_before_launching_anything(adapters, key):
+    adapters.monkeypatch.delenv('SEARCHCAR_SITE_BROWSER_CHANNEL', raising=False)
+    adapters.monkeypatch.setattr('app.site_browser_choice._installed_browser', lambda channel: None)
+    adapters.monkeypatch.setattr('app.site_browser_choice._default_browser', lambda: None)
+    chromium = SimpleNamespace(launch_persistent_context=lambda *a, **kw: pytest.fail('must not launch'))
+    with pytest.raises(ScanError) as caught:
+        get_source(key).open_browser(SimpleNamespace(chromium=chromium), headless=True,
+                                    executable_path='/bundle/headless_shell')
+    assert caught.value.code == 'SOURCE_BROWSER_NOT_INSTALLED'
+
+
 @pytest.mark.parametrize('key',['copart','iaa'])
 def test_interactive_verification_waits_for_the_user_not_an_automatic_reload(adapters,key):
     source=get_source(key)
