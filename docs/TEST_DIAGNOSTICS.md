@@ -57,8 +57,25 @@ Encar и обычные внешние ссылки этим выбором не
 без путей/секретов. Фильтры и поиск используют один профиль источника/браузера.
 При переходе Edge → Chrome новый профиль SearchCar может запросить проверку
 сайта заново; cookies не копируем. Повторный показ уже видимой той же страницы
-не перезапускает браузер и не загружает её заново. Фоновый → видимый переход
-по-прежнему может требовать перезапуска; отсутствие CAPTCHA не гарантируется.
+не перезапускает браузер и не загружает её заново. Для Copart в кандидате от
+3 ноября обычный установленный браузер стартует свёрнутым; переход к проверке
+восстанавливает ту же страницу без headless → headed перезапуска. Это пробный
+режим только изолированного Copart preview. IAA сохраняет прежний fallback;
+отсутствие CAPTCHA/403 не гарантируется.
+
+HTTPS-браузер Windows определяется системным `AssocQueryStringW`
+(`ASSOCF_IS_PROTOCOL`, `ASSOCSTR_PROGID`), а не только старым UserChoice.
+Если API недоступен, read-only fallback проверяет UserChoiceLatest перед UserChoice.
+Нативный main-window hook обрабатывает WM_EXITMENULOOP отложенным сообщением:
+MoveFocus WebView2 и одно `searchcar:menu-resume`, только когда окно на переднем
+плане и не свёрнуто. UI заменяет зависшие активные чтения, не повторяя mutations.
+Preview-наблюдение добавляет ограниченное событие `menu-resume` без новых полей.
+Отсутствие события не доказывает отсутствие native hook: diagnostic send может
+быть занят. Диагностику удалить можно; `windows_menu.rs` и штатный UI recovery
+удалять вместе с ней нельзя. Реальный Windows smoke ещё требуется.
+
+Контракты платформы: [HTTPS association](https://learn.microsoft.com/en-us/windows/win32/api/shlwapi/nf-shlwapi-assocquerystringw),
+[WM_EXITMENULOOP](https://learn.microsoft.com/en-us/windows/win32/menurc/wm-exitmenuloop).
 
 Проверить на Windows: оба установлены, стандартный Edge → Edge;
 стандартный Chrome → Chrome; стандартный Firefox/другой → Chrome, а без Chrome →

@@ -16,7 +16,7 @@ from .database import settings
 
 class TestEvent(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
-    event: Literal['heartbeat', 'focus', 'blur', 'visibility', 'menu-key', 'timer-gap', 'native']
+    event: Literal['heartbeat', 'focus', 'blur', 'visibility', 'menu-key', 'menu-resume', 'timer-gap', 'native']
     focused: bool
     hidden: bool
     lag_ms: int = Field(default=0, ge=0, le=3600000)

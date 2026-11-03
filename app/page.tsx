@@ -745,9 +745,15 @@ export function App({
         ["desktop-runtime", "scans", "projects"].includes(String(query.queryKey[0])) && query.state.status === "error" }).length) recheck();
     };
     healthChanged();
+    const menuResumed = () => { void recheckDesktopConnection(client, {afterNativeMenu:true}); };
     window.addEventListener("searchcar:service-health", healthChanged);
+    window.addEventListener("searchcar:menu-resume", menuResumed);
     const stop = watchDesktopConnection(recheck);
-    return () => { stop(); window.removeEventListener("searchcar:service-health", healthChanged); };
+    return () => {
+      stop();
+      window.removeEventListener("searchcar:service-health", healthChanged);
+      window.removeEventListener("searchcar:menu-resume", menuResumed);
+    };
   }, [client, desktopRuntimeQuery.data?.desktop]);
   const workerConnection = desktopConnectionState(backendReadFailed || projectsQuery.isError || allScansQuery.isError, nativeHealth);
   const workerUnavailable = workerConnection === "disconnected";

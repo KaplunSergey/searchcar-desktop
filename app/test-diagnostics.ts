@@ -14,12 +14,15 @@ export function watchTestDiagnostics(enabled: boolean, send: (data: object) => P
       .catch(()=>{}).finally(()=>{busy=false;});
   };
   const focus = () => emit('focus'), blur = () => emit('blur'), visibility = () => emit('visibility');
+  const menuResumed = () => emit('menu-resume');
   const key = (event: KeyboardEvent) => { if(event.key === 'Escape' || (event.altKey && event.code === 'Space')) emit('menu-key'); };
   win.addEventListener('focus',focus);win.addEventListener('blur',blur);win.addEventListener('keydown',key);
+  win.addEventListener('searchcar:menu-resume',menuResumed);
   doc.addEventListener('visibilitychange',visibility);
   const timer = win.setInterval(()=>{const current=now();const lag=current-previous-15000;previous=current;
     emit(lag>5000?'timer-gap':'heartbeat',lag);},15000);
   emit('heartbeat');
   return ()=>{stopped=true;win.clearInterval(timer);win.removeEventListener('focus',focus);
+    win.removeEventListener('searchcar:menu-resume',menuResumed);
     win.removeEventListener('blur',blur);win.removeEventListener('keydown',key);doc.removeEventListener('visibilitychange',visibility);};
 }

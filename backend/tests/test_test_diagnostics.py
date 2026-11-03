@@ -11,7 +11,7 @@ def test_app_exposes_preview_endpoint_with_csrf_and_disabled_in_release(monkeypa
     from fastapi.testclient import TestClient
     from app.main import app
     from app.auth import require_csrf
-    payload = dict(event='heartbeat', focused=True, hidden=False)
+    payload = dict(event='menu-resume', focused=True, hidden=False)
     with TestClient(app, raise_server_exceptions=False) as client:
         assert client.post('/api/desktop/diagnostics/test-event', json=payload).status_code in (401, 403)
         app.dependency_overrides[require_csrf] = lambda: object()

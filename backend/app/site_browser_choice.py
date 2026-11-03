@@ -39,16 +39,41 @@ def _installed_browser(channel):
     return None
 
 
+def _windows_https_progid():
+    # Ask Windows for the effective association; UserChoice can be stale on newer builds.
+    import ctypes
+    try:
+        query = ctypes.WinDLL('shlwapi').AssocQueryStringW
+        query.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_wchar_p,
+                          ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_uint32)]
+        query.restype = ctypes.c_int32
+        size = ctypes.c_uint32(0)
+        if query(0x1000, 20, 'https', None, None, ctypes.byref(size)) != 1 or not 1 < size.value <= 4096:
+            return None
+        result = ctypes.create_unicode_buffer(size.value)
+        if query(0x1000, 20, 'https', None, result, ctypes.byref(size)) == 0:
+            return result.value or None
+    except (OSError, AttributeError):
+        pass
+    return None
+
+
 def _default_browser():
     if sys.platform == 'win32':
-        import winreg
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                    r'Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice') as key:
-                name = winreg.QueryValueEx(key, 'ProgId')[0].lower()
-            return 'msedge' if name == 'msedgehtm' else 'chrome' if name.startswith('chromehtml') else None
-        except OSError:
-            return None
+        name = _windows_https_progid()
+        if name is None:
+            import winreg
+            for choice in ('UserChoiceLatest', 'UserChoice'):
+                try:
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            rf'Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\{choice}') as key:
+                        name = winreg.QueryValueEx(key, 'ProgId')[0]
+                    if name:
+                        break
+                except OSError:
+                    continue
+        name = (name or '').lower()
+        return 'msedge' if name == 'msedgehtm' else 'chrome' if name.startswith('chromehtml') else None
     if sys.platform == 'darwin':
         try:
             with (Path.home()/'Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist').open('rb') as stream:

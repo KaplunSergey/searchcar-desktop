@@ -12,7 +12,7 @@ from test_auction_list_adapters import Page, ROWS, adapters, snapshot
 from test_source_test_profile import isolated_environment, profile_queue
 
 
-def runtime(adapters, key, states):
+def runtime(adapters, key, states, *, ordinary_browser=False):
     source = get_source(key)
     calls, closed, clock = [], [], [100.0]
     adapters.monkeypatch.setattr('app.sources.auction_lists.monotonic', lambda: clock[0])
@@ -33,12 +33,44 @@ def runtime(adapters, key, states):
         cdp = SimpleNamespace(send=send, detach=lambda: None)
         return SimpleNamespace(browser=None, pages=[actual], close=lambda: closed.append(index), new_cdp_session=lambda page: cdp)
     playwright = SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=launch))
-    opened = source.open_browser(playwright, headless=False, executable_path='/test/chromium')
+    if ordinary_browser:
+        adapters.monkeypatch.setenv('SEARCHCAR_SITE_BROWSER_CHANNEL', 'chrome')
+    opened = source.open_browser(playwright, headless=False,
+        executable_path='/bundle/headless_shell' if ordinary_browser else '/test/chromium')
     return source, opened, pages, calls, closed, clock
 
 
 def search_url(key):
     return 'https://www.copart.com/lotSearchResults?searchCriteria=%7B%7D' if key == 'copart' else 'https://www.iaai.com/Search?url=x'
+
+
+@pytest.mark.parametrize('outcome', ['success', 'denied', 'rate_limit', 'cancel'])
+def test_ordinary_copart_session_retains_access_guards_without_relaunch(adapters, outcome):
+    ready = snapshot('copart', [ROWS['copart'][0]], total=1)
+    source, (_, context, page), pages, calls, closed, _ = runtime(
+        adapters, 'copart', [[ready]], ordinary_browser=True)
+    original_goto = pages[0].goto
+    def navigate(url, **kwargs):
+        original_goto(url, **kwargs)
+        return SimpleNamespace(status={'denied':403, 'rate_limit':429}.get(outcome, 200))
+    pages[0].goto = navigate
+    def checkpoint():
+        if outcome == 'cancel' and pages[0].navigations:
+            raise RuntimeError('user cancelled')
+    try:
+        assert page._minimized and calls[0][1]['headless'] is False
+        if outcome == 'success':
+            assert len(source.collect_search_pages(page, search_url('copart'), checkpoint=checkpoint).rows) == 1
+        else:
+            with pytest.raises(RuntimeError if outcome == 'cancel' else ScanError) as caught:
+                source.collect_search_pages(page, search_url('copart'), checkpoint=checkpoint)
+            if outcome != 'cancel':
+                assert caught.value.code == ('SOURCE_ACCESS_DENIED' if outcome == 'denied' else 'SOURCE_RATE_LIMITED')
+                assert not caught.value.partial_collection.rows
+        assert len(calls) == 1 and not closed
+        assert pages[0].navigations == [search_url('copart')], 'No retries after a denial/rate limit/cancel'
+    finally:
+        context.close()
 
 
 @pytest.mark.parametrize('minimize_works', [False, True])

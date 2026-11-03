@@ -3,6 +3,34 @@ import test from 'node:test';
 import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import { desktopConnectionState, desktopRuntimeOptions, recheckDesktopConnection, watchDesktopConnection } from '../app/desktop-connection.ts';
 
+test('native menu exit replaces a stuck read once, retaining data and never repeating a mutation', async () => {
+  const client = new QueryClient();
+  client.setQueryData(['desktop-runtime'], {desktop:true});
+  client.setQueryData(['projects','copart'], ['saved']);
+  const signals = [], stops = [];
+  let sends = 0;
+  const mutation = client.getMutationCache().build(client, {mutationFn: async () => ++sends});
+  await mutation.execute();
+  for (const queryKey of [['desktop-runtime'], ['projects','copart']]) {
+    const observer = new QueryObserver(client, {queryKey, retry:false, queryFn: ({signal}) => {
+      signals.push(signal);
+      return new Promise(() => {});
+    }});
+    stops.push(observer.subscribe(() => {}));
+  }
+  try {
+    void recheckDesktopConnection(client, {afterNativeMenu:true});
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(signals.length,4,'one replacement per active read');
+    assert.ok(signals[0].aborted && signals[1].aborted);
+    assert.ok(!signals[2].aborted && !signals[3].aborted);
+    assert.deepEqual(client.getQueryData(['projects','copart']),['saved']);
+    void recheckDesktopConnection(client);
+    assert.equal(signals.length,4,'ordinary health pulses still share the pending read');
+    assert.equal(sends,1,'never retry mutations after a native menu');
+  } finally {stops.forEach(stop=>stop());client.clear();}
+});
+
 test('repeated native pulses must not restart a slower recovering UI read forever', async () => {
   const client = new QueryClient();
   client.setQueryData(['desktop-runtime'], {desktop:true});

@@ -190,13 +190,17 @@ def test_installed_full_browser_channel_supports_both_background_and_manual_mode
     page=Page([])
     calls=[]
     context=SimpleNamespace(browser=SimpleNamespace(close=lambda:None),pages=[page],close=lambda:None)
+    context.new_cdp_session=lambda page: SimpleNamespace(detach=lambda:None,
+        send=lambda *args: {'windowId':1, 'bounds':{'windowState':'minimized'}})
     chromium=SimpleNamespace(launch_persistent_context=lambda path,**kwargs:(calls.append((path,kwargs)) or context))
     adapters.monkeypatch.setenv('SEARCHCAR_SITE_BROWSER_CHANNEL','chrome')
-    get_source('copart').open_browser(SimpleNamespace(chromium=chromium),headless=True,executable_path='/bundle/headless_shell')
+    _, session, _ = get_source('copart').open_browser(SimpleNamespace(chromium=chromium),headless=True,executable_path='/bundle/headless_shell')
     path,options=calls[0]
     assert options.get('channel')=='chrome'
     assert not options.get('executable_path')
     assert Path(path).name=='chrome'
+    assert options['headless'] is False and session._minimized
+    session.close()
 
 
 @pytest.mark.parametrize('key', ['copart', 'iaa'])
@@ -209,14 +213,27 @@ def test_automatic_browser_choice_is_shared_by_filter_selection_and_background_s
     calls = []
     page = Page([])
     context = SimpleNamespace(pages=[page], close=lambda: None)
+    window_state = ['normal']
+    def send(method, params=None):
+        if method == 'Browser.setWindowBounds':
+            window_state[0] = params['bounds']['windowState']
+        return {'windowId': 1, 'bounds': {'windowState': window_state[0]}}
+    context.new_cdp_session = lambda page: SimpleNamespace(send=send, detach=lambda: None)
     chromium = SimpleNamespace(launch_persistent_context=lambda profile, **options:
         (calls.append((profile, options)) or context))
     source = get_source(key)
     for interactive in (False, True):
         _, session, _ = source.open_browser(SimpleNamespace(chromium=chromium), headless=True,
             executable_path='/bundle/headless_shell', interactive=interactive)
+        if key == 'copart' and not interactive:
+            assert session.has_window and not session.interactive
+            before = len(calls)
+            page.bring_to_front = lambda: None
+            assert session.show(page.url, lambda: None) is False
+            assert len(calls) == before, 'Manual verification restores the same context, never relaunches it'
+            assert window_state[0] == 'normal'
         session.close()
-    assert [options['headless'] for _, options in calls] == [True, False]
+    assert [options['headless'] for _, options in calls] == ([False, False] if key == 'copart' else [True, False])
     assert all(options['executable_path'] == str(installed_chrome) for _, options in calls)
     assert calls[0][0] == calls[1][0]
     assert Path(calls[0][0]).parts[-2:] == (key, 'chrome')

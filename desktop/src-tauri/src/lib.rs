@@ -62,6 +62,8 @@ const SUPPORT_REPORT_PREFIX: &str = "searchcar-support-";
 
 #[cfg(any(windows, test))]
 mod windows_update;
+#[cfg(any(windows, test))]
+mod windows_menu;
 
 enum StartupWait {
     Ready,
@@ -1239,7 +1241,11 @@ pub fn run() {
                     }
                     match builder.build()
                     {
-                        Ok(_) => {
+                        Ok(main_window) => {
+                            #[cfg(windows)]
+                            windows_menu::install(&main_window);
+                            #[cfg(not(windows))]
+                            let _ = main_window;
                             hide_startup_window(&window_handle);
                             monitor_service_health(window_handle.clone(), port, health_terminated);
                             monitor_test_diagnostics(window_handle.clone(), diagnostic_terminated);

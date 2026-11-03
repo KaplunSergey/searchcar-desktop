@@ -58,10 +58,50 @@ def test_windows_reads_https_default_without_changing_associations(monkeypatch, 
             raise FileNotFoundError()
         yield object()
     monkeypatch.setattr(choice.sys, 'platform', 'win32')
+    monkeypatch.setattr(choice, '_windows_https_progid', lambda: None, raising=False)
     monkeypatch.setitem(sys.modules, 'winreg', SimpleNamespace(HKEY_CURRENT_USER=1,
         OpenKey=open_key, QueryValueEx=lambda key, name: (progid, 1)))
     assert choice._default_browser() == expected
-    assert reads == [r'Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice']
+    assert reads[0].endswith(r'https\UserChoiceLatest')
+
+
+@pytest.mark.parametrize('progid,expected', [('ChromeHTML', 'chrome'), ('MSEdgeHTM', 'msedge'),
+                                          ('FirefoxURL-123', None)])
+def test_windows_effective_association_wins_over_stale_registry(monkeypatch, progid, expected):
+    monkeypatch.setattr(choice.sys, 'platform', 'win32')
+    monkeypatch.setattr(choice, '_windows_https_progid', lambda: progid, raising=False)
+    monkeypatch.setitem(sys.modules, 'winreg', SimpleNamespace())  # No registry read on API success.
+    assert choice._default_browser() == expected
+
+
+def test_windows_latest_choice_wins_when_native_query_unavailable(monkeypatch):
+    from contextlib import contextmanager
+    @contextmanager
+    def open_key(hive, key):
+        yield key
+    monkeypatch.setattr(choice.sys, 'platform', 'win32')
+    monkeypatch.setattr(choice, '_windows_https_progid', lambda: None, raising=False)
+    monkeypatch.setitem(sys.modules, 'winreg', SimpleNamespace(HKEY_CURRENT_USER=1, OpenKey=open_key,
+        QueryValueEx=lambda key, name: ('ChromeHTML' if key.endswith('UserChoiceLatest') else 'MSEdgeHTM', 1)))
+    assert choice._default_browser() == 'chrome'
+
+
+@pytest.mark.parametrize('size,status,expected', [(11, 0, 'ChromeHTML'), (11, -1, None),
+                                               (0, 0, None), (5000, 0, None)])
+def test_windows_native_association_query_is_bounded_and_checks_hresult(monkeypatch, size, status, expected):
+    import ctypes
+    calls = []
+    def query(flags, field, protocol, verb, output, length):
+        calls.append(output is not None)
+        assert (flags, field, protocol, verb) == (0x1000, 20, 'https', None)
+        if output is None:
+            length._obj.value = size
+            return 1  # S_FALSE: required length, including terminator.
+        output.value = 'ChromeHTML'
+        return status
+    monkeypatch.setattr(ctypes, 'WinDLL', lambda name: SimpleNamespace(AssocQueryStringW=query), raising=False)
+    assert choice._windows_https_progid() == expected
+    assert calls == ([False, True] if 1 < size <= 4096 else [False])
 
 
 def test_windows_detects_registered_custom_install_and_ignores_missing_files(monkeypatch, tmp_path):
@@ -101,3 +141,20 @@ def test_repeated_show_of_same_visible_page_does_not_reload_or_restart():
     session._launch = lambda **kwargs: pytest.fail('must retain the existing visible browser')
     assert session.show(page.url, lambda: calls.append('checkpoint')) is False
     assert calls == ['checkpoint', 'focus']
+
+
+def test_windowed_background_minimize_failure_keeps_visible_context_and_reports_manual_action(tmp_path):
+    from playwright.sync_api import Error as BrowserError
+    calls = []
+    def unavailable(page):
+        raise BrowserError('minimize unsupported')
+    context = SimpleNamespace(pages=[SimpleNamespace()], new_cdp_session=unavailable, close=lambda:None)
+    chromium = SimpleNamespace(launch_persistent_context=lambda *args, **kwargs:
+        (calls.append(kwargs) or context))
+    session = AuctionBrowserSession(chromium, tmp_path, {}, windowed_background=True)
+    try:
+        assert session.interactive and session.has_window and not session._minimized
+        assert session.background() == 'MANUAL_MINIMIZE'
+        assert len(calls) == 1 and calls[0]['headless'] is False
+    finally:
+        session.close()

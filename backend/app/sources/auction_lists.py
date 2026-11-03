@@ -55,7 +55,7 @@ class AuctionBrowserSession:
     """
     request_interval_seconds = 3
 
-    def __init__(self, chromium, profile, options, *, interactive=False, lease=None):
+    def __init__(self, chromium, profile, options, *, interactive=False, lease=None, windowed_background=False):
         self.chromium, self.profile, self.options = chromium, str(profile), options
         self.context = self.page = None
         self.interactive = False
@@ -64,7 +64,9 @@ class AuctionBrowserSession:
         self.listeners = []
         self.next_request_at = 0
         self._lease = lease
-        self._launch(interactive=interactive)
+        self._launch(interactive=interactive or windowed_background)
+        if windowed_background and not interactive:
+            self.background()
 
     def _launch(self, *, interactive):
         if self.page is not None:
@@ -501,8 +503,10 @@ class AuctionListSource:
                 raise AuctionListError('SOURCE_BROWSER_NOT_INSTALLED', str(exc)) from None
             except ValueError as exc:
                 raise AuctionListError('SOURCE_VISIBLE_BROWSER_UNAVAILABLE', str(exc)) from None
-        logging.getLogger(__name__).info('Site browser selected: source=%s engine=%s interactive=%s',
-                                        self.key, profile_kind, interactive)
+        windowed_background = self.key == 'copart' and profile_kind in ('chrome', 'msedge')
+        mode = 'interactive' if interactive else 'windowed-background' if windowed_background else 'headless'
+        logging.getLogger(__name__).info('Site browser selected: source=%s engine=%s interactive=%s mode=%s',
+                                        self.key, profile_kind, interactive, mode)
         root = Path(settings.storage_root).parent / 'runtime' / 'source-browsers'
         site_root = root / descriptor.key
         profile = site_root / profile_kind
@@ -515,7 +519,10 @@ class AuctionListSource:
             lease = _BROWSER_LOCKS.setdefault(str(profile.resolve()), _ProfileLease())
         if not lease.acquire(interactive=interactive):
             raise AuctionListError('SOURCE_BROWSER_BUSY', 'The site browser is in use; finish choosing search filters first')
-        session = AuctionBrowserSession(playwright.chromium, profile, options, interactive=interactive, lease=lease)
+        # Preview Copart uses one ordinary, minimized browser from the start.
+        # Restoring it for consent/verification must not restart its live session.
+        session = AuctionBrowserSession(playwright.chromium, profile, options, interactive=interactive,
+                                        lease=lease, windowed_background=windowed_background)
         return None, session, session
 
     def collect_search_pages(self, page, url, search_name='', *, all_pages=False, checkpoint=None, progress=None, max_pages=None, search_config=None):

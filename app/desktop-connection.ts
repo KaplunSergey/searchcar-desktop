@@ -1,6 +1,12 @@
 import type { QueryClient } from "@tanstack/react-query";
 
-export function recheckDesktopConnection(client: QueryClient) {
+export async function recheckDesktopConnection(client: QueryClient, {afterNativeMenu = false} = {}) {
+  if (afterNativeMenu) {
+    // A single native exit notification replaces transport reads stuck in the menu.
+    // Query cancellation retains cached data; mutations are deliberately untouched.
+    await client.cancelQueries({type:"active", fetchStatus:"fetching"});
+    return client.refetchQueries({type:"active"}, {cancelRefetch:false});
+  }
   return client.refetchQueries({ type: "active", predicate: query =>
     ["desktop-runtime", "scans"].includes(String(query.queryKey[0])) || query.state.status === "error" },
     {cancelRefetch:false}); // Native pulses must not repeatedly cancel a slower recovery read.
