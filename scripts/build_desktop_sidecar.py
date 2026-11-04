@@ -11,6 +11,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import sysconfig
 import time
 from pathlib import Path
 
@@ -53,6 +54,18 @@ def product_version() -> str:
     return version.strip()
 
 
+def ssl_interpreter_assets() -> list[Path]:
+    # The bundled Codex Python patches ssl.py to require this extra CA distrust file.
+    stdlib = Path(sysconfig.get_path('stdlib'))
+    ssl_source = (stdlib / 'ssl.py').read_text(encoding='utf-8')
+    if 'codex-rejected-cas.pem' not in ssl_source:
+        return []
+    pem = stdlib / 'codex-rejected-cas.pem'
+    if not pem.is_file():
+        raise FileNotFoundError(f'Python SSL requires {pem.name}, but it is missing')
+    return [pem]
+
+
 def sidecar_source_fingerprint() -> str:
     """Identify payloads that must never share a persistent onefile cache."""
 
@@ -76,6 +89,8 @@ def sidecar_source_fingerprint() -> str:
         digest.update(b"\0")
         digest.update(path.read_bytes())
         digest.update(b"\0")
+    for path in ssl_interpreter_assets():
+        digest.update(path.name.encode('utf-8') + b'\0' + path.read_bytes() + b'\0')
     return digest.hexdigest()[:16]
 
 
@@ -136,6 +151,8 @@ def build(mode: str) -> dict[str, object]:
         "--nofollow-import-to=pytest",
         str(ENTRYPOINT),
     ]
+    for asset in ssl_interpreter_assets():
+        command.insert(-1, f'--include-data-files={asset}={asset.name}')
     onefile_policy: dict[str, str | bool] = {}
     if mode == "onefile":
         cache_fingerprint = sidecar_source_fingerprint()

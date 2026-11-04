@@ -58,6 +58,16 @@ or resolves outside the bundled browser directory.
 
 ## Backend sidecar
 
+The build interpreter may add a `codex-rejected-cas.pem` dependency to its
+`ssl.py`. When present, the sidecar builder includes that exact interpreter
+file next to the packaged SSL module and includes its contents in the onefile
+cache fingerprint. If the interpreter requires it but it is absent, the build
+fails. Standard Python builds do not require this Codex-specific resource.
+The compiled `check` command initializes the same verified HTTPX TLS context
+used for licensing, without sending a network request. This catches missing
+packaged SSL resources on both native CI smoke paths; it does not prove live
+service reachability or bypass certificate verification.
+
 Stage the platform-native Playwright driver before smoke tests or bundling:
 
 ```bash

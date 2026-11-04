@@ -3,9 +3,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-const { LaunchDialog, launchableProjects, launchSummary } = await import("../app/launch-dialog.tsx");
+const { LaunchDialog, launchableProjects, launchSummary, orderedLaunchProjects } = await import("../app/launch-dialog.tsx");
 
 const project = (id, overrides = {}) => ({ id, name: `Project ${id}`, source_key: "encar", can_search: true, reason: null, active_status: null, scan_run_id: null, ...overrides });
+
+test('confirmation order matches the grouped backend priority and skips absent sites', () => {
+  const projects = [project(1), project(2,{source_key:'copart'}), project(3,{source_key:'iaa'}),
+    project(4), project(5,{source_key:'copart'}), project(6,{source_key:'iaa'})];
+  assert.deepEqual(orderedLaunchProjects(projects).map(item=>item.id), [3,6,2,5,1,4]);
+  assert.deepEqual(orderedLaunchProjects([projects[0],projects[1]]).map(item=>item.id), [2,1]);
+});
 const options = {
   sources: [{ source_key: "encar", family: "MARKETPLACE", can_search: true, reason: null }],
   projects: [project(1), project(2, { active_status: "QUEUED" }), project(3, { active_status: "RUNNING" }),
@@ -38,6 +45,7 @@ test("the actual picker groups sites and exposes queued, running and unavailable
   assert.doesNotMatch(html, /checked=""/);
 });
 test("loading, failure and empty states cannot silently enable a launch; Ukrainian text is localized", () => {
+  assert.match(render({ loading: true }), /class="launch-close" aria-label="Закрыть"[^>]*><svg aria-hidden="true"/);
   assert.match(render({ options: undefined, loading: true }), /Загрузка доступных проектов/);
   const failed = render({ failed: true });
   assert.match(failed, /role="alert"/);

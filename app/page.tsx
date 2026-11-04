@@ -1,7 +1,6 @@
 "use client";
 
 import { ActivityDialog, activityProjects, cancellationBody, type CancellationTarget } from "./activity-dialog";
-import { TelegramSettings } from "./telegram-settings";
 import { watchTestDiagnostics } from "./test-diagnostics";
 import { TelegramAutomaticClock } from "./telegram-automatic";
 import { desktopConnectionState, desktopRuntimeOptions, nativeServiceHealth, recheckDesktopConnection, watchDesktopConnection } from "./desktop-connection";
@@ -1151,9 +1150,10 @@ export function App({
           {source === "encar" && view === "source-settings" && <>
             <div className="title-row source-title"><div><h1>{locale === "uk" ? "Налаштування Encar" : "Настройки Encar"}</h1><p>{locale === "uk" ? "Параметри цього сайту" : "Параметры этого сайта"}</p></div></div>
             <section className="panel source-unavailable"><h2>{locale === "uk" ? "Параметри пошуку" : "Параметры поиска"}</h2>
-              <p>{locale === "uk" ? "Посилання, діапазон ціни, режим та охоплення налаштовуються в кожному проєкті. Швидкість пошуку, автооновлення, ліцензія та резервні копії — у налаштуваннях застосунку." : "Ссылка, диапазон цены, режим и охват настраиваются в каждом проекте. Скорость поиска, автообновление, лицензия и резервные копии — в настройках приложения."}</p>
+              <p>{locale === "uk" ? "Посилання, діапазон ціни, режим та охоплення налаштовуються в кожному проєкті. Автооновлення, ліцензія та резервні копії — у налаштуваннях застосунку." : "Ссылка, диапазон цены, режим и охват настраиваются в каждом проекте. Автообновление, лицензия и резервные копии — в настройках приложения."}</p>
               <div className="source-settings-actions"><Button onClick={() => navigate("projects")}>{t("projects")}</Button><Button onClick={() => navigate("settings")}>{locale === "uk" ? "Налаштування застосунку" : "Настройки приложения"}</Button></div>
             </section>
+            <EncarPerformanceSettings t={t} locale={locale} notify={notify} />
           </>}
           {source === "encar" && view === "projects" && (
             <Projects
@@ -3203,11 +3203,6 @@ function Project({
               ↻ {t("refreshProject")}
             </Button>
           )}
-          {project.telegram_url ? (
-            <Button onClick={() => void openExternalUrl(project.telegram_url || "")}>
-              <span className="telegram-icon" aria-hidden="true">✈</span> Telegram
-            </Button>
-          ) : null}
           <Button onClick={() => edit(project)}>{t("edit")}</Button>
           <Button
             onClick={async () => {
@@ -4006,6 +4001,31 @@ function Scans({
   );
 }
 
+function EncarPerformanceSettings({t, locale, notify}: {t: Translate; locale: Locale; notify: (message: string) => void}) {
+  const client = useQueryClient();
+  const settings = useQuery<SchedulerRecord>({queryKey:['scheduler'], queryFn: () => request('/settings')});
+  const save = useMutation({
+    mutationFn: (performance_mode: SchedulerRecord['performance_mode']) => {
+      const current = client.getQueryData<SchedulerRecord>(['scheduler']);
+      if (!current) throw new Error('settings_not_loaded');
+      return request<SchedulerRecord>('/settings', {method:'PUT', body:JSON.stringify({...current, performance_mode})});
+    },
+    onSuccess: saved => { client.setQueryData(['scheduler'], saved); notify(t('saved')); },
+    onError: () => notify(t('actionFailed')),
+  });
+  const mode = save.isPending ? save.variables : settings.data?.performance_mode;
+  return <section className="panel settings"><fieldset>
+    <legend>{t('searchPerformance')}</legend>
+    {(['ECO','FAST'] as const).map(value => <label key={value}>
+      <input type="radio" name="performance-mode" checked={mode === value}
+        disabled={!settings.data || save.isPending} onChange={() => save.mutate(value)} />
+      <span><b>{t(value === 'ECO' ? 'searchPerformanceEco' : 'searchPerformanceFast')}</b>
+        <small>{t(value === 'ECO' ? 'searchPerformanceEcoHelp' : 'searchPerformanceFastHelp')}</small></span>
+    </label>)}
+    {settings.isError && <p role="alert">{t('actionFailed')} <button type="button" className="button" onClick={() => { void settings.refetch(); }}>{locale === 'uk' ? 'Повторити' : 'Повторить'}</button></p>}
+  </fieldset></section>;
+}
+
 function Settings({
   t,
   locale,
@@ -4086,36 +4106,6 @@ function Settings({
       void client.invalidateQueries({ queryKey: ["scheduler"] });
     },
     onError: () => notify(t("actionFailed")),
-  });
-  const savePerformanceMode = useMutation({
-    mutationFn: (performanceMode: SchedulerRecord["performance_mode"]) => {
-      const savedScheduler = client.getQueryData<SchedulerRecord>(["scheduler"]);
-      if (!savedScheduler) throw new Error("settings_not_loaded");
-      return request<SchedulerRecord>("/settings", {
-        method: "PUT",
-        body: JSON.stringify({ ...savedScheduler, performance_mode: performanceMode }),
-      });
-    },
-    onMutate: (performanceMode) => {
-      const previousMode = scheduler.performance_mode;
-      setSchedulerDraft({ ...scheduler, performance_mode: performanceMode });
-      return { previousMode };
-    },
-    onSuccess: (saved) => {
-      client.setQueryData(["scheduler"], saved);
-      setSchedulerDraft((current) =>
-        current ? { ...current, performance_mode: saved.performance_mode } : saved,
-      );
-      notify(t("saved"));
-    },
-    onError: (_error, _performanceMode, context) => {
-      if (context) {
-        setSchedulerDraft((current) =>
-          current ? { ...current, performance_mode: context.previousMode } : current,
-        );
-      }
-      notify(t("actionFailed"));
-    },
   });
   const importMutation = useMutation({
     mutationFn: () =>
@@ -4321,49 +4311,6 @@ function Settings({
           <p>{t("settingsSubtitle")}</p>
         </div>
       </div>
-      <section className="panel settings">
-        <div className="setting-row">
-          <div>
-            <h3>{t("generalSettings")}</h3>
-            <p>{t("generalSettingsHelp")}</p>
-          </div>
-        </div>
-        <fieldset>
-          <legend>{t("searchPerformance")}</legend>
-          <label>
-            <input
-              type="radio"
-              name="performance-mode"
-              checked={scheduler.performance_mode === "ECO"}
-              disabled={!schedulerQuery.data || savePerformanceMode.isPending}
-              onChange={() => savePerformanceMode.mutate("ECO")}
-            />
-            <span>
-              <b>{t("searchPerformanceEco")}</b>
-              <small>{t("searchPerformanceEcoHelp")}</small>
-            </span>
-          </label>
-          <label>
-            <input
-              type="radio"
-              name="performance-mode"
-              checked={scheduler.performance_mode === "FAST"}
-              disabled={!schedulerQuery.data || savePerformanceMode.isPending}
-              onChange={() => savePerformanceMode.mutate("FAST")}
-            />
-            <span>
-              <b>{t("searchPerformanceFast")}</b>
-              <small>{t("searchPerformanceFastHelp")}</small>
-            </span>
-          </label>
-        </fieldset>
-      </section>
-      <TelegramSettings native={desktop} locale={locale} projects={projects} projectsLoading={projectsLoading} projectsError={projectsError} retryProjects={retryProjects} read={request} imageUrl={assetUrl}
-        write={(path, body) => request(path, {method:"POST", body:JSON.stringify(body)})}
-        saveLegacy={async (id, url) => {
-          await request(`/projects/${id}`, {method:"PATCH", body:JSON.stringify({telegram_url:url})});
-          await client.invalidateQueries({queryKey:["projects"]});
-        }} />
       <section className="panel settings import-panel">
         <div className="setting-row">
           <div>

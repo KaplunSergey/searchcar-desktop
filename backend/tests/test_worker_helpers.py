@@ -40,6 +40,7 @@ def test_search_performance_mode_selects_a_bounded_detail_worker_count():
     assert _detail_worker_count(FakeDb("ECO"), 1) == 1
     assert _detail_worker_count(FakeDb("FAST"), 1) == 2
     assert _detail_worker_count(FakeDb("UNSUPPORTED"), 1) == 1
+    assert _detail_worker_count(SimpleNamespace(scalar=lambda _: None), 1) == 2
 
 
 def test_new_project_and_scheduler_defaults_are_fast():

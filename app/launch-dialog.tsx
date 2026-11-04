@@ -25,6 +25,14 @@ export function launchableProjects(options?: LaunchOptions, catalog = SOURCE_CAT
     && options.sources.some((site) => site.source_key === project.source_key && site.can_search)) || [];
 }
 
+export function orderedLaunchProjects(projects: LaunchProject[]) {
+  const groups = new Map<string, LaunchProject[]>();
+  for (const project of projects) groups.set(project.source_key, [...(groups.get(project.source_key) || []), project]);
+  const priority = ['iaa', 'copart', 'encar'];
+  const keys = [...priority.filter(key => groups.has(key)), ...[...groups.keys()].filter(key => !priority.includes(key))];
+  return keys.flatMap(key => groups.get(key) || []);
+}
+
 export function launchSummary(result: LaunchResult, locale: Locale) {
   const queued = result.projects.filter((project) => project.status === "QUEUED").length;
   const active = result.projects.filter((project) => project.status === "ALREADY_ACTIVE").length;
@@ -112,7 +120,7 @@ export function LaunchDialog({ locale, options, loading, failed, retry, launch, 
     return () => { node?.close(); returnFocus?.current?.focus(); };
   }, [returnFocus]);
   const ready = launchableProjects(options, catalog);
-  const chosen = ready.filter((project) => selected.includes(project.id));
+  const chosen = orderedLaunchProjects(ready.filter((project) => selected.includes(project.id)));
   const toggle = (ids: number[], checked: boolean) => setSelected((previous) => checked
     ? [...new Set([...previous, ...ids])] : previous.filter((id) => !ids.includes(id)));
   const submit = async () => {
@@ -134,8 +142,8 @@ export function LaunchDialog({ locale, options, loading, failed, retry, launch, 
     }}
     onCancel={(event) => { event.preventDefault(); if (!pending) close(); }}>
     <div className="modal-head"><h2 id="launch-title">{uk ? "Оновити дані" : "Обновить данные"}</h2>
-      <button type="button" aria-label={uk ? "Закрити" : "Закрыть"} disabled={pending} onClick={close}>×</button></div>
-    <p id="launch-description">{uk ? "Оберіть проєкти одного або кількох сайтів. Запуск — лише після підтвердження." : "Выберите проекты одного или нескольких сайтов. Запуск — только после подтверждения."}</p>
+      <button type="button" className="launch-close" aria-label={uk ? "Закрити" : "Закрыть"} disabled={pending} onClick={close}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" /></svg></button></div>
+    <p id="launch-description">{uk ? "Оберіть проєкти одного або кількох сайтів. Запуск — лише після підтвердження. Сайти оновлюються по черзі." : "Выберите проекты одного или нескольких сайтов. Запуск — только после подтверждения. Сайты обновляются по очереди."}</p>
     {error && <p ref={errorNotice} tabIndex={-1} className="launch-error" role="alert">{error}</p>}
     <div className="launch-content">
     {result ? <section className="launch-result">

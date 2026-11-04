@@ -343,10 +343,10 @@ async function ownerDashboard(request: Request, env: Env, now: Date): Promise<Re
          ORDER BY l.updated_at DESC LIMIT 100`,
     ).all(),
     env.LICENSE_DB.prepare(
-      `SELECT ac.id, ac.license_id, ac.code_hint, ac.duration_months, ac.makes_perpetual,
+      `SELECT ac.id, ac.license_id, ac.code_hint, ac.duration_months, ac.makes_perpetual, ac.is_recovery,
               ac.expires_at, ac.created_at, ac.used_at, l.kind AS license_kind,
               c.display_name AS customer_name
-         FROM activation_codes ac JOIN licenses l ON l.id = ac.license_id
+         FROM all_activation_codes ac JOIN licenses l ON l.id = ac.license_id
          LEFT JOIN customers c ON c.id = l.customer_id
          ORDER BY ac.created_at DESC LIMIT 100`,
     ).all(),

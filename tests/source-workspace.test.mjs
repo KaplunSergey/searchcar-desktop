@@ -11,6 +11,14 @@ const { sourceAvailability } = await import("../app/source-navigation.tsx");
 const user = { id: 1, username: "fixture", role: "USER", preferred_locale: "ru", must_change_password: false };
 const available = { sources: [{ source_key: "encar", family: "MARKETPLACE", can_search: true, reason: null }],
   projects: [{ id: 1, source_key: "encar", name: "Encar fixture", can_search: true, reason: null, active_status: null, scan_run_id: null }] };
+
+test('Encar hides a saved Telegram link without changing its project data', t => {
+  const project = {id:1,source_key:'encar',name:'Encar fixture',cars:0,telegram_url:'https://t.me/legacy_fixture'};
+  const {html} = render(t, {search:'?source=encar&view=project&project=1', projectOverride:project});
+  assert.match(html,/Encar fixture/);
+  assert.doesNotMatch(html,/telegram-icon|legacy_fixture/);
+  assert.equal(project.telegram_url,'https://t.me/legacy_fixture');
+});
 function render(t, { search = "", stored = null, locale = "ru", storage = {}, projectOverride = null, carOverride = null,
   scanError = false, activityError = false, runtimeError = false, nativeHealth, availabilityError = false, launchOptions = available, activeRuns = [], projectsOverride, auctionProject, auctionCar, auctionError = false, nativeWorkspace, sourceTestMode = false, deliveryEnabled = false, schedulerOverride, licenseStatus } = {}) {
   const previousWindow = globalThis.window;
@@ -165,6 +173,14 @@ test("the real app groups three sites and separates application settings", (t) =
   assert.match(html, /Настройки приложения/);
 });
 
+test('Encar performance setting is on Encar settings, not application settings', t => {
+  const encar = render(t, {search:'?source=encar&view=source-settings'}).html;
+  assert.match(encar, /Нагрузка на компьютер/);
+  assert.match(encar, /Ускоренный/);
+  const general = render(t, {search:'?view=settings'}).html;
+  assert.doesNotMatch(general, /Нагрузка на компьютер/);
+});
+
 test('signed source visibility hides empty families and redirects a revoked deep link without mixing projects', (t) => {
   const launchOptions = { ...available, licensed_sources: ['copart', 'iaa'] };
   const { html } = render(t, { search: '?source=encar&view=project&project=1', launchOptions });
@@ -273,10 +289,10 @@ test("a foreign-site project URL cannot render the Encar project details", (t) =
   assert.doesNotMatch(html, /project-price|projectUpdate|Foreign auction/);
 });
 
-test("Encar settings separate project controls from app-wide performance without fake fields", (t) => {
+test("Encar settings separate project controls from app-wide scheduling without fake fields", (t) => {
   const { html } = render(t, { search: "?source=encar&view=source-settings" });
   assert.match(html, /Настройки Encar/);
-  assert.match(html, /Скорость поиска, автообновление, лицензия/);
+  assert.match(html, /Автообновление, лицензия и резервные копии/);
   assert.doesNotMatch(html, /type="checkbox"|projects-toolbar-controls/);
 });
 
@@ -338,11 +354,14 @@ test("one blocked source does not disable another and unavailable-source setting
   assert.doesNotMatch(copart, /Поиск Copart ещё не подключён/);
 });
 test("project and saved-car refresh obey the same source entitlement without hiding the data", (t) => {
-  const project = render(t, { search: "?view=project&project=1", launchOptions: blocked("LICENSE_LEASE_EXPIRED"),
+  const expired = {...blocked("LICENSE_LEASE_EXPIRED"), licensed_sources:['encar','copart','iaa']};
+  const project = render(t, { search: "?view=project&project=1", launchOptions: expired,
     projectOverride: { id: 1, name: "Saved project", source_key: "encar", cars: 0 } }).html;
   assert.match(project, /<button[^>]*disabled[^>]*>↻ Обновить проект/);
   assert.match(project, /Saved project/);
-  const car = render(t, { search: "?view=car&project=1&car=10", launchOptions: blocked("LICENSE_LEASE_EXPIRED"),
+  assert.match(project, /Площадки/);
+  assert.match(project, /Аукционы/);
+  const car = render(t, { search: "?view=car&project=1&car=10", launchOptions: expired,
     carOverride: { id: 10, title: "Saved car", source_key: "encar", encar_id: "42688672", details: {}, price: 10000000 } }).html;
   assert.match(car, /<button[^>]*disabled[^>]*>↻ Обновить<\/button>/);
   assert.match(car, /Saved car/);

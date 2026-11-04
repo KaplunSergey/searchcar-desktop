@@ -348,8 +348,7 @@ def evaluate_search_entitlement(
             )
         ):
             raise LicenseStateError("LICENSE_SOURCES_INVALID")
-        if effective_time >= lease_expires_at:
-            raise LicenseStateError("LICENSE_LEASE_EXPIRED")
+        expiry_reason = "LICENSE_LEASE_EXPIRED" if effective_time >= lease_expires_at else None
         subscription_value = payload.get("subscription_expires_at")
         subscription_expires_at = None
         if subscription_value is not None:
@@ -357,18 +356,20 @@ def evaluate_search_entitlement(
                 subscription_value,
                 "LICENSE_SUBSCRIPTION_EXPIRY_INVALID",
             )
-            if effective_time >= subscription_expires_at:
-                raise LicenseStateError("LICENSE_SUBSCRIPTION_EXPIRED")
+            if effective_time >= subscription_expires_at and expiry_reason is None:
+                expiry_reason = "LICENSE_SUBSCRIPTION_EXPIRED"
 
         from .sources.registry import list_sources
         sources = tuple(sorted(source.key for source in list_sources()
-                               if all_sources or source.key in raw_sources)) if entitlements["search"] else ()
-        can_search = entitlements["search"] is True and bool(sources)
+                               if all_sources or source.key in raw_sources)) if entitlements["search"] or expiry_reason else ()
+        # Expiry blocks new work, not navigation to already saved source data.
+        # Only a verified, device-bound lease can supply the visible source list.
+        can_search = expiry_reason is None and entitlements["search"] is True and bool(sources)
         return EntitlementDecision(
             mode="required",
-            status="active",
+            status="blocked" if expiry_reason else "active",
             can_search=can_search,
-            reason=None if can_search else "LICENSE_SEARCH_DISABLED",
+            reason=expiry_reason or (None if can_search else "LICENSE_SEARCH_DISABLED"),
             license_id=license_id,
             device_id=device_id,
             license_type=str(payload.get("license_type") or "UNKNOWN"),

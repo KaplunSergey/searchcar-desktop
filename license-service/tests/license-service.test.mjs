@@ -4,8 +4,10 @@ import net from "node:net";
 import { after, before, test } from "node:test";
 import { webcrypto } from "node:crypto";
 import { Miniflare } from "miniflare";
+import { spawnSync } from "node:child_process";
 
 const encoder = new TextEncoder();
+const defaultSources = ['copart', 'encar', 'iaa'];
 const migrations = await Promise.all(
   [
     "0001_initial.sql",
@@ -14,6 +16,8 @@ const migrations = await Promise.all(
     "0004_license_deletion.sql",
     "0005_device_rebinding.sql",
     "0006_default_source_access.sql",
+    "0007_license_recovery_codes.sql",
+    "0008_auction_source_catalog.sql",
   ].map((name) =>
     readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"),
   ),
@@ -154,7 +158,7 @@ before(async () => {
   await mf.ready;
   database = await mf.getD1Database("LICENSE_DB");
   for (const migration of migrations) {
-    if (migration === migrations.at(-1)) {
+    if (migration === migrations[5]) {
       // Simulate licenses from the previous schema, including an empty policy.
       for (const id of ["legacy-default", "legacy-subset", "legacy-empty"]) {
         await database.prepare(`INSERT INTO licenses
@@ -218,7 +222,7 @@ async function ownerApi(path, body, cookie) {
   return { response, json: await response.json() };
 }
 
-async function verifyLease(lease) {
+async function verifyLease(lease, sources = defaultSources) {
   const valid = await webcrypto.subtle.verify(
     { name: "Ed25519" },
     signingPublicKey,
@@ -228,7 +232,7 @@ async function verifyLease(lease) {
   assert.equal(valid, true);
   assert.equal(lease.payload.server_time, lease.payload.issued_at);
   assert.equal(lease.payload.entitlements.data_access, true);
-  assert.deepEqual(lease.payload.entitlements.sources, ["encar"]);
+  assert.deepEqual(lease.payload.entitlements.sources, sources);
 }
 
 test("Worker signing identity matches the desktop trust store", async () => {
@@ -263,11 +267,11 @@ async function checkDynamicSourcePolicy(context) {
   };
   await database.prepare(`INSERT INTO source_catalog VALUES ('test-auction','Test auction',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`).run();
   try {
-    assert.deepEqual((await check()).sources, ["encar", "test-auction"]);
+    assert.deepEqual((await check()).sources, [...defaultSources, "test-auction"]);
     const secondDevice = await createDevice("all-sites-at-first-activation");
     const secondTrial = await api("/v1/trials/activate", await signedBody(secondDevice, {subject_hash:"5".repeat(64)}));
     assert.equal(secondTrial.response.status, 200);
-    assert.deepEqual(secondTrial.json.data.lease.payload.entitlements.sources, ["encar", "test-auction"]);
+    assert.deepEqual(secondTrial.json.data.lease.payload.entitlements.sources, [...defaultSources, "test-auction"]);
     const customer = await admin("/v1/admin/customers", {display_name:"Source policy test"});
     const paidLicense = await admin("/v1/admin/licenses", {customer_id:customer.json.data.customer_id});
     assert.equal(paidLicense.response.status, 200);
@@ -279,9 +283,9 @@ async function checkDynamicSourcePolicy(context) {
     assert.deepEqual(await check(), {search:false, data_access:true, backup_restore:true, sources:[]});
     assert.equal((await update(["*", "encar"])).response.status, 400);
     assert.equal((await update(["*"])).response.status, 200);
-    assert.deepEqual((await check()).sources, ["encar", "test-auction"]);
+    assert.deepEqual((await check()).sources, [...defaultSources, "test-auction"]);
     await database.prepare("UPDATE source_catalog SET is_active=0 WHERE source_key='test-auction'").run();
-    assert.deepEqual((await check()).sources, ["encar"]);
+    assert.deepEqual((await check()).sources, defaultSources);
   } finally {
     await database.prepare("DELETE FROM source_catalog WHERE source_key='test-auction'").run();
   }
@@ -418,7 +422,7 @@ test("owner bootstrap creates a protected cookie session exactly once", async (c
     await signedBody(licensedDevice, { activation_code: activation.json.data.activation_code }),
   );
   assert.equal(redeemed.response.status, 200);
-  await verifyLease(redeemed.json.data.lease);
+  await verifyLease(redeemed.json.data.lease, ['encar']);
   assert.equal(redeemed.json.data.license_id, license.json.data.license_id);
 
   const disabledBoundSources = await ownerApi(
@@ -901,6 +905,148 @@ test("concurrent same-device redemption retries converge on one renewal", async 
   assert.equal(renewalCount, 1);
 });
 
+test("CURRENT restores the bound license without renewing it, including retries", async (context) => {
+  if (!localRuntimeAvailable) return context.skip("loopback sockets are blocked by this sandbox");
+  const device = await createDevice("current-recovery");
+  const trial = await api("/v1/trials/activate", await signedBody(device, { subject_hash: "f".repeat(64) }));
+  const id = trial.json.data.license_id;
+  const before = await database.prepare("SELECT * FROM licenses WHERE id = ?").bind(id).first();
+  const page = await mf.dispatchFetch("https://license.test/owner");
+  assert.equal((await page.text()).includes('<option value="CURRENT">Текущая</option>'), true);
+  const code = await admin("/v1/admin/activation-codes", { license_id: id, duration: "CURRENT" });
+  assert.equal(code.response.status, 200);
+  const other = await createDevice("not-the-recovery-device");
+  const denied = await api("/v1/licenses/redeem", await signedBody(other, { activation_code: code.json.data.activation_code }));
+  assert.equal(denied.response.status, 403);
+  const body = await signedBody(device, { activation_code: code.json.data.activation_code });
+  const recovered = await api("/v1/licenses/redeem", body);
+  assert.equal(recovered.response.status, 200);
+  await verifyLease(recovered.json.data.lease);
+  assert.equal(recovered.json.data.lease.payload.subscription_expires_at, before.expires_at);
+  assert.equal(recovered.json.data.lease.payload.license_type, before.kind);
+  assert.deepEqual(recovered.json.data.lease.payload.recovery, {
+    request_id: body.request_id, device_public_key: device.device.public_key,
+  });
+  const retryBody = await signedBody(device, { activation_code: code.json.data.activation_code });
+  const retry = await api("/v1/licenses/redeem", retryBody);
+  assert.equal(retry.response.status, 200);
+  assert.equal(retry.json.data.lease.payload.recovery.request_id, retryBody.request_id);
+  const after = await database.prepare("SELECT * FROM licenses WHERE id = ?").bind(id).first();
+  assert.deepEqual(after, before);
+  assert.equal(await database.prepare("SELECT COUNT(*) FROM renewals WHERE license_id = ?").bind(id).first("COUNT(*)"), 0);
+});
+
+test("protocol-v1 legacy clients keep check and renewal semantics after CURRENT recovery", async context => {
+  if (!localRuntimeAvailable) return context.skip("loopback sockets are blocked by this sandbox");
+  const device = await createDevice("legacy-protocol-compatibility");
+  const trial = await api('/v1/trials/activate', await signedBody(device, {
+    subject_hash: Buffer.from(await webcrypto.subtle.digest('SHA-256', encoder.encode('legacy-protocol-compatibility'))).toString('hex'), app_version: '0.3.1',
+  }));
+  assert.equal(trial.response.status, 200);
+  const license_id = trial.json.data.license_id, device_id = trial.json.data.device_id;
+  const original = await database.prepare('SELECT * FROM licenses WHERE id=?').bind(license_id).first();
+  const code = await admin('/v1/admin/activation-codes', {license_id, duration:'CURRENT'});
+  const recovered = await api('/v1/licenses/redeem', await signedBody(device, {
+    app_version:'0.3.1', activation_code:code.json.data.activation_code,
+  }));
+  assert.equal(recovered.response.status, 200);
+  const checked = await api('/v1/licenses/check', await signedBody(device, {license_id, device_id, app_version:'0.3.1'}));
+  assert.equal(checked.response.status, 200);
+  for (const result of [recovered, checked]) {
+    await verifyLease(result.json.data.lease);
+    assert.equal(result.json.data.lease.payload.protocol_version, 1);
+    assert.equal(result.json.data.lease.payload.subscription_expires_at, original.expires_at);
+    assert.deepEqual(result.json.data.lease.payload.entitlements.sources, defaultSources);
+  }
+  assert.equal(checked.json.data.lease.payload.recovery, undefined);
+  assert.deepEqual(await database.prepare('SELECT * FROM licenses WHERE id=?').bind(license_id).first(), original);
+  // Optional real historical Python consumers, not a reimplementation of their parser.
+  for (const backend of JSON.parse(process.env.SEARCHCAR_COMPAT_BACKENDS || '[]')) {
+    for (const result of [recovered, checked]) {
+      const child = spawnSync(process.env.SEARCHCAR_COMPAT_PYTHON || 'python',
+        [new URL('../../scripts/check_license_lease_compatibility.py', import.meta.url).pathname], {
+          env:{...process.env, PYTHONPATH:backend, SEARCHCAR_SOURCE_TEST_MODE:'0'},
+          input:JSON.stringify({lease:result.json.data.lease, public_key:signingPublicKeyValue, can_search:true}),
+          encoding:'utf8', timeout:30000,
+        });
+      assert.equal(child.error, undefined);
+      assert.equal(child.status, 0, child.stderr);
+      assert.equal(JSON.parse(child.stdout).status, 'ok');
+    }
+  }
+  const renewal = await admin('/v1/admin/activation-codes', {license_id, duration:'P1M'});
+  const renewed = await api('/v1/licenses/redeem', await signedBody(device, {
+    app_version:'0.3.1', activation_code:renewal.json.data.activation_code,
+  }));
+  assert.equal(renewed.response.status, 200);
+  assert.ok(Date.parse(renewed.json.data.lease.payload.subscription_expires_at) > Date.parse(original.expires_at));
+  assert.equal(renewed.json.data.lease.payload.recovery, undefined);
+  assert.equal(await database.prepare('SELECT COUNT(*) AS n FROM renewals WHERE license_id=?').bind(license_id).first('n'), 1);
+});
+
+test("CURRENT never revives expired licenses or binds a fresh device", async (context) => {
+  if (!localRuntimeAvailable) return context.skip("loopback sockets are blocked by this sandbox");
+  const customer = await admin("/v1/admin/customers", { display_name: "Recovery unbound" });
+  const license = await admin("/v1/admin/licenses", { customer_id: customer.json.data.customer_id });
+  assert.equal(license.response.status, 200);
+  const unbound = await admin("/v1/admin/activation-codes", { license_id: license.json.data.license_id, duration: "CURRENT" });
+  assert.equal(unbound.response.status, 409);
+  assert.equal(unbound.json.error.code, "LICENSE_NOT_BOUND");
+  const device = await createDevice("expired-current-recovery");
+  const trial = await api("/v1/trials/activate", await signedBody(device, { subject_hash: "1".repeat(64) }));
+  const id = trial.json.data.license_id;
+  const expired = "2026-01-01T12:00:00.123Z";
+  await database.prepare("UPDATE licenses SET expires_at = ? WHERE id = ?").bind(expired, id).run();
+  const code = await admin("/v1/admin/activation-codes", { license_id: id, duration: "CURRENT" });
+  assert.equal(code.response.status, 200);
+  const redeemed = await api("/v1/licenses/redeem", await signedBody(device, { activation_code: code.json.data.activation_code }));
+  assert.equal(redeemed.response.status, 200);
+  assert.equal(redeemed.json.data.lease.payload.subscription_expires_at, expired);
+  assert.equal(redeemed.json.data.lease.payload.entitlements.search, false);
+  await database.prepare("UPDATE licenses SET status = 'SUSPENDED' WHERE id = ?").bind(id).run();
+  const suspended = await admin("/v1/admin/activation-codes", { license_id: id, duration: "CURRENT" });
+  assert.equal(suspended.response.status, 409);
+  const retry = await api("/v1/licenses/redeem", await signedBody(device, { activation_code: code.json.data.activation_code }));
+  assert.equal(retry.response.status, 409);
+});
+
+test("CURRENT preserves latest paid/perpetual terms and source restrictions under concurrent retry", async (context) => {
+  if (!localRuntimeAvailable) return context.skip("loopback sockets are blocked by this sandbox");
+  const device = await createDevice("paid-current-recovery");
+  const trial = await api("/v1/trials/activate", await signedBody(device, { subject_hash: "2".repeat(64) }));
+  const id = trial.json.data.license_id;
+  const code = await admin("/v1/admin/activation-codes", { license_id: id, duration: "CURRENT" });
+  assert.equal(code.response.status, 200);
+  // A later paid renewal must not be overwritten by a previously issued recovery code.
+  const expiry = "2030-02-15T12:34:56.789Z";
+  await database.prepare("UPDATE licenses SET kind = 'SUBSCRIPTION', expires_at = ?, sources_all = 0 WHERE id = ?").bind(expiry, id).run();
+  await database.prepare("DELETE FROM license_sources WHERE license_id = ?").bind(id).run();
+  const responses = await Promise.all([1, 2].map(async () => {
+    const body = await signedBody(device, { activation_code: code.json.data.activation_code });
+    const result = await api("/v1/licenses/redeem", body);
+    assert.equal(result.response.status, 200);
+    assert.equal(result.json.data.lease.payload.recovery.request_id, body.request_id);
+    return result.json.data.lease.payload;
+  }));
+  for (const payload of responses) {
+    assert.equal(payload.subscription_expires_at, expiry);
+    assert.equal(payload.license_type, "SUBSCRIPTION");
+    assert.deepEqual(payload.entitlements.sources, []);
+    assert.equal(payload.entitlements.search, false);
+  }
+  const audit = await database.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = 'LICENSE_RECOVERY_CODE_REDEEMED' AND target_id = ?").bind(id).first("count");
+  assert.equal(audit, 1);
+  await database.prepare("UPDATE licenses SET kind = 'PERPETUAL', perpetual = 1, expires_at = NULL WHERE id = ?").bind(id).run();
+  const perpetualCode = await admin("/v1/admin/activation-codes", { license_id: id, duration: "CURRENT" });
+  const perpetual = await api("/v1/licenses/redeem", await signedBody(device, { activation_code: perpetualCode.json.data.activation_code }));
+  assert.equal(perpetual.response.status, 200);
+  assert.equal(perpetual.json.data.lease.payload.subscription_expires_at, null);
+  assert.equal(perpetual.json.data.lease.payload.license_type, "PERPETUAL");
+  await database.prepare("UPDATE licenses SET deleted_at = ? WHERE id = ?").bind(new Date().toISOString(), id).run();
+  const deleted = await api("/v1/licenses/redeem", await signedBody(device, { activation_code: perpetualCode.json.data.activation_code }));
+  assert.equal(deleted.response.status, 409);
+});
+
 test("approved transfer atomically moves the binding and invalidates old checks", async (context) => {
   if (!localRuntimeAvailable) return context.skip("loopback sockets are blocked by this sandbox");
   const oldDevice = await createDevice("transfer-old");
@@ -1052,6 +1198,13 @@ test("transfer approval rejects an inactive license without moving its device", 
 });
 
 test("default licenses grant active sites dynamically and owner can restrict or restore all", checkDynamicSourcePolicy);
+
+test('active server catalog matches the shipped desktop sites', async (context) => {
+  if (!localRuntimeAvailable) return context.skip('loopback sockets are blocked by this sandbox');
+  const desktop = JSON.parse(await readFile(new URL('../../backend/app/sources/catalog.json', import.meta.url), 'utf8'));
+  const rows = await database.prepare('SELECT source_key FROM source_catalog WHERE is_active=1 ORDER BY source_key').all();
+  assert.deepEqual(rows.results.map(row => row.source_key), desktop.map(site => site.key).sort());
+});
 
 test("migration preserves prior explicit restrictions including empty grants", async context => {
   if (!localRuntimeAvailable) return context.skip("loopback sockets are blocked by this sandbox");

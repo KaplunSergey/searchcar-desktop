@@ -398,7 +398,7 @@ def test_search_publishes_initial_and_preparation_progress_before_any_rows(adapt
 
 def test_failed_search_diagnostics_keep_codes_not_script_text_urls_or_cookies(adapters, caplog):
     import logging
-    caplog.set_level(logging.INFO, logger='app.test_diagnostics')
+    caplog.set_level(logging.INFO, logger='app.source_diagnostics')
     from app.worker import _failure_detail
     from app.sources.auction_lists import AuctionListError
     source = get_source('copart')
@@ -426,7 +426,7 @@ def test_failed_search_diagnostics_keep_codes_not_script_text_urls_or_cookies(ad
     assert diagnostics['http_failures'] == [dict(resource_type='script',status=503,site_resource=False)]
     assert progress[-1]['browser_diagnostics'] == diagnostics
     assert 'browser_diagnostics=' in caplog.text
-    assert 'Test source diagnostic:' in caplog.text
+    assert 'Source diagnostic:' in caplog.text
     assert not any(secret in json.dumps(failure)+caplog.text for secret in ['secret-token','private-script-text','private.example','other.example','cookie='])
     assert not page.listeners, 'Remove diagnostic listeners after the search, including failure'
 

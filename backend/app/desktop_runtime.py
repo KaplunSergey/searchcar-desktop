@@ -1144,6 +1144,11 @@ def parser() -> argparse.ArgumentParser:
 def main() -> None:
     arguments = parser().parse_args()
     if arguments.command == "check":
+        # Exercise the same default verified TLS setup used by the license client.
+        # No request is made; missing packaged SSL resources must fail the smoke.
+        import httpx
+        with httpx.Client(trust_env=False):
+            pass
         print(json.dumps(check_runtime(arguments.data_dir, arguments.port)))
         return
     if arguments.command == "browser-check":

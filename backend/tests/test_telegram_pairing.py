@@ -32,6 +32,48 @@ def test_other_owner_and_wrong_source_never_reach_pairing(auction_api):
     assert client.get('/api/projects/1/telegram?source_key=iaa').status_code == 404
 
 
+def test_encar_telegram_routes_reject_before_credentials_relay_or_storage(native_pairing, auction_api, monkeypatch):
+    from app.models import Project
+    f = native_pairing
+    _, factory, _ = auction_api
+    with factory() as db:
+        db.get(Project, 3).telegram_url = 'https://t.me/legacy_fixture'
+        db.commit()
+    from app import main
+    def forbidden(*args, **kwargs):
+        pytest.fail('Encar must not reach Telegram configuration or storage')
+    monkeypatch.setattr(main.telegram_pairing, 'configuration', forbidden)
+    monkeypatch.setattr(main.telegram_dispatch, 'configuration', forbidden)
+    for method, suffix, body in [
+        ('get','telegram',None), ('post','telegram',{'action':'START'}),
+        ('post','telegram',{'action':'USE_SAVED','recipient_id':'a'*32}),
+        ('get','telegram-history',None), ('get','telegram-automatic',None),
+        ('post','telegram-automatic',{'enabled':True,'computer_timezone':'UTC'}),
+        ('get','telegram-reschedules',None),
+        ('post','telegram-reschedules',{'enabled':True,'computer_timezone':'UTC'}),
+        ('post','telegram-deliveries',{}), ('get','telegram-deliveries/'+'a'*32,None),
+        ('post','telegram-deliveries/'+'a'*32+'/cancel',{}),
+    ]:
+        response = getattr(f.client, method)('/api/projects/3/'+suffix+'?source_key=encar', **({'json':body} if body is not None else {}))
+        assert response.status_code == 400, (method, suffix, response.text)
+        assert response.json()['detail'] == 'not_an_auction_source'
+    assert f.counts['identity'] == 0 and f.counts['calls'] == []
+    with factory() as db:
+        assert db.get(Project, 3).telegram_url == 'https://t.me/legacy_fixture'
+
+
+def test_recipient_catalogue_does_not_import_encar_project_bindings(auction_api, monkeypatch):
+    client, _, _ = auction_api
+    calls = []
+    def saved(owner_id, projects):
+        calls.append((owner_id, projects))
+        return dict(available=True, issue=None, recipients=[])
+    monkeypatch.setattr(telegram_pairing, 'saved_recipients', saved)
+    assert client.get('/api/telegram/recipients').status_code == 200
+    assert len(calls) == 1 and calls[0][0] == 1
+    assert {project_id for project_id, _ in calls[0][1]} == {1, 2}
+
+
 @pytest.fixture
 def native_pairing(auction_api, monkeypatch, tmp_path):
     client, factory, _ = auction_api

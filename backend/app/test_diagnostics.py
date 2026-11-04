@@ -1,8 +1,6 @@
 """Temporary preview-only telemetry. Removal points: docs/TEST_DIAGNOSTICS.md."""
-import hashlib
 import json
 import logging
-import re
 from threading import Lock
 from time import monotonic
 from typing import Literal
@@ -46,18 +44,3 @@ router = APIRouter()
 @router.post('/api/desktop/diagnostics/test-event', status_code=204)
 def ui_event(event: TestEvent, _user=Depends(require_csrf)):
     record_event(event)
-
-
-def record_source_failure(source, code, state, failures):
-    if not settings.source_test_mode:
-        return
-    resources = []
-    for failure in failures[-6:]:
-        path = str(failure.get('path', '')).split('?')[0].split('#')[0]
-        asset = re.search(r'(?:^|/)dist/(runtime|polyfills|main)[.-]', path)
-        resources.append(dict(status=failure.get('status'), type=failure.get('resource_type'),
-            asset=asset.group(1) if asset else 'other', path_hash=hashlib.sha256(path.encode()).hexdigest()[:16]))
-    flags = {key: state.get(key) is True for key in ('ready', 'blocked', 'manual_required', 'consent_required', 'document_loaded')}
-    flags['observed'] = bool(state)
-    logging.getLogger(__name__).info('Test source diagnostic: %s', json.dumps(dict(
-        source=source, code=code, state=flags, rows=min(len(state.get('rows') or []), 1000), resources=resources), sort_keys=True))

@@ -1173,12 +1173,21 @@ def telegram_project_scope(project):
     return [project.source_key, project.created_at.isoformat()]
 
 
+def owned_telegram_project(project_id, current, db, source_key=None):
+    project = owned_project(project_id, current, db)
+    if source_key and source_key != project.source_key:
+        raise HTTPException(404, 'project_not_found')
+    if not is_auction_source(project.source_key):
+        raise HTTPException(400, 'not_an_auction_source')
+    return project
+
+
 @app.get("/api/telegram/recipients")
 def telegram_recipients(current: User = Depends(require_user), db: Session = Depends(get_db)):
     projects = db.scalars(select(Project).where(Project.owner_id == current.id)).all()
     try:
         return telegram_pairing.saved_recipients(current.id,
-            [(project.id, telegram_project_scope(project)) for project in projects])
+            [(project.id, telegram_project_scope(project)) for project in projects if is_auction_source(project.source_key)])
     except (OSError, ValueError, telegram_pairing.sqlite3.Error):
         raise HTTPException(503, "telegram_pairing_storage_failed") from None
 
@@ -1186,9 +1195,7 @@ def telegram_recipients(current: User = Depends(require_user), db: Session = Dep
 @app.get("/api/projects/{project_id}/telegram")
 def project_telegram(project_id: int, source_key: str | None = None,
                      current: User = Depends(require_user), db: Session = Depends(get_db)):
-    project = owned_project(project_id, current, db)
-    if source_key and source_key != project.source_key:
-        raise HTTPException(404, "project_not_found")
+    project = owned_telegram_project(project_id, current, db, source_key)
     try:
         return telegram_pairing.project_status(current.id, project.id, telegram_project_scope(project))
     except (OSError, ValueError, telegram_pairing.sqlite3.Error):
@@ -1198,9 +1205,7 @@ def project_telegram(project_id: int, source_key: str | None = None,
 @app.post("/api/projects/{project_id}/telegram")
 async def change_project_telegram(project_id: int, request: Request, source_key: str | None = None,
                                  current: User = Depends(require_csrf), db: Session = Depends(get_db)):
-    project = owned_project(project_id, current, db)
-    if source_key and source_key != project.source_key:
-        raise HTTPException(404, "project_not_found")
+    project = owned_telegram_project(project_id, current, db, source_key)
     body = await telegram_pairing.pairing_body(request)
     try:
         return await run_in_threadpool(telegram_pairing.change_project, current.id, project.id, telegram_project_scope(project), body)
@@ -1222,9 +1227,7 @@ def telegram_automatic_clock(body: telegram_automatic.AutomaticClock, current: U
 @app.get('/api/projects/{project_id}/telegram-automatic')
 def telegram_automatic_status(project_id: int, source_key: str | None = None,
                               current: User = Depends(require_user), db: Session = Depends(get_db)):
-    project = owned_project(project_id, current, db)
-    if source_key and source_key != project.source_key:
-        raise HTTPException(404, 'project_not_found')
+    project = owned_telegram_project(project_id, current, db, source_key)
     try:
         with telegram_pairing.LOCK:
             return telegram_automatic.status(telegram_dispatch.configuration(), current.id, project, int(now_utc().timestamp()*1000))
@@ -1237,9 +1240,7 @@ def telegram_automatic_status(project_id: int, source_key: str | None = None,
 @app.post('/api/projects/{project_id}/telegram-automatic')
 def configure_telegram_automatic(project_id: int, body: telegram_automatic.AutomaticPolicy, source_key: str | None = None,
                                  current: User = Depends(require_csrf), db: Session = Depends(get_db)):
-    project = owned_project(project_id, current, db)
-    if source_key and source_key != project.source_key:
-        raise HTTPException(404, 'project_not_found')
+    project = owned_telegram_project(project_id, current, db, source_key)
     try:
         with telegram_pairing.LOCK:
             result = telegram_automatic.configure(telegram_dispatch.configuration(), current.id, project, body, int(now_utc().timestamp()*1000))
@@ -1254,9 +1255,7 @@ def configure_telegram_automatic(project_id: int, body: telegram_automatic.Autom
 @app.get('/api/projects/{project_id}/telegram-reschedules')
 def telegram_reschedule_status(project_id: int, source_key: str | None = None,
                                current: User = Depends(require_user), db: Session = Depends(get_db)):
-    project = owned_project(project_id, current, db)
-    if source_key and source_key != project.source_key:
-        raise HTTPException(404, 'project_not_found')
+    project = owned_telegram_project(project_id, current, db, source_key)
     try:
         with telegram_pairing.LOCK:
             return telegram_reschedules.status(telegram_dispatch.configuration(), current.id, project, int(now_utc().timestamp()*1000))
@@ -1269,9 +1268,7 @@ def telegram_reschedule_status(project_id: int, source_key: str | None = None,
 @app.post('/api/projects/{project_id}/telegram-reschedules')
 def configure_telegram_reschedules(project_id: int, body: telegram_automatic.AutomaticPolicy, source_key: str | None = None,
                                    current: User = Depends(require_csrf), db: Session = Depends(get_db)):
-    project = owned_project(project_id, current, db)
-    if source_key and source_key != project.source_key:
-        raise HTTPException(404, 'project_not_found')
+    project = owned_telegram_project(project_id, current, db, source_key)
     try:
         with telegram_pairing.LOCK:
             result = telegram_reschedules.configure(telegram_dispatch.configuration(), current.id, project, body, int(now_utc().timestamp()*1000))
@@ -1286,11 +1283,7 @@ def configure_telegram_reschedules(project_id: int, body: telegram_automatic.Aut
 @app.post('/api/projects/{project_id}/telegram-deliveries')
 async def create_telegram_delivery(project_id: int, request: Request, source_key: str | None = None,
                                    current: User = Depends(require_csrf), db: Session = Depends(get_db)):
-    project = owned_project(project_id, current, db)
-    if source_key and source_key != project.source_key:
-        raise HTTPException(404, 'project_not_found')
-    if not is_auction_source(project.source_key):
-        raise HTTPException(400, 'not_an_auction_source')
+    project = owned_telegram_project(project_id, current, db, source_key)
     body = await telegram_dispatch.delivery_body(request)
     def enqueue():
         with telegram_pairing.LOCK:
@@ -1308,9 +1301,7 @@ async def create_telegram_delivery(project_id: int, request: Request, source_key
 @app.get('/api/projects/{project_id}/telegram-history')
 def telegram_delivery_history(project_id: int, source_key: str | None = None,
                                current: User = Depends(require_user), db: Session = Depends(get_db)):
-    project = owned_project(project_id, current, db)
-    if source_key and source_key != project.source_key:
-        raise HTTPException(404, 'project_not_found')
+    project = owned_telegram_project(project_id, current, db, source_key)
     config, issue = telegram_pairing.configuration()
     if issue:
         return dict(project_id=project_id, source_key=project.source_key, sent_car_ids=[])
@@ -1325,9 +1316,7 @@ def telegram_delivery_history(project_id: int, source_key: str | None = None,
 @app.get('/api/projects/{project_id}/telegram-deliveries/{intent_id}')
 def get_telegram_delivery(project_id: int, intent_id: str, source_key: str | None = None,
                           current: User = Depends(require_user), db: Session = Depends(get_db)):
-    project = owned_project(project_id, current, db)
-    if source_key and source_key != project.source_key:
-        raise HTTPException(404, 'project_not_found')
+    project = owned_telegram_project(project_id, current, db, source_key)
     try:
         with telegram_pairing.LOCK:
             config = telegram_dispatch.configuration()
@@ -1340,9 +1329,7 @@ def get_telegram_delivery(project_id: int, intent_id: str, source_key: str | Non
 @app.post('/api/projects/{project_id}/telegram-deliveries/{intent_id}/cancel')
 def cancel_telegram_delivery(project_id: int, intent_id: str, source_key: str | None = None,
                              current: User = Depends(require_csrf), db: Session = Depends(get_db)):
-    project = owned_project(project_id, current, db)
-    if source_key and source_key != project.source_key:
-        raise HTTPException(404, 'project_not_found')
+    project = owned_telegram_project(project_id, current, db, source_key)
     try:
         with telegram_pairing.LOCK:
             return telegram_dispatch.cancel_batch(telegram_dispatch.configuration(), current.id, project, intent_id)

@@ -37,6 +37,15 @@ time and highest observed local time. All files are excluded from
 `.searchcar-backup`, so restoring or copying an application backup cannot copy
 or extend a license.
 
+The owner may issue a **«Текущая» (`CURRENT`)** recovery code for the same active
+device. It leaves the server subscription expiry, license kind and sources
+unchanged. A fresh, request/device-bound marker inside the verified signed lease
+allows the client to back up and rebuild an unparsable trusted-time document.
+It does not clear a readable clock-rollback guard, bypass an expired/revoked
+subscription, change device identity or repair filesystem access errors. This
+handler requires an updated desktop client; see `docs/LICENSE_SERVICE.md` for
+the additive D1 migration and rollout order.
+
 The backend verifies the Ed25519 signature over the exact Phase 6 canonical
 message, checks the binding, and uses the greatest trusted time seen. A local
 clock rollback greater than five minutes blocks search until a newer online
@@ -120,6 +129,16 @@ with its actual availability error. Before the first successful local policy
 read, no source workspace is shown; failure has an explicit retry. A later
 read failure keeps the last successful visible set, but disables new searches.
 Older API responses without the new field keep their legacy visibility behavior.
+
+Expiry clarification (3 November): an authentic, device-bound cached lease
+retains its signed source subset for read-only navigation after lease or
+subscription expiry, including a refreshed expired lease with search=false.
+`can_search` remains false with the original expiry reason; manual, bulk,
+per-car and scheduled searches still go through the same backend gate.
+Projects, saved cars and history are not hidden merely because time expired.
+Explicitly removed source keys remain hidden. Invalid signatures, mismatched
+devices, malformed state and clock rollback do not grant source visibility.
+No state migration, server deploy, license extension or clearing is involved.
 
 Revoked current/deep-linked/back-stack workspaces resolve to the first available
 site's base project list, never reusing the former project's IDs. With no sites,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import deque
 from datetime import datetime, timezone
 from threading import RLock
 
@@ -33,7 +32,7 @@ def utc_now() -> datetime:
 def project_execution_order(
     db: Session, owner_id: int, payload: dict, project_ids: list[int],
 ) -> list[int]:
-    """Round-robin sites within one batch; keep each site's submitted order."""
+    """Group sites by priority, retaining submitted order within each site."""
 
     project_ids = list(dict.fromkeys(project_ids))
     source_by_project = {
@@ -48,16 +47,12 @@ def project_execution_order(
                 Project.id.in_(legacy_ids), Project.owner_id == owner_id,
             ))
         })
-    groups: dict[str, deque[int]] = {}
+    groups: dict[str, list[int]] = {}
     for project_id in project_ids:
-        groups.setdefault(source_by_project.get(project_id, "encar"), deque()).append(project_id)
-    ordered = []
-    while groups:
-        for key in tuple(groups):
-            ordered.append(groups[key].popleft())
-            if not groups[key]:
-                del groups[key]
-    return ordered
+        groups.setdefault(source_by_project.get(project_id, "encar"), []).append(project_id)
+    priority = ("iaa", "copart", "encar")
+    keys = [key for key in priority if key in groups] + [key for key in groups if key not in priority]
+    return [project_id for key in keys for project_id in groups[key]]
 
 
 def claim_next_job(

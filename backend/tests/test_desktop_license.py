@@ -103,6 +103,39 @@ def install_sources(state, sources, *, missing=False):
     )
 
 
+@pytest.mark.parametrize('expiry', ['lease', 'subscription'])
+@pytest.mark.parametrize('search', [True, False])
+def test_expiry_keeps_verified_source_visibility_but_never_allows_search(tmp_path, monkeypatch, expiry, search):
+    from types import SimpleNamespace
+    from app.desktop_license import require_search_entitlement, SearchEntitlementError
+    state = license_state(tmp_path)
+    state['payload']['entitlements']['search'] = search
+    if expiry == 'subscription':
+        state['payload']['subscription_expires_at'] = (state['now'] + timedelta(hours=1)).isoformat()
+    install_sources(state, ['encar', 'copart'])
+    monkeypatch.setattr('app.sources.registry.list_sources', lambda: tuple(
+        SimpleNamespace(key=key) for key in ('encar','copart','iaa')))
+    now = state['now'] + timedelta(hours=49 if expiry == 'lease' else 2)
+    result = decision(state, now)
+    assert result.can_search is False
+    assert result.reason == ('LICENSE_LEASE_EXPIRED' if expiry == 'lease' else 'LICENSE_SUBSCRIPTION_EXPIRED')
+    assert result.sources == ('copart','encar'), 'expiry is not revocation of source visibility'
+    with pytest.raises(SearchEntitlementError):
+        require_search_entitlement(source_key='encar', now=now, data_dir=tmp_path,
+            public_keys=state['public_keys'], mode='required')
+
+
+def test_expired_tampered_lease_cannot_supply_visible_sources(tmp_path):
+    state = license_state(tmp_path)
+    path = state['directory'] / 'lease.json'
+    document = json.loads(path.read_text())
+    document['payload']['entitlements']['sources'] = ['copart']
+    path.write_text(json.dumps(document))
+    result = decision(state, state['now'] + timedelta(hours=49))
+    assert not result.can_search and result.sources == ()
+    assert result.reason != 'LICENSE_LEASE_EXPIRED', 'signature validation precedes expiry visibility'
+
+
 @pytest.mark.parametrize("missing", [True, False])
 def test_default_and_wildcard_allow_all_shipped_sources(tmp_path, monkeypatch, missing):
     from types import SimpleNamespace

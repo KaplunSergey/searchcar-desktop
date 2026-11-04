@@ -9,6 +9,7 @@ from pathlib import Path
 from time import monotonic
 from threading import Event, Lock
 from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 from playwright.sync_api import Error as BrowserError
 
 from ..auction_time import normalize_schedule, _timezone
@@ -525,7 +526,7 @@ class AuctionListSource:
                                         lease=lease, windowed_background=windowed_background)
         return None, session, session
 
-    def collect_search_pages(self, page, url, search_name='', *, all_pages=False, checkpoint=None, progress=None, max_pages=None, search_config=None):
+    def collect_search_pages(self, page, url, search_name='', *, all_pages=False, checkpoint=None, progress=None, max_pages=None, search_config=None, diagnostic_context=None):
         from ..database import settings
         self.descriptor  # Recheck the opt-in/isolation even for an already cached adapter.
         max_pages = settings.source_test_max_pages if max_pages is None else max_pages
@@ -552,6 +553,20 @@ class AuctionListSource:
         guard = None
         next_preparation_progress = 0
         loading_window_opened = False
+        started_at, attempt = monotonic(), uuid4().hex[:12]
+        diagnostic_stage = 'OPENING_SEARCH'
+        def record_result(code, state):
+            try:
+                from ..source_diagnostics import record_source_result
+                engine = Path(session.profile).name if session else 'unknown'
+                record_source_result(self.key, code, state, network_failures,
+                    context={**(diagnostic_context or {}), 'attempt':attempt, 'stage':diagnostic_stage,
+                        'elapsed_ms':int((monotonic()-started_at)*1000), 'pages':visited,
+                        'expected_pages':expected_pages, 'rows':len(rows), 'all_pages':all_pages,
+                        'browser':engine, 'mode':('windowed' if session.has_window else 'headless') if session else 'unknown'},
+                    browser_diagnostics=browser_diagnostics)
+            except Exception:
+                pass  # Logging must never change the search outcome.
         if search_config is not None:
             try:
                 clean = self.validate_selection_snapshot(search_config)
@@ -571,6 +586,9 @@ class AuctionListSource:
             if guard:
                 guard.check()
         def emit_progress(**extra):
+            nonlocal diagnostic_stage
+            if extra.get('stage'):
+                diagnostic_stage = extra['stage']
             if progress:
                 info = dict(current_page=visited,total_pages=expected_pages,expected_pages=expected_pages if all_pages else 1,
                               pages_visited=visited,total_results=total,ads_seen=len(rows),found_count=len(rows),complete=False,
@@ -754,6 +772,7 @@ class AuctionListSource:
         page.on('pageerror',script_error)
         page.on('requestfailed',request_failed)
         try:
+            record_result('STARTED', {})
             checked_checkpoint()
             emit_progress(stage='OPENING_SEARCH')
             if session:
@@ -848,23 +867,20 @@ class AuctionListSource:
                     wait_for_user('COOKIE_CONSENT')
                 if session:
                     session.wait_for_request(checked_checkpoint)
+                diagnostic_stage = 'NEXT_PAGE'
                 self.advance_page(page)
             emit_progress(complete=True)
+            record_result('SUCCESS', state)
             return SearchCollection(rows,visited,expected_pages,total)
         except Exception as exc:
             exc.partial_collection = SearchCollection(rows,visited,expected_pages,total)
             exc.network_failures = list(network_failures)
             exc.browser_diagnostics = browser_diagnostics
-            if settings.source_test_mode:
-                try:
-                    from ..test_diagnostics import record_source_failure
-                    try:
-                        diagnostic_state = self.read_dom(page)
-                    except Exception:
-                        diagnostic_state = {}
-                    record_source_failure(self.key, getattr(exc, 'code', 'READ_ERROR'), diagnostic_state, network_failures)
-                except Exception:
-                    pass  # Diagnostics must never replace the original failure.
+            try:
+                diagnostic_state = self.read_dom(page)
+            except Exception:
+                diagnostic_state = {}
+            record_result(getattr(exc, 'code', 'READ_ERROR'), diagnostic_state)
             try:
                 emit_progress(stop_reason=getattr(exc,'code','READ_ERROR'))
             except Exception:

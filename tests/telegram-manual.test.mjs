@@ -36,7 +36,7 @@ test('auction settings offer their own source-labelled project choice and own re
     assert.doesNotMatch(html,/type="password"/);
   } finally {client.clear();}
 });
-test('auction bot settings list only this auction, while global settings retain Encar only',async()=>{
+test('auction bot settings list only this auction; Encar and global settings offer no Telegram',async()=>{
   const { TelegramSettings } = await import('../app/telegram-settings.tsx');
   const projects=[{id:9,source_key:'iaa',name:'IAA project'},{id:10,source_key:'copart',name:'Copart project'},{id:11,source_key:'encar',name:'Encar project'}];
   const client=new QueryClient();
@@ -44,7 +44,8 @@ test('auction bot settings list only this auction, while global settings retain 
     source,locale:'ru',projects,read:async()=>{},write:async()=>{}})));
   try {
     const auction=render('iaa');assert.match(auction,/IAA project|Общий бот SearchCar/);assert.doesNotMatch(auction,/Copart project|Encar project/);
-    const global=render();assert.match(global,/Encar project/);assert.doesNotMatch(global,/IAA project|Copart project|Общий бот SearchCar/);
+    assert.equal(render(), '');
+    assert.equal(render('encar'), '');
     const empty=renderToStaticMarkup(React.createElement(TelegramSettings,{locale:'ru',projects:projects.slice(0,2),read:async()=>{},write:async()=>{}}));
     assert.equal(empty,'');
   } finally {client.clear();}
@@ -88,17 +89,17 @@ test('delivery progress accepts only the exact project, action and selected cars
   }
   assert.equal(deliveryActive({...batch,jobs:batch.jobs.map(job=>({...job,state:'UNKNOWN'}))}),false);
 });
-test('web Settings retains the legacy Encar project choice without offering native pairing',async()=>{
+test('web Settings do not offer the legacy Encar Telegram controls',async()=>{
   const { TelegramSettings } = await import('../app/telegram-settings.tsx');
   const html=renderToStaticMarkup(React.createElement(TelegramSettings,{
     native:false,locale:'ru',projects:[{id:9,source_key:'encar',name:'Encar project'},{id:10,source_key:'iaa',name:'IAA project'}],read:async()=>{},write:async()=>{}}));
-  assert.match(html,/Encar project/);assert.doesNotMatch(html,/IAA project|Start|search_car_app_bot/);
+  assert.equal(html, '');
 });
 test('a loading or failed project list is not presented as an empty workspace',async()=>{
   const { TelegramSettings } = await import('../app/telegram-settings.tsx');
   for(const state of [{projectsLoading:true},{projectsError:true}]) {
     const html=renderToStaticMarkup(React.createElement(TelegramSettings,{
-      ...state,native:false,locale:'ru',projects:[],read:async()=>{},write:async()=>{},retryProjects(){}}));
+      ...state,source:'copart',native:false,locale:'ru',projects:[],read:async()=>{},write:async()=>{},retryProjects(){}}));
     assert.doesNotMatch(html,/Сначала создайте проект/);assert.match(html,/<select disabled=""/);
     assert.match(html,state.projectsLoading?/Читаем проекты/:/Не удалось обновить список проектов/);
   }

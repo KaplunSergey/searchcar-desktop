@@ -47,8 +47,9 @@ def _fake_playwright():
     yield _FakePlaywright()
 
 
+@pytest.mark.parametrize('saved_fast_setting', [False, True])
 def test_project_scan_saves_parallel_detail_results_in_completion_order(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, saved_fast_setting
 ):
     engine = create_database_engine(f"sqlite+pysqlite:///{tmp_path / 'parallel.sqlite3'}")
     Base.metadata.create_all(engine)
@@ -94,7 +95,8 @@ def test_project_scan_saves_parallel_detail_results_in_completion_order(
                 tracking_enabled=True,
             )
         )
-        db.add(SchedulerSetting(user_id=owner.id, performance_mode="FAST"))
+        if saved_fast_setting:
+            db.add(SchedulerSetting(user_id=owner.id, performance_mode="FAST"))
         run = ScanRun(
             owner_id=owner.id,
             kind="PROJECTS",

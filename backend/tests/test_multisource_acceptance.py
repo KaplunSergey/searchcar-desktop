@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.auth import require_csrf, require_user
+from app.desktop_license import require_search_entitlement as verify_search_entitlement
 from app.database import get_db
 from app.job_queue import claim_next_job
 from app.main import app
@@ -125,6 +126,24 @@ def test_launch_options_failed_adapter_does_not_block_another_source(api, queue,
     assert sources["alpha"]["reason"] == "SOURCE_UNAVAILABLE"
     assert sources["bravo"]["can_search"] is True
     assert all(not row["can_search"] for row in options["projects"] if row["source_key"] == "alpha")
+
+
+@pytest.mark.parametrize('reason', ['LICENSE_LEASE_EXPIRED','LICENSE_SUBSCRIPTION_EXPIRED'])
+def test_expired_license_keeps_navigation_and_saved_projects_but_blocks_launches(api, queue, monkeypatch, reason):
+    from app.desktop_license import EntitlementDecision
+    monkeypatch.setattr('app.sources.registry.list_sources', lambda: tuple(queue.descriptors.values()))
+    monkeypatch.setattr('app.desktop_license.evaluate_search_entitlement', lambda **kwargs:
+        EntitlementDecision(mode='required', status='blocked', can_search=False, reason=reason, sources=('alpha','bravo')))
+    monkeypatch.setattr('app.desktop_license.require_search_entitlement', verify_search_entitlement)
+    options = api.get('/api/scans/launch-options').json()
+    assert options['licensed_sources'] == ['alpha','bravo']
+    assert all(not row['can_search'] and row['reason'] == reason for row in options['sources'])
+    assert any(row['name'] == 'alpha1' for row in options['projects'])
+    assert api.get('/api/projects').status_code == 200
+    response = api.post('/api/scans/projects', json={'project_ids':[queue.plans['alpha1']['project_id']]})
+    assert response.status_code == 402, response.text
+    with queue.factory() as db:
+        assert not list(db.scalars(select(ScanRun))), 'An expired license must not enqueue new work'
 
 
 def test_launch_options_distinguish_projects_inside_a_running_batch(api, queue, monkeypatch):

@@ -113,7 +113,15 @@ def queue(tmp_path, monkeypatch):
 
 
 GROUPED = ["alpha1", "alpha2", "alpha3", "bravo1", "bravo2", "charlie1"]
-INTERLEAVED = ["alpha1", "bravo1", "charlie1", "alpha2", "bravo2", "alpha3"]
+
+
+def test_execution_prioritizes_iaa_copart_encar_and_preserves_site_order():
+    from app.job_queue import project_execution_order
+    from types import SimpleNamespace
+    plans = [{'project_id':i, 'source_key':key} for i,key in
+             [(1,'encar'),(2,'copart'),(3,'iaa'),(4,'encar'),(5,'copart'),(6,'iaa')]]
+    assert project_execution_order(SimpleNamespace(), 1, {'project_plans':plans}, [1,2,3,4,5,6]) == [3,6,2,5,1,4]
+    assert project_execution_order(SimpleNamespace(), 1, {'project_plans':plans}, [1,4,2]) == [2,1,4]
 
 
 def test_worker_reuses_opt_in_browser_between_jobs_and_closes_it_on_shutdown(queue, monkeypatch):
@@ -308,12 +316,12 @@ def test_scheduler_handles_license_revoked_between_preflight_and_enqueue(queue, 
         assert db.scalar(select(SchedulerSetting)).next_run_at == current + timedelta(hours=1)
 
 
-def test_enqueue_freezes_interleaved_order_without_duplicates(queue):
+def test_enqueue_freezes_grouped_order_without_duplicates(queue):
     result = queue.submit([*GROUPED, "alpha2", "bravo1"])
     with queue.factory() as db:
         run = db.get(ScanRun, result["id"])
-        assert run.payload["project_ids"] == [queue.plans[name]["project_id"] for name in INTERLEAVED]
-        assert [plan["name"] for plan in run.payload["project_plans"]] == INTERLEAVED
+        assert run.payload["project_ids"] == [queue.plans[name]["project_id"] for name in GROUPED]
+        assert [plan["name"] for plan in run.payload["project_plans"]] == GROUPED
     repeated = queue.submit(GROUPED)
     assert repeated["created"] is False
     assert repeated["id"] == result["id"]
@@ -328,12 +336,12 @@ def test_single_site_keeps_submitted_project_order(queue):
     assert not queue.active
 
 
-def test_busy_projects_are_removed_before_interleaving(queue):
+def test_busy_projects_are_removed_before_grouping(queue):
     busy = queue.submit(["bravo1"])
     result = queue.submit(GROUPED)
     with queue.factory() as db:
         run = db.get(ScanRun, result["id"])
-        expected = ["alpha1", "bravo2", "charlie1", "alpha2", "alpha3"]
+        expected = ["alpha1", "alpha2", "alpha3", "bravo2", "charlie1"]
         assert run.payload["project_ids"] == [queue.plans[name]["project_id"] for name in expected]
         assert [plan["name"] for plan in run.payload["project_plans"]] == expected
         assert db.query(ScanRun).count() == 2
@@ -350,7 +358,7 @@ def test_frozen_sources_keep_execution_order_after_database_changes(queue):
         db.commit()
     assert claim_next_job(queue.engine, "worker") == result["id"]
     process_job(result["id"])
-    assert [value for kind, value in queue.events if kind == "collect"] == INTERLEAVED
+    assert [value for kind, value in queue.events if kind == "collect"] == GROUPED
     assert not queue.active
     with queue.factory() as db:
         assert db.get(ScanRun, result["id"]).status == "SUCCEEDED"
@@ -384,10 +392,10 @@ def test_mixed_batch_is_sequential_and_releases_fifo_queue(queue, outcome):
     assert not queue.active
     collected = [value for kind, value in queue.events if kind == "collect"]
     expected = {
-        "success": INTERLEAVED,
+        "success": GROUPED,
         "cancel_batch": ["alpha1"],
-        "queued_cancel_site": ["bravo1", "charlie1", "bravo2"],
-    }.get(outcome, ["alpha1", "bravo1", "charlie1", "bravo2"])
+        "queued_cancel_site": ["bravo1", "bravo2", "charlie1"],
+    }.get(outcome, ["alpha1", "bravo1", "bravo2", "charlie1"])
     assert collected == expected
     with queue.factory() as db:
         run = db.get(ScanRun, first["id"])
@@ -419,5 +427,5 @@ def test_legacy_batch_uses_owned_project_sources_for_fair_order(queue):
         run_id = run.id
     assert claim_next_job(queue.engine, "worker") == run_id
     process_job(run_id)
-    assert [value for kind, value in queue.events if kind == "collect"] == INTERLEAVED
+    assert [value for kind, value in queue.events if kind == "collect"] == GROUPED
     assert not queue.active

@@ -84,17 +84,14 @@ test("ships required product surfaces and localization",async()=>{
   assert.match(translations,/openListing:/);
   assert.match(translations,/currentUpdateReport: "Промежуточный отчёт"/);
 });
-test("search performance is a general setting shared by manual and scheduled scans",async()=>{
+test("search performance belongs to Encar settings and offers both modes",async()=>{
   const [page,translations]=await Promise.all([
     readFile(new URL("app/page.tsx",root),"utf8"),
     readFile(new URL("app/translations.ts",root),"utf8"),
   ]);
-  const generalSettingsAt=page.indexOf('<h3>{t("generalSettings")}</h3>');
-  const performanceAt=page.indexOf('<legend>{t("searchPerformance")}</legend>');
-  const schedulerAt=page.indexOf('<h3>{t("schedulerTitle")}</h3>');
-  assert.ok(generalSettingsAt >= 0 && generalSettingsAt < performanceAt && performanceAt < schedulerAt);
-  assert.match(page,/savePerformanceMode\.mutate\("ECO"\)/);
-  assert.match(page,/savePerformanceMode\.mutate\("FAST"\)/);
+  assert.match(page,/<EncarPerformanceSettings t=\{t\}/);
+  assert.match(page,/<legend>\{t\('searchPerformance'\)\}<\/legend>/);
+  assert.match(page,/\['ECO',\s*'FAST'\]/);
   assert.match(translations,/generalSettings: "Общие настройки"/);
   assert.match(translations,/generalSettings: "Загальні налаштування"/);
 });

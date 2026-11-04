@@ -51,6 +51,48 @@ def test_catalog_changes_invalidate_onefile_cache_without_a_version_bump(builder
     assert module.sidecar_source_fingerprint() != before
 
 
+def test_packager_bundles_interpreter_required_ssl_file_and_fails_if_missing(builder, monkeypatch, tmp_path):
+    module, _ = builder
+    stdlib = tmp_path/'python-stdlib'
+    stdlib.mkdir()
+    (stdlib/'ssl.py').write_text("# Codex: distrust\n'codex-rejected-cas.pem'\n")
+    pem = stdlib/'codex-rejected-cas.pem'
+    pem.write_text('certificate')
+    monkeypatch.setattr(module.sysconfig, 'get_path', lambda name: str(stdlib))
+    assert module.ssl_interpreter_assets() == [pem]
+    before = module.sidecar_source_fingerprint()
+    pem.write_text('changed certificate')
+    assert module.sidecar_source_fingerprint() != before
+    pem.unlink()
+    with pytest.raises(FileNotFoundError, match='codex-rejected-cas.pem'):
+        module.ssl_interpreter_assets()
+
+
+def test_packager_does_not_require_codex_file_for_standard_python(builder, monkeypatch, tmp_path):
+    module, _ = builder
+    (tmp_path/'ssl.py').write_text('class SSLContext: pass')
+    monkeypatch.setattr(module.sysconfig, 'get_path', lambda name: str(tmp_path))
+    assert module.ssl_interpreter_assets() == []
+
+
+def test_required_ssl_asset_is_passed_to_nuitka(builder, monkeypatch, tmp_path):
+    module, _ = builder
+    pem = tmp_path/'codex-rejected-cas.pem'
+    pem.write_text('certificate')
+    monkeypatch.setattr(module, 'ssl_interpreter_assets', lambda: [pem])
+    monkeypatch.setattr(module.platform, 'system', lambda: 'Darwin')
+    monkeypatch.setattr(module.platform, 'machine', lambda: 'arm64')
+    command = []
+    class Captured(Exception): pass
+    def capture(args, _environment):
+        command.extend(args)
+        raise Captured
+    monkeypatch.setattr(module, 'run_nuitka', capture)
+    with pytest.raises(Captured):
+        module.build('onefile')
+    assert f'--include-data-files={pem}=codex-rejected-cas.pem' in command
+
+
 @pytest.mark.parametrize("system,machine", [("Darwin", "arm64"), ("Windows", "AMD64")])
 def test_native_builder_explicitly_includes_shared_catalog(builder, monkeypatch, system, machine):
     module, catalog = builder

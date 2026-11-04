@@ -477,12 +477,12 @@ def _project_scan_modes(
 
 
 def _detail_worker_count(db, owner_id: int) -> int:
-    """Keep existing installations conservative until accelerated mode is chosen."""
+    """Match the default returned by the settings API when no row exists."""
 
     setting = db.scalar(
         select(SchedulerSetting).where(SchedulerSetting.user_id == owner_id)
     )
-    return 2 if getattr(setting, "performance_mode", "ECO") == "FAST" else 1
+    return 2 if getattr(setting, "performance_mode", "FAST") == "FAST" else 1
 
 
 @dataclass(frozen=True)
@@ -1012,6 +1012,7 @@ def process_job(job_id: int, *, runtime_pool=None) -> None:
                                 all_pages=page_mode == "ALL_PAGES",
                                 checkpoint=collection_checkpoint,
                                 progress=update_page_progress,
+                                **({'diagnostic_context': {'scan_id':job.id, 'project_id':project.id}} if list_only else {}),
                                 **({'search_config': project.search_config} if list_only and getattr(project, 'search_config', None) is not None else {}),
                             )
                         except Exception as exc:

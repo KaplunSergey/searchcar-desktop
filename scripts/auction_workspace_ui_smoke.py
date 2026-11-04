@@ -318,6 +318,30 @@ with desktop_playwright() as pw:
         except Exception as error:
             results.append({'name':name,'status':'failed','error':str(error)[:400],'url':page.url,'traceback':traceback.format_exc()[-1800:]})
             page.screenshot(path=str(report/f'failure-{len(results)}.png'),full_page=True)
+    def encar_performance_setting():
+        try:
+            for locale in ['ru','uk']:
+                for width in [1280,360]:
+                    mode.update(locale=locale,source='encar',license_fixture=True,
+                        licensed_sources=['encar','copart','iaa'],
+                        settings_fixture=dict(enabled=False,paused=False,project_ids=[1],interval_minutes=180,performance_mode='FAST'))
+                    page.set_viewport_size({'width':width,'height':900})
+                    page.goto(BASE+'?source=encar&view=source-settings')
+                    radios=page.locator('input[name="performance-mode"]')
+                    radios.nth(1).wait_for()
+                    page.wait_for_function('document.querySelectorAll("input[name=performance-mode]")[1]?.checked')
+                    radios.nth(0).click()
+                    page.wait_for_function('document.querySelectorAll("input[name=performance-mode]")[0]?.checked && !document.querySelectorAll("input[name=performance-mode]")[0]?.disabled')
+                    assert mode['settings_fixture']['performance_mode']=='ECO'
+                    radios.nth(1).click()
+                    page.wait_for_function('document.querySelectorAll("input[name=performance-mode]")[1]?.checked && !document.querySelectorAll("input[name=performance-mode]")[1]?.disabled')
+                    assert mode['settings_fixture']['performance_mode']=='FAST'
+                    assert mode['settings_fixture']['project_ids']==[1]
+                    page.screenshot(path=str(report/f'encar-performance-{locale}-{width}.png'),full_page=True)
+        finally:
+            for key in ['license_fixture','licensed_sources','settings_fixture']:mode.pop(key,None)
+            page.set_viewport_size({'width':1280,'height':900})
+    check('Encar performance: save ECO and FAST, retain schedule RU/UK desktop/mobile', encar_performance_setting)
     def licensed_sources():
         try:
             for locale in ['ru','uk']:
@@ -349,6 +373,7 @@ with desktop_playwright() as pw:
                     page.screenshot(path=str(report/f'licensed-settings-{locale}-{width}.png'),full_page=True)
                     page.locator('.shell-refresh').click()
                     page.locator('.launch-dialog[open]').wait_for()
+                    page.locator('.launch-dialog').screenshot(path=str(report/f'launch-dialog-{locale}-{width}.png'))
                     assert not page.locator('.launch-site').filter(has_text='Encar').count()
                     assert not page.locator('.launch-family h3').filter(has_text='Площадки' if locale=='ru' else 'Майданчики').count()
                     page.locator('.launch-dialog .modal-head button').click()

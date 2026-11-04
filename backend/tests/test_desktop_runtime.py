@@ -30,6 +30,35 @@ from app.maintenance import finish_update_install, maintenance_active
 from app.models import ScanRun, User
 
 
+def test_sidecar_check_initializes_real_tls_client_without_network(monkeypatch, capsys):
+    import sys
+    import httpx
+    from app import desktop_runtime
+    calls = []
+    class Client:
+        def __init__(self, **kwargs): calls.append(kwargs)
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+    monkeypatch.setattr(httpx, 'Client', Client)
+    monkeypatch.setattr(desktop_runtime, 'check_runtime', lambda *_: {'status':'ok'})
+    monkeypatch.setattr(sys, 'argv', ['searchcar-core', 'check', '--data-dir', '/tmp/fixture'])
+    desktop_runtime.main()
+    assert calls == [{'trust_env':False}], 'must initialize the same verified TLS configuration as licensing'
+    assert json.loads(capsys.readouterr().out)['status'] == 'ok'
+
+
+def test_sidecar_check_fails_if_tls_client_cannot_initialize(monkeypatch):
+    import sys
+    import httpx
+    from app import desktop_runtime
+    def broken(**_kwargs): raise FileNotFoundError('TLS resource missing')
+    monkeypatch.setattr(httpx, 'Client', broken)
+    monkeypatch.setattr(desktop_runtime, 'check_runtime', lambda *_: {'status':'ok'})
+    monkeypatch.setattr(sys, 'argv', ['searchcar-core', 'check', '--data-dir', '/tmp/fixture'])
+    with pytest.raises(FileNotFoundError, match='TLS resource missing'):
+        desktop_runtime.main()
+
+
 @pytest.mark.parametrize("preview,delivery_preview", [(False,False),(True,False),(True,True)])
 def test_native_preview_pins_staging_and_only_explicit_flag_enables_delivery(tmp_path, monkeypatch, preview, delivery_preview):
     import sys
