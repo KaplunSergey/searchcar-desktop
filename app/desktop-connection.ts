@@ -1,15 +1,34 @@
 import type { QueryClient } from "@tanstack/react-query";
 
-export async function recheckDesktopConnection(client: QueryClient, {afterNativeMenu = false} = {}) {
-  if (afterNativeMenu) {
-    // A single native exit notification replaces transport reads stuck in the menu.
-    // Query cancellation retains cached data; mutations are deliberately untouched.
-    await client.cancelQueries({type:"active", fetchStatus:"fetching"});
-    return client.refetchQueries({type:"active"}, {cancelRefetch:false});
-  }
-  return client.refetchQueries({ type: "active", predicate: query =>
-    ["desktop-runtime", "scans"].includes(String(query.queryKey[0])) || query.state.status === "error" },
-    {cancelRefetch:false}); // Native pulses must not repeatedly cancel a slower recovery read.
+export function readRequestSignal(method: string, signal?: AbortSignal | null, timeoutMs = 15_000) {
+  if (!["GET", "HEAD"].includes(method)) return signal;
+  const deadline = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, deadline]) : deadline;
+}
+
+type RecoveryEvent = {event: "menu-resume" | "recheck-start" | "recheck-finish" | "recheck-error";
+  elapsed_ms: number; pending_queries: number; error_queries: number};
+
+export async function recheckDesktopConnection(client: QueryClient, {afterNativeMenu = false, report}: {
+  afterNativeMenu?: boolean; report?: (event: RecoveryEvent) => void;
+} = {}) {
+  const started = Date.now();
+  const emit = (event: RecoveryEvent["event"]) => report?.({event, elapsed_ms: Math.min(3600000, Math.max(0, Date.now()-started)),
+    pending_queries: Math.min(1000, client.isFetching()),
+    error_queries: Math.min(1000, client.getQueryCache().findAll({predicate:q=>q.state.status==='error'}).length)});
+  emit("recheck-start");
+  try {
+    if (afterNativeMenu) {
+      // Query cancellation retains cached data; mutations are deliberately untouched.
+      await client.cancelQueries({type:"active", fetchStatus:"fetching"});
+      await client.refetchQueries({type:"active"}, {cancelRefetch:false});
+    } else {
+      await client.refetchQueries({ type: "active", predicate: query =>
+        ["desktop-runtime", "scans"].includes(String(query.queryKey[0])) || query.state.status === "error" },
+        {cancelRefetch:false}); // Native pulses share a slower recovery read.
+    }
+    emit("recheck-finish");
+  } catch (error) { emit("recheck-error"); throw error; }
 }
 
 export function nativeServiceHealth(win = window): unknown {
@@ -27,7 +46,7 @@ export function desktopConnectionState(failed: boolean, snapshot?: unknown, now 
   return "checking";
 }
 
-export function desktopRuntimeOptions<T extends { desktop: boolean }>(read: () => Promise<T>) {
+export function desktopRuntimeOptions<T extends { desktop: boolean }>(read: (context: {signal: AbortSignal}) => Promise<T>) {
   return {
     queryKey: ["desktop-runtime"],
     queryFn: read,
@@ -40,8 +59,10 @@ export function desktopRuntimeOptions<T extends { desktop: boolean }>(read: () =
 }
 
 // Native menus can pause WebView timers/transport without stopping the sidecar.
-export function watchDesktopConnection(recheck: () => void, win = window, doc = document, now = Date.now) {
+export function watchDesktopConnection(recheck: () => void, win = window, doc = document, now = Date.now,
+  heartbeat?: (lagMs: number) => void) {
   let lastTick = now();
+  let lastHeartbeat = lastTick;
   const resume = () => { if (doc.visibilityState !== "hidden") recheck(); };
   const events = ["focus", "pageshow", "online", "searchcar:window-focus"];
   events.forEach(event => win.addEventListener(event, resume));
@@ -49,6 +70,10 @@ export function watchDesktopConnection(recheck: () => void, win = window, doc = 
   const timer = win.setInterval(() => {
     const current = now();
     if (current - lastTick > 5000) resume();
+    if (current - lastHeartbeat >= 30000) {
+      heartbeat?.(Math.min(3600000, Math.max(0, current-lastTick-1000)));
+      lastHeartbeat = current;
+    }
     lastTick = current;
   }, 1000);
   return () => {

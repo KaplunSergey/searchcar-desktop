@@ -263,7 +263,7 @@ export function AuctionWorkspace({ source, view, projectId, carId, locale, proje
       projectName: projects.find((project) => project.id === id)?.name || `#${id}` });
   };
   const create=useMutation({mutationFn:async()=>{
-    if(!sourceTestMode||!write||!draftUrl) throw new Error("Confirmed search selection required");
+    if(!write||!draftUrl) throw new Error("Confirmed search selection required");
     const project=await write<{id:number}>("/projects",{source_key:source,name:draftName.trim(),search_url:draftUrl.trim(),search_selection_id:selection?.id,search_draft_id:draftId,search_page_mode:pageMode,auto_update:false});
     return project;
   },onSuccess:async(project)=>{
@@ -300,7 +300,7 @@ export function AuctionWorkspace({ source, view, projectId, carId, locale, proje
     finally { setCreationClosing(false); }
   };
   const refresh=async(ids:number[],context?:'created'|'edited')=>{
-    if(!sourceTestMode||!canSearch||!refreshProjects) return;
+    if(!canSearch||!refreshProjects) return;
     setCommandError(null);setRefreshing(ids);
     try{await refreshProjects(ids);}catch{setCommandError(context==='edited'
       ? l("Фильтры сохранены, но запуск поиска не подтверждён. Нажмите «Обновить данные», чтобы повторить.","Фільтри збережено, але запуск пошуку не підтверджений. Натисніть «Оновити дані», щоб повторити.")
@@ -324,7 +324,7 @@ export function AuctionWorkspace({ source, view, projectId, carId, locale, proje
     title={l('Изменить фильтры','Змінити фільтри')} disabled={!canSearch || busyProjects.includes(id) || updateActive(projectStatus(id) || '')}
     onClick={event=>{ editOrigin.current=event.currentTarget;setEditing(id); }}>
     <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9.6 3h4.8l.5 2.4 1.6.9 2.3-.7 2.4 4.2-1.8 1.6v1.8l1.8 1.6-2.4 4.2-2.3-.7-1.6.9-.5 2.4H9.6l-.5-2.4-1.6-.9-2.3.7-2.4-4.2 1.8-1.6v-1.8L2.8 9.8l2.4-4.2 2.3.7 1.6-.9L9.6 3Z" /><circle cx="12" cy="12" r="3" /></svg></button>;
-  const editor=editing!==null && sourceTestMode && write && <AuctionProjectEdit key={`${source}:${editing}`} projectId={editing} source={source} locale={locale}
+  const editor=editing!==null && write && <AuctionProjectEdit key={`${source}:${editing}`} projectId={editing} source={source} locale={locale}
     canSearch={canSearch} busy={busyProjects.includes(editing) || updateActive(projectStatus(editing) || '')} read={read} write={write}
     returnFocus={editOrigin} fallbackFocus={headingRef} close={()=>setEditing(null)} saved={()=>{
       const id=editing;setEditing(null);void refresh([id],'edited');
@@ -357,9 +357,9 @@ export function AuctionWorkspace({ source, view, projectId, carId, locale, proje
   };
   const telegramAction = (id: number, lot: AuctionLot) => <TelegramCarAction key={`${source}:${id}:${lot.id}`} source={source} projectId={id} carId={lot.id} collection={lot.project_search_status === "NOT_FOUND_IN_SEARCH" ? "archive" : view === "project" ? collection : "active"} title={lot.title || `#${lot.source_listing_id}`} locale={locale} read={read} write={write} settings={() => openTelegramSettings(id)} />;
   const cards = (data: ProjectAuctionView) => data.lots.filter((lot) => lot.source_key === source).map((lot) => <AuctionCard key={lot.id} lot={lot} context={data} nowMs={nowMs} locale={locale} catalog={catalog} listingValidators={listingValidators} imageUrl={imageUrl} openListing={openListing} open={() => navigate("car", data.project_id, lot.id)} telegramAction={telegramAction(data.project_id, lot)} onRemove={removeProjectCar ? (trigger) => chooseRemoval(data.project_id, lot, trigger) : undefined} />);
-  const heading = (title: string, statusProjectId?: number) => <><div className="title-row source-title"><div className="auction-heading-main"><div className="auction-heading-line"><h1 ref={headingRef} tabIndex={-1}>{title}</h1>{statusProjectId != null && <div className="auction-heading-status">{updateStatus(statusProjectId)}</div>}</div><p>{sourceTestMode?l("Тестовый поиск · фоновое обновление · выбор фильтров в окне сайта","Тестовий пошук · фонове оновлення · вибір фільтрів у вікні сайту"):l("Сохранённые данные · поиск не запускается", "Збережені дані · пошук не запускається")}</p></div></div>{removal && <AuctionRemovalDialog target={removal} locale={locale} pending={remove.isPending} failed={remove.isError} returnFocus={removalOrigin} fallbackFocus={headingRef} confirm={() => { if (!remove.isPending) remove.mutate(removal); }} close={() => { if (!remove.isPending) setRemoval(null); }} />}</>;
+  const heading = (title: string, statusProjectId?: number) => <><div className="title-row source-title"><div className="auction-heading-main"><div className="auction-heading-line"><h1 ref={headingRef} tabIndex={-1}>{title}</h1>{statusProjectId != null && <div className="auction-heading-status">{updateStatus(statusProjectId)}</div>}</div><p>{sourceTestMode?l("Тестовый поиск · фоновое обновление · выбор фильтров в окне сайта","Тестовий пошук · фонове оновлення · вибір фільтрів у вікні сайту"):l("Поиск · фоновое обновление · выбор фильтров в окне сайта", "Пошук · фонове оновлення · вибір фільтрів у вікні сайту")}</p></div></div>{removal && <AuctionRemovalDialog target={removal} locale={locale} pending={remove.isPending} failed={remove.isError} returnFocus={removalOrigin} fallbackFocus={headingRef} confirm={() => { if (!remove.isPending) remove.mutate(removal); }} close={() => { if (!remove.isPending) setRemoval(null); }} />}</>;
   const errorNotice=<>{editor}{commandError&&!showCreate&&<p className="warning-text" role="alert">{commandError}</p>}</>;
-  if (view === "source-settings") return <>{heading(`${l("Настройки сайта", "Налаштування сайту")} · ${name}`)}<section className="panel"><p>{sourceTestMode?l("Фильтры выбираются в окне сайта и сохраняются в черновик. Создание проекта доступно только при поддержанном восстановлении поиска. Охват выбирается при создании. Автоматические обновления отключены. Автоотправка Telegram включается отдельно для каждого проекта.","Фільтри вибираються у вікні сайту та зберігаються в чернетці. Створення проєкту доступне лише за підтриманого відновлення пошуку. Охоплення вибирається під час створення. Автоматичні оновлення вимкнені. Автонадсилання Telegram вмикається окремо для кожного проєкту."):l("Доступен просмотр сохранённых данных. Настройки сбора будут подключены вместе с модулем поиска.", "Доступний перегляд збережених даних. Налаштування збору буде підключено разом із модулем пошуку.")}</p></section>
+  if (view === "source-settings") return <>{heading(`${l("Настройки сайта", "Налаштування сайту")} · ${name}`)}<section className="panel"><p>{sourceTestMode?l("Фильтры выбираются в окне сайта и сохраняются в черновик. Создание проекта доступно только при поддержанном восстановлении поиска. Охват выбирается при создании. Автоматические обновления отключены. Автоотправка Telegram включается отдельно для каждого проекта.","Фільтри вибираються у вікні сайту та зберігаються в чернетці. Створення проєкту доступне лише за підтриманого відновлення пошуку. Охоплення вибирається під час створення. Автоматичні оновлення вимкнені. Автонадсилання Telegram вмикається окремо для кожного проєкту."):l("Выберите фильтры в окне сайта и сохраните проект. Обновления запускаются вручную; автоматическая отправка Telegram изначально выключена.", "Виберіть фільтри у вікні сайту та збережіть проєкт. Оновлення запускаються вручну; автоматичне надсилання Telegram спочатку вимкнене.")}</p></section>
     {write && <TelegramSettings key={`${source}:${telegramSettingsProject || ""}`} source={source} initialProjectId={telegramSettingsProject} locale={locale} projects={ownProjects} projectsLoading={projectsLoading} projectsError={projectsError} retryProjects={retryProjects} read={read} write={write} imageUrl={imageUrl} />}</>;
   if (view === "scans") return <>{heading(`${l("История запусков", "Історія запусків")} · ${name}`)}<AuctionRuns source={source} locale={locale} runs={runs} projects={projects}
     runsLoading={runsLoading} runsError={runsError} retryRuns={retryRuns} sourceTestMode={sourceTestMode} write={write} read={read} navigate={navigate}
@@ -376,8 +376,8 @@ export function AuctionWorkspace({ source, view, projectId, carId, locale, proje
     if (data && data.source_key !== source) return <SourceContextMismatch source={data.source_key} projectId={projectId} locale={locale} />;
     return <><button type="button" className="back" onClick={() => navigate("projects")}>{l("← Назад к проектам", "← Назад до проєктів")}</button>{heading(ownProjects.find((project) => project.id === projectId)?.name || `${l("Проект", "Проєкт")} № ${projectId}`, projectId ?? undefined)}{errorNotice}{projectId!==null&&runs.map(run=><SiteVerificationNotice key={run.id} run={run} projectId={projectId} locale={locale} />)}{projectId!==null&&runs.filter(run=>run.payload?.pagination?.[String(projectId)]).slice(0,1).map(run=><AuctionSearchNotice key={run.id} run={run} projectId={projectId} locale={locale} />)}<div className="auction-project-toolbar">{tabs}
       {projectId !== null && <div className="project-actions auction-project-controls">
-        {sourceTestMode && write && editButton(projectId)}
-        {sourceTestMode && refreshButton(projectId)}
+        {write && editButton(projectId)}
+        {refreshProjects && refreshButton(projectId)}
         <button type="button" className="button telegram-button telegram-icon-button" aria-label="Telegram" title="Telegram" aria-haspopup="dialog" onClick={event => { telegramOrigin.current = event.currentTarget; setShowTelegramPreview(true); }}><TelegramLogo /></button>
       </div>}</div>
       {showTelegramPreview && projectId !== null && <AuctionTelegramPreview key={`telegram-preview:${source}:${projectId}:${collection}`} collection={collection} settings={() => openTelegramSettings(projectId)} source={source} projectId={projectId} projectName={ownProjects.find(project => project.id === projectId)?.name || `#${projectId}`}
@@ -386,8 +386,8 @@ export function AuctionWorkspace({ source, view, projectId, carId, locale, proje
       {write && projectId !== null && <TelegramReschedules compact source={source} projectId={projectId} locale={locale} read={read} write={write} />}
       {collectionNotice}<ReadState error={projectQuery.isError} loading={projectQuery.isPending} retry={() => { void projectQuery.refetch(); }} locale={locale} />{data && <><p className="auction-snapshot">{l("День и время компьютера", "День і час комп’ютера")}: {data.local_date} · {data.computer_timezone} · {l("Лотов", "Лотів")}: {data.lots.length}</p><div className="auction-list">{cards(data)}</div>{!projectQuery.isError && !data.lots.length && <section className="panel">{emptyCollection}</section>}</>}</>;
   }
-  return <>{heading(`${l("Проекты", "Проєкти")} · ${name}`)}{sourceTestMode&&write&&<button type="button" className="button" onClick={event=>{createOrigin.current=event.currentTarget;setCommandError(null);setDraftId(crypto.randomUUID().replaceAll('-',''));setSelection(null);setDraftName("");setCreatedProject(null);setRecipientBusy(false);setPageMode("ALL_PAGES");setShowCreate(true);}}>{l("Создать проект","Створити проєкт")}</button>}{errorNotice}
-    {sourceTestMode&&showCreate&&<dialog ref={createDialog} className="launch-dialog auction-create-dialog" aria-label={l("Создать проект","Створити проєкт")} onCancel={event=>{event.preventDefault();void dismissCreation();}}>
+  return <>{heading(`${l("Проекты", "Проєкти")} · ${name}`)}{write&&<button type="button" className="button" onClick={event=>{createOrigin.current=event.currentTarget;setCommandError(null);setDraftId(crypto.randomUUID().replaceAll('-',''));setSelection(null);setDraftName("");setCreatedProject(null);setRecipientBusy(false);setPageMode("ALL_PAGES");setShowCreate(true);}}>{l("Создать проект","Створити проєкт")}</button>}{errorNotice}
+    {showCreate&&<dialog ref={createDialog} className="launch-dialog auction-create-dialog" aria-label={l("Создать проект","Створити проєкт")} onCancel={event=>{event.preventDefault();void dismissCreation();}}>
       <h2>{l("Создать проект","Створити проєкт")} · {name}</h2>
       <p>{createdProject === null ? l("Шаг 1 из 2: название и фильтры. На следующем шаге выберите получателя Telegram или продолжите без него.","Крок 1 з 2: назва та фільтри. На наступному кроці виберіть одержувача Telegram або продовжте без нього.")
         : l("Шаг 2 из 2: проект уже сохранён, поиск пока не запущен. Подключите получателя или продолжите без Telegram. Изменить выбор можно в настройках аукциона.","Крок 2 з 2: проєкт уже збережено, пошук поки не запущено. Підключіть одержувача або продовжте без Telegram. Змінити вибір можна в налаштуваннях аукціону.")}</p>
@@ -401,9 +401,9 @@ export function AuctionWorkspace({ source, view, projectId, carId, locale, proje
         {createdProject===null ? <button form={`create-${draftId}`} className="button primary" type="submit" disabled={create.isPending||!draftUrl||creationOpening||creationClosing}>{create.isPending?l("Создание…","Створення…"):l("Создать и настроить Telegram","Створити й налаштувати Telegram")}</button>
           : <button type="button" className="button primary" disabled={recipientBusy} onClick={()=>finishCreation(true)}>{l("Готово — начать поиск","Готово — почати пошук")}</button>}</div>
     </dialog>}{tabs}<AuctionProjects key={source} source={source} locale={locale} projects={ownProjects} loading={projectsLoading} failed={projectsError}
-      showProjects={collection === "active"} canRefresh={canSearch} read={read} refresh={sourceTestMode?refreshProjects:undefined} open={(id)=>navigate("project",id)}
-      renderStatus={(id)=>updateStatus(id,true)} renderRefresh={sourceTestMode?(id)=>refreshButton(id,true):undefined}
-      renderEdit={sourceTestMode&&write?(id)=>editButton(id,true):undefined}
+      showProjects={collection === "active"} canRefresh={canSearch} read={read} refresh={refreshProjects} open={(id)=>navigate("project",id)}
+      renderStatus={(id)=>updateStatus(id,true)} renderRefresh={refreshProjects?(id)=>refreshButton(id,true):undefined}
+      renderEdit={write?(id)=>editButton(id,true):undefined}
       renderDelete={requestProjectDeletion ? (id)=><button type="button" className="icon-button danger auction-project-delete"
         aria-label={`${l("Удалить проект", "Видалити проєкт")}: ${ownProjects.find(project=>project.id===id)?.name || `#${id}`}`}
         title={l("Удалить проект", "Видалити проєкт")} onClick={()=>requestProjectDeletion(id)}>

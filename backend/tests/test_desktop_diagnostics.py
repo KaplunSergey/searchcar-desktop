@@ -72,6 +72,29 @@ def test_support_report_accepts_one_hour_period(tmp_path) -> None:
     assert report.entries == 1
 
 
+def test_support_report_includes_native_lifecycle_and_safe_exception_metadata(tmp_path):
+    logs = tmp_path / 'logs'
+    logs.mkdir()
+    now = datetime.now(timezone.utc).isoformat()
+    (logs / 'searchcar-native.jsonl').write_text(json.dumps({
+        'timestamp':now,'logger':'desktop.native','message':'Lifecycle: stage=menu_exit elapsed_ms=420',
+    })+'\n')
+    (logs / 'searchcar-core.jsonl').write_text(json.dumps({
+        'timestamp':now,'logger':'uvicorn.error','message':'Exception in ASGI application',
+        'exception':'Traceback (most recent call last):\n  File "C:\\Users\\Alice\\main.py", line 42, in scans\n    private_source_line\nasyncio.exceptions.CancelledError: arbitrary_private_text',
+    })+'\n')
+    report = build_support_report(logs, tmp_path/'reports', app_version='0.4.1',hours=24)
+    with zipfile.ZipFile(tmp_path/'reports'/report.name) as archive:
+        output = archive.read('logs.jsonl').decode()
+    assert report.entries == 2
+    entries = [json.loads(x) for x in output.splitlines()]
+    error = next(x for x in entries if x['logger']=='uvicorn.error')
+    assert error['exception_type'] == 'asyncio.exceptions.CancelledError'
+    assert error['exception_frames'] == [{'file':'main.py','line':42,'function':'scans'}]
+    assert 'menu_exit' in output
+    assert all(secret not in output for secret in ['Alice','private_source_line','arbitrary_private_text'])
+
+
 def test_capped_report_keeps_latest_events_across_rotations_in_time_order(tmp_path, monkeypatch):
     import os
     from datetime import timedelta

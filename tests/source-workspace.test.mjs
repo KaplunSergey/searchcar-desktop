@@ -120,14 +120,14 @@ test('a delivery-enabled auction preview does not falsely promise there is no au
   assert.match(html,/Telegram — по настройкам проектов/);
   assert.doesNotMatch(html,/без автоматической рассылки/);
 });
-test("connected test auctions expose project creation and scoped refresh without Encar controls", (t) => {
+test("connected auctions expose project creation and scoped refresh in both profiles without Encar controls", (t) => {
   const launchOptions={sources:[{source_key:'copart',family:'AUCTION',can_search:true,reason:null}],projects:[{id:4,source_key:'copart',can_search:true,active_status:null}]};
   const {html}=render(t,{search:'?source=copart',sourceTestMode:true,launchOptions,
     projectsOverride:[{id:4,source_key:'copart',name:'Auction fixture',cars:2}]});
   assert.match(html,/Создать проект/);
   assert.match(html,/Обновить данные/);
   assert.doesNotMatch(html,/Поиск Copart ещё не подключён|Сохранённые данные · поиск и Telegram не запускаются/);
-  assert.doesNotMatch(render(t,{search:'?source=copart',sourceTestMode:false}).html,/Создать проект/);
+  assert.match(render(t,{search:'?source=copart',sourceTestMode:false}).html,/Создать проект/);
 });
 test('auction project rows show actual refresh, not creation or settings change time, with localized missing dates', (t) => {
   const projectsOverride=[{id:4,source_key:'copart',name:'Long auction project',cars:2,
@@ -266,6 +266,24 @@ test("the actual request functions ask the API for the selected source, while ac
   }
   assert.deepEqual(requests.map((url) => new URL(url, "https://fixture.test").pathname + new URL(url, "https://fixture.test").search),
     ["/api/projects?source_key=copart", "/api/scans?source_key=copart", "/api/scans/active"]);
+});
+
+test('actual desktop status reads abort their HTTP transport when QueryClient cancels them', async t => {
+  const {client} = render(t);
+  let transportSignal;
+  t.mock.method(globalThis,'fetch',(_url,options)=>new Promise((_resolve,reject)=>{
+    transportSignal=options.signal;
+    options.signal.addEventListener('abort',()=>reject(options.signal.reason),{once:true});
+  }));
+  for (const queryKey of [['projects','encar'],['scans','encar'],['scans','active'],['launch-options'],['desktop-runtime'],['scheduler']]) {
+    const query = client.getQueryCache().find({queryKey,exact:true});
+    const pending=client.fetchQuery({...query.options,staleTime:0}).catch(()=>{});
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.ok(transportSignal && !transportSignal.aborted);
+    await client.cancelQueries({queryKey,exact:true});
+    assert.equal(transportSignal.aborted,true,`cancelled fetch for ${queryKey.join('/')}`);
+    await pending;
+  }
 });
 
 test("legacy deep links stay Encar and invalid persisted routes safely fall back", () => {

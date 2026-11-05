@@ -156,14 +156,14 @@ sys.modules['app.sources.encar'] = None
 from app.main import app
 from app.sources.registry import list_sources, get_source
 from app.sources.contracts import SourceUnavailableError
-assert [item.key for item in list_sources()] == ['encar']
+assert [item.key for item in list_sources()] == ['encar', 'copart', 'iaa']
 try:
     get_source('encar')
 except SourceUnavailableError:
     pass
 else:
     raise AssertionError('broken adapter was not isolated')
-assert [item.key for item in list_sources()] == ['encar']
+assert [item.key for item in list_sources()] == ['encar', 'copart', 'iaa']
 """
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

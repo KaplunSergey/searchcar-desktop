@@ -131,8 +131,19 @@ test('auction projects expose a site-scoped bulk update beside the tabs, disable
   assert.match(render({source:'iaa',locale:'uk',projects:[{id:2,source_key:'iaa',name:'BMW',cars:0}]}),/>Оновити проєкти<\/button>/);
   for(const props of [{projects:[]},{canSearch:false},{projectsLoading:true},{projectsError:true}])
     assert.match(render(props),/<button[^>]*disabled=""[^>]*>Обновить проекты<\/button>/);
-  assert.doesNotMatch(render({sourceTestMode:false}),/>Обновить проекты<\/button>/);
+  assert.match(render({sourceTestMode:false}),/>Обновить проекты<\/button>/);
   assert.doesNotMatch(render({view:'project',projectId:9}),/>Обновить проекты<\/button>/);
+});
+test('ordinary auctions expose licensed creation and filter editing without the preview flag',()=>{
+  for(const source of ['copart','iaa']) {
+    const props={source,sourceTestMode:false,write:async()=>({}),projects:[{id:9,source_key:source,name:'Audi',cars:0}]};
+    assert.match(renderWorkspace(props),/>Создать проект<\/button>/);
+    const project=renderWorkspace({...props,view:'project',projectId:9});
+    assert.match(project,/aria-label="Изменить фильтры: Audi"/);
+    assert.match(project,/aria-label="Обновить данные"/);
+    assert.doesNotMatch(project,/Сохранённые данные · поиск не запускается|Тестовый поиск/);
+    assert.match(renderWorkspace({...props,view:'project',projectId:9,canSearch:false}),/<button[^>]+aria-label="Обновить данные"[^>]+disabled=""/);
+  }
 });
 test('project auction cards expose an explicit scoped removal, while context-free cards cannot remove a car',()=>{
   for(const [locale,label] of [['ru','Удалить из проекта'],['uk','Видалити з проєкту']]) {

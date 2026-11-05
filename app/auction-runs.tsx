@@ -116,7 +116,7 @@ export function AuctionRuns({ source, locale, runs, projects, runsLoading, runsE
             <div className="auction-history-phase"><span className="project-update" data-status={summary.status}>{statusLabel(summary.status, uk)}</span>
               {summary.status === "RUNNING" && <div className="auction-history-progress"><progress aria-label={l("Прогресс поиска", "Прогрес пошуку")} value={summary.percent ?? undefined} max={100} />{summary.percent !== null && <b>{summary.percent}%</b>}</div>}
               <small>Telegram: {sourceTestMode ? l("выключен", "вимкнено") : l("отчёт недоступен", "звіт недоступний")}</small></div>
-            <div className="auction-history-actions">{sourceTestMode && write && run.kind === "PROJECTS" && ["RUNNING", "QUEUED"].includes(run.status)
+            <div className="auction-history-actions">{write && run.kind === "PROJECTS" && ["RUNNING", "QUEUED"].includes(run.status)
               && summary.projects.some(project => ["RUNNING", "QUEUED", "WAITING_FOR_USER"].includes(project.status)) && <button className="button danger" onClick={event => {
               cancelOrigin.current = event.currentTarget; cancel.reset(); setCancelTarget({ id: run.id, source });
             }}>{l("Отменить поиск", "Скасувати пошук")}</button>}

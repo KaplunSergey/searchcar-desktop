@@ -1,7 +1,30 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { QueryClient, QueryObserver } from '@tanstack/react-query';
-import { desktopConnectionState, desktopRuntimeOptions, recheckDesktopConnection, watchDesktopConnection } from '../app/desktop-connection.ts';
+import { desktopConnectionState, desktopRuntimeOptions, readRequestSignal, recheckDesktopConnection, watchDesktopConnection } from '../app/desktop-connection.ts';
+
+test('reads have a finite transport deadline and retain caller cancellation; writes are not retried or timed out', async () => {
+  const caller = new AbortController();
+  const read = readRequestSignal('GET', caller.signal, 15);
+  const unbound = readRequestSignal('GET', undefined, 15);
+  assert.ok(read && unbound);
+  caller.abort();
+  assert.equal(read.aborted, true);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(unbound.aborted, true);
+  assert.equal(readRequestSignal('POST', caller.signal), caller.signal);
+  assert.equal(readRequestSignal('DELETE'), undefined);
+});
+
+test('native-menu recovery reports completion counts without sending query values', async () => {
+  const client = new QueryClient(), reports = [];
+  try {
+    await recheckDesktopConnection(client, {afterNativeMenu:true, report:event => reports.push(event)});
+    assert.deepEqual(reports.map(x=>x.event), ['recheck-start','recheck-finish']);
+    assert.ok(reports.every(x => typeof x.pending_queries === 'number' && typeof x.error_queries === 'number'));
+    assert.equal(reports[1].pending_queries, 0);
+  } finally { client.clear(); }
+});
 
 test('native menu exit replaces a stuck read once, retaining data and never repeating a mutation', async () => {
   const client = new QueryClient();
@@ -134,4 +157,16 @@ test('native focus and timer gaps recheck after a menu pause; hidden windows and
   stop(); assert.equal(cleared, 42);
   win.dispatchEvent(new Event('focus')); doc.dispatchEvent(new Event('visibilitychange'));
   assert.equal(checks, 6);
+});
+
+test('ordinary desktop heartbeat reuses the watchdog and records timer gaps', () => {
+  const win = new EventTarget(), doc = new EventTarget(), lags=[];
+  doc.visibilityState='visible';
+  let tick, now=0;
+  win.setInterval=fn=>{tick=fn;return 1;};win.clearInterval=()=>{};
+  const stop=watchDesktopConnection(()=>{},win,doc,()=>now,lag=>lags.push(lag));
+  now=1000;tick();assert.deepEqual(lags,[]);
+  now=30000;tick();assert.deepEqual(lags,[28000]);
+  now=31000;tick();assert.equal(lags.length,1);
+  stop();
 });

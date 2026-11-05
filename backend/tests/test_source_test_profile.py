@@ -132,13 +132,14 @@ def test_settings_reject_flag_without_isolated_database(tmp_path, isolated_envir
 
 
 @pytest.fixture
-def profile_queue(tmp_path, isolated_environment):
-    isolated_environment.setenv("SEARCHCAR_SOURCE_TEST_MODE", "1")
+def profile_queue(tmp_path, isolated_environment, request):
+    preview = getattr(request, 'param', True)
+    isolated_environment.setenv("SEARCHCAR_SOURCE_TEST_MODE", "1" if preview else "0")
     paths = configure_desktop_environment(tmp_path / "SearchCar", 9876)
     engine = create_database_engine(os.environ["DATABASE_URL"])
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
-    config = SimpleNamespace(**{**settings.model_dump(), "source_test_mode": True,
+    config = SimpleNamespace(**{**settings.model_dump(), "source_test_mode": preview,
         "database_url": os.environ["DATABASE_URL"], "storage_root": str(paths["storage"])})
     isolated_environment.setattr("app.main.settings", config)
     isolated_environment.setattr("app.worker.settings", config)

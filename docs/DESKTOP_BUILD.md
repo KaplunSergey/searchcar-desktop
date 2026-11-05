@@ -118,7 +118,12 @@ The launcher calls `scripts/build_mac_fixed.command` to rebuild the sidecar and
 Tauri shell, then installs `SearchCar Desktop Fixed.app`. The previous app
 bundle is retained with a UTC timestamp instead of being deleted.
 
-The local macOS launcher builds the auction preview by default. It embeds
+The ordinary candidate now ships Encar, Copart and IAA, subject to the license.
+Use `SEARCHCAR_SOURCE_TEST_MODE=0` for the ordinary local macOS candidate and
+`auction_preview=false` in Windows CI. Leave standalone diagnostics disabled.
+No production Telegram relay is enabled by this source promotion.
+
+The developer local macOS launcher still builds the auction preview by default. It embeds
 `SEARCHCAR_SOURCE_TEST_MODE=1` in the native shell, which passes
 `--source-test-mode` to the sidecar even when Finder supplies no environment.
 Both native license preflight and the backend use the existing

@@ -1099,8 +1099,6 @@ def create_project(
 
 def selection_root(source_key: str, db: Session):
     from .source_test_profile import validate_source_test_isolation, SourceTestModeError
-    if not settings.source_test_mode:
-        raise HTTPException(409, 'source_test_profile_required')
     try:
         validate_source_test_isolation(settings, database_url=db.get_bind().url)
         source = get_source(source_key)

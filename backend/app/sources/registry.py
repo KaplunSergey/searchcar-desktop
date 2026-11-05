@@ -28,16 +28,6 @@ def _load_encar() -> SourceAdapter:
     return EncarSource()
 
 
-_FACTORIES = {"encar": _load_encar}
-_DESCRIPTORS = {
-    key: SourceDescriptor(key=key, family=_CATALOG[key]["family"],
-                          domains=tuple(_CATALOG[key]["domains"]),
-                          capabilities=frozenset(_CATALOG[key]["capabilities"]))
-    for key in _FACTORIES
-}
-_SOURCES: dict[str, SourceAdapter] = {}
-
-
 def _load_copart():
     from .copart import CopartSource
     return CopartSource()
@@ -48,25 +38,21 @@ def _load_iaa():
     return IAASource()
 
 
-_TEST_FACTORIES = {"copart": _load_copart, "iaa": _load_iaa}
-
-
-def _test_sources_enabled():
-    from ..database import settings
-    from ..source_test_profile import validate_source_test_isolation
-    if not settings.source_test_mode:
-        return False
-    validate_source_test_isolation(settings)
-    return True
+_FACTORIES = {"encar": _load_encar, "copart": _load_copart, "iaa": _load_iaa}
+_DESCRIPTORS = {
+    key: SourceDescriptor(key=key, family=_CATALOG[key]["family"],
+                          domains=tuple(_CATALOG[key]["domains"]),
+                          capabilities=frozenset(_CATALOG[key]["capabilities"]))
+    for key in _FACTORIES
+}
+_SOURCES: dict[str, SourceAdapter] = {}
 
 
 def list_sources() -> tuple[SourceDescriptor, ...]:
-    return tuple(_DESCRIPTORS.values()) + (tuple(get_source_descriptor(key) for key in _TEST_FACTORIES) if _test_sources_enabled() else ())
+    return tuple(_DESCRIPTORS.values())
 
 
 def get_source_descriptor(key: str) -> SourceDescriptor:
-    if key in _TEST_FACTORIES and _test_sources_enabled():
-        return SourceDescriptor(key=key,family=_CATALOG[key]['family'],domains=tuple(_CATALOG[key]['domains']),capabilities=frozenset({'SEARCH','LIST_ONLY'}))
     try:
         return _DESCRIPTORS[key]
     except KeyError:
@@ -77,7 +63,7 @@ def get_source(key: str) -> SourceAdapter:
     descriptor = get_source_descriptor(key)
     try:
         if key not in _SOURCES:
-            source = (_FACTORIES.get(key) or _TEST_FACTORIES[key])()
+            source = _FACTORIES[key]()
             if source.descriptor != descriptor or descriptor.contract_version != 1:
                 raise ValueError("Incompatible source contract")
             _SOURCES[key] = source

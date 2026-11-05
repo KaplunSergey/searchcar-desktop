@@ -2,8 +2,8 @@
 
 import { ActivityDialog, activityProjects, cancellationBody, type CancellationTarget } from "./activity-dialog";
 import { watchTestDiagnostics } from "./test-diagnostics";
-import { TelegramAutomaticClock } from "./telegram-automatic";
-import { desktopConnectionState, desktopRuntimeOptions, nativeServiceHealth, recheckDesktopConnection, watchDesktopConnection } from "./desktop-connection";
+import { TelegramAutomaticClock, telegramClockEnabled } from "./telegram-automatic";
+import { desktopConnectionState, desktopRuntimeOptions, nativeServiceHealth, readRequestSignal, recheckDesktopConnection, watchDesktopConnection } from "./desktop-connection";
 
 import {
   QueryClient,
@@ -493,6 +493,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const currentCsrfToken = cookieValue(csrfCookieName) || csrfToken;
   const response = await fetch(`${api}${withAuctionTimeZone(path)}`, {
     ...options,
+    signal: readRequestSignal(method, options?.signal),
     credentials: "include",
     headers: {
       ...(options?.body ? { "content-type": "application/json" } : {}),
@@ -525,7 +526,7 @@ function useProjects(source: SourceKey) {
   const read = sourceRead("projects", source);
   return useQuery<ProjectRecord[]>({
     queryKey: read.queryKey,
-    queryFn: () => request(read.path),
+    queryFn: ({signal}) => request(read.path, {signal}),
     refetchInterval: 5000,
   });
 }
@@ -651,7 +652,7 @@ export function App({
   const [requestedRoute, setRoute] = useState(() => initialWorkspace(currentUser.workspace, sourceCatalog));
   const [showLaunch, setShowLaunch] = useState(false);
   const launchOptionsQuery = useQuery<LaunchOptions>({
-    queryKey: ["launch-options"], queryFn: () => request("/scans/launch-options"),
+    queryKey: ["launch-options"], queryFn: ({signal}) => request("/scans/launch-options", {signal}),
     refetchInterval: (query) => showLaunch || query.state.data?.projects.some((project) => project.active_status) ? 5000 : 30_000,
     refetchOnWindowFocus: true,
     retry: false, staleTime: 0,
@@ -699,17 +700,17 @@ export function App({
   });
   const projectsQuery = useProjects(source);
   const allProjectsQuery = useQuery<ProjectRecord[]>({
-    queryKey: ["projects", "all"], queryFn: () => request("/projects"), enabled: view === "settings" || showActivity,
+    queryKey: ["projects", "all"], queryFn: ({signal}) => request("/projects", {signal}), enabled: view === "settings" || showActivity,
   });
   const scanRead = sourceRead("scans", source);
   const scansQuery = useQuery<ScanRecord[]>({
     queryKey: scanRead.queryKey,
-    queryFn: () => request(scanRead.path),
+    queryFn: ({signal}) => request(scanRead.path, {signal}),
     refetchInterval: (query) => query.state.data?.some((run) => ["QUEUED", "RUNNING", "CANCEL_REQUESTED"].includes(run.status)) ? 5000 : 30_000,
   });
   const allScansQuery = useQuery<ScanRecord[]>({
     queryKey: ["scans", "active"],
-    queryFn: () => request("/scans/active"),
+    queryFn: ({signal}) => request("/scans/active", {signal}),
     refetchInterval: 5000,
   });
   const searchAvailability = sourceAvailability(launchOptionsQuery.data, source, launchOptionsQuery.isError);
@@ -718,11 +719,11 @@ export function App({
   const retryAvailability = () => { void launchOptionsQuery.refetch(); };
   const schedulerQuery = useQuery<SchedulerRecord>({
     queryKey: ["scheduler"],
-    queryFn: () => request("/settings"),
+    queryFn: ({signal}) => request("/settings", {signal}),
     refetchInterval: 5000,
   });
-  const desktopRuntimeQuery = useQuery(desktopRuntimeOptions(() =>
-    request<DesktopRuntimeInfo>("/desktop/runtime", { signal: AbortSignal.timeout(3000) })));
+  const desktopRuntimeQuery = useQuery(desktopRuntimeOptions(({signal}) =>
+    request<DesktopRuntimeInfo>("/desktop/runtime", { signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]) })));
   const [nativeHealth, setNativeHealth] = useState(() => typeof window === "undefined" ? undefined : nativeServiceHealth());
   useEffect(() => watchTestDiagnostics(desktopRuntimeQuery.data?.source_test_mode === true,
     data => request('/desktop/diagnostics/test-event', {method:'POST',body:JSON.stringify(data),signal:AbortSignal.timeout(3000)}),
@@ -735,19 +736,29 @@ export function App({
   const backendChecking = connectionState === "checking";
   useEffect(() => {
     if (!desktopRuntimeQuery.data?.desktop) return;
+    const report = (event: object) => { void request('/desktop/diagnostics/lifecycle', {
+      method:'POST', body:JSON.stringify({...event, focused:document.hasFocus(), hidden:document.visibilityState==='hidden'}),
+      signal:AbortSignal.timeout(3000),
+    }).catch(()=>{}); };
+    report({event:'ui-mounted'});
     const recheck = () => {
-      void recheckDesktopConnection(client);
+      void recheckDesktopConnection(client, {report}).catch(()=>{});
     };
     const healthChanged = () => {
       setNativeHealth(nativeServiceHealth());
       if (client.getQueryCache().findAll({ type: "active", predicate: query =>
-        ["desktop-runtime", "scans", "projects"].includes(String(query.queryKey[0])) && query.state.status === "error" }).length) recheck();
+        ["desktop-runtime", "scans", "projects", "launch-options"].includes(String(query.queryKey[0])) && query.state.status === "error" }).length) recheck();
     };
     healthChanged();
-    const menuResumed = () => { void recheckDesktopConnection(client, {afterNativeMenu:true}); };
+    const menuResumed = () => {
+      report({event:'menu-resume'});
+      void recheckDesktopConnection(client, {afterNativeMenu:true, report}).catch(()=>{});
+    };
     window.addEventListener("searchcar:service-health", healthChanged);
     window.addEventListener("searchcar:menu-resume", menuResumed);
-    const stop = watchDesktopConnection(recheck);
+    const stop = watchDesktopConnection(recheck, window, document, Date.now, lag => report({event:'heartbeat', elapsed_ms:lag,
+      pending_queries:Math.min(1000,client.isFetching()), error_queries:Math.min(1000,
+        client.getQueryCache().findAll({predicate:q=>q.state.status==='error'}).length)}));
     return () => {
       stop();
       window.removeEventListener("searchcar:service-health", healthChanged);
@@ -976,7 +987,7 @@ export function App({
   const Workspace = Object.hasOwn(workspaceModules, uiKey) ? workspaceModules[uiKey] : MissingWorkspace;
   return (
     <SourceCatalogContext.Provider value={visibleCatalog}><div className="app-shell">
-      <TelegramAutomaticClock enabled={desktopRuntimeQuery.data?.desktop === true && !backendReadFailed} write={telegramClockWrite} />
+      <TelegramAutomaticClock enabled={telegramClockEnabled(desktopRuntimeQuery.data, backendReadFailed)} write={telegramClockWrite} />
       <aside>
         <button className="brand" onClick={() => navigate("projects")}>
           <span>S</span> SearchCar

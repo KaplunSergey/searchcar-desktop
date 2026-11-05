@@ -69,7 +69,9 @@ def _sanitized_entries(logs_dir: Path, since: datetime) -> tuple[list[dict], boo
     used_bytes = 0
     sequence = 0
     truncated = False
-    for path in sorted(logs_dir.glob("searchcar-core.jsonl*"), key=lambda item: item.stat().st_mtime if item.is_file() else 0):
+    paths = [*logs_dir.glob("searchcar-core.jsonl*"), *logs_dir.glob("searchcar-native.jsonl*")]
+    # Event timestamps, not file mtimes, order the result; avoid a stat/rotation race.
+    for path in sorted(paths):
         if not path.is_file() or path.is_symlink():
             continue
         try:
@@ -96,6 +98,15 @@ def _sanitized_entries(logs_dir: Path, since: datetime) -> tuple[list[dict], boo
                 correlation_id = raw.get("correlation_id")
                 if isinstance(correlation_id, str) and correlation_id:
                     entry["correlation_id"] = correlation_id[:80]
+                # Never export traceback messages, source lines, locals or full paths.
+                exception = raw.get('exception')
+                if isinstance(exception, str):
+                    types = re.findall(r'^([A-Za-z_][\w.]{0,160}(?:Error|Exception|Interrupt|Exit))(?::|$)', exception, re.MULTILINE)
+                    if types:
+                        entry['exception_type'] = types[-1]
+                    frames = re.findall(r'File "([^"\n]+)", line (\d{1,8}), in ([A-Za-z_][\w<>]{0,100})', exception)
+                    entry['exception_frames'] = [dict(file=re.split(r'[/\\]', filename)[-1][:100], line=int(line), function=function)
+                                                 for filename, line, function in frames[-12:]]
                 encoded = (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8")
                 if len(encoded) > MAX_REPORT_LOG_BYTES:
                     truncated = True

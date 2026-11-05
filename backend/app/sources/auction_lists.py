@@ -1,4 +1,4 @@
-"""Shared mechanics for the two opt-in, public-list-only auction adapters."""
+"""Shared mechanics for the two public-list-only auction adapters."""
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -488,8 +488,6 @@ class AuctionListSource:
 
         descriptor = self.descriptor
         validate_source_test_isolation(settings)
-        if not settings.source_test_mode:
-            raise AuctionListError('SOURCE_TEST_PROFILE_REQUIRED', 'Interactive sources require the isolated test profile')
         # Owned cookies/preferences only: never read a user's Chrome profile or
         # transfer challenge cookies between browsers, sites or work profiles.
         options = {'executable_path': executable_path}
@@ -520,7 +518,7 @@ class AuctionListSource:
             lease = _BROWSER_LOCKS.setdefault(str(profile.resolve()), _ProfileLease())
         if not lease.acquire(interactive=interactive):
             raise AuctionListError('SOURCE_BROWSER_BUSY', 'The site browser is in use; finish choosing search filters first')
-        # Preview Copart uses one ordinary, minimized browser from the start.
+        # Copart uses one ordinary, minimized browser from the start.
         # Restoring it for consent/verification must not restart its live session.
         session = AuctionBrowserSession(playwright.chromium, profile, options, interactive=interactive,
                                         lease=lease, windowed_background=windowed_background)
@@ -528,7 +526,7 @@ class AuctionListSource:
 
     def collect_search_pages(self, page, url, search_name='', *, all_pages=False, checkpoint=None, progress=None, max_pages=None, search_config=None, diagnostic_context=None):
         from ..database import settings
-        self.descriptor  # Recheck the opt-in/isolation even for an already cached adapter.
+        self.descriptor  # Unknown/unshipped source keys never fall back to another adapter.
         max_pages = settings.source_test_max_pages if max_pages is None else max_pages
         if type(max_pages) is not int or not 1 <= max_pages <= 1000:
             raise AuctionListError('SOURCE_PAGE_LIMIT_INVALID', 'Page limit must be an integer between 1 and 1000')

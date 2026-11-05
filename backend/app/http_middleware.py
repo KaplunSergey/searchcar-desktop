@@ -1,5 +1,6 @@
 """Direct ASGI wrappers; no generator/TaskGroup frames around each HTTP call."""
 import hmac
+import asyncio
 import logging
 from threading import Lock
 from time import monotonic
@@ -29,6 +30,8 @@ class RequestLogMiddleware:
         logger = logging.getLogger('app.main')
         token = desktop_correlation_id.set(f'request-{uuid4().hex[:12]}')
         status = 500
+        started = monotonic()
+        cancelled = False
 
         async def send_response(message: Message):
             nonlocal status
@@ -38,12 +41,16 @@ class RequestLogMiddleware:
 
         try:
             await self.app(scope, receive, send_response)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         except Exception:
             logger.exception('Local API request failed: method=%s path=%s', scope['method'], scope['path'])
             raise
         finally:
+            elapsed_ms = round((monotonic() - started) * 1000)
             log_request = True
-            if scope['method'] == 'GET' and scope['path'] in self.QUIET_POLLS and status == 200:
+            if not cancelled and elapsed_ms < 1000 and scope['method'] == 'GET' and scope['path'] in self.QUIET_POLLS and status == 200:
                 now = monotonic()
                 with self._poll_lock:
                     previous = self._last_poll.get(scope['path'])
@@ -51,7 +58,10 @@ class RequestLogMiddleware:
                     if log_request:
                         self._last_poll[scope['path']] = now
             if log_request:
-                logger.info('Local API request completed: method=%s path=%s status=%s', scope['method'], scope['path'], status)
+                if cancelled:
+                    logger.info('Local API request cancelled: method=%s path=%s elapsed_ms=%s', scope['method'], scope['path'], elapsed_ms)
+                else:
+                    logger.info('Local API request completed: method=%s path=%s status=%s elapsed_ms=%s', scope['method'], scope['path'], status, elapsed_ms)
             desktop_correlation_id.reset(token)
 
 

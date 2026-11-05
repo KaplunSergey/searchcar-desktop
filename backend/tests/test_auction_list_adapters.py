@@ -36,13 +36,23 @@ def adapters(profile_queue):
 
 
 @pytest.mark.parametrize("key", ["copart", "iaa"])
-def test_public_list_adapters_exist_only_in_isolated_profile(adapters, key):
+@pytest.mark.parametrize('profile_queue', [False, True], indirect=True)
+def test_public_list_adapters_ship_in_both_profiles_without_granting_a_license(adapters, key):
     source = get_source(key)
     assert {"SEARCH", "LIST_ONLY"} <= source.descriptor.capabilities
     assert key in {item.key for item in list_sources()}
-    adapters.settings.source_test_mode = False
-    with pytest.raises(ValueError, match="Unsupported listing source"):
-        get_source(key)  # A previously cached test adapter is not a production adapter.
+    from app.desktop_license import SearchEntitlementError
+    def denied(*_):
+        raise SearchEntitlementError('LICENSE_SOURCE_NOT_ALLOWED')
+    adapters.monkeypatch.setattr('app.desktop_license.require_search_entitlement', denied)
+    with adapters.factory() as db:
+        project = create_project(ProjectIn(name=key, source_key=key, search_url=(
+            'https://www.copart.com/lotSearchResults?searchCriteria=%7B%7D' if key == 'copart'
+            else 'https://www.iaai.com/Search?url=x')), db.get(User, adapters.user_id), db)
+        with pytest.raises(__import__('fastapi').HTTPException) as error:
+            scan_projects(ScanProjectsIn(project_ids=[project['id']]), db.get(User, adapters.user_id), db)
+        assert (error.value.status_code, error.value.detail) == (402, 'license_source_not_allowed')
+        assert db.scalar(select(ScanRun)) is None
 
 
 def test_copart_normalizes_real_row_without_turning_bid_into_sale_price(adapters):
@@ -161,6 +171,7 @@ def test_copart_stops_partial_if_pagination_cannot_preserve_filters(adapters):
 
 
 @pytest.mark.parametrize('key',['copart','iaa'])
+@pytest.mark.parametrize('profile_queue', [False, True], indirect=True)
 def test_browser_starts_in_background_with_an_owned_persistent_profile(adapters,key):
     calls=[]
     page=Page([])
@@ -595,6 +606,7 @@ def test_configurable_page_budget_and_read_summary(adapters):
 
 
 @pytest.mark.parametrize('problem', ['limit','changed','duplicate'])
+@pytest.mark.parametrize('profile_queue', [False, True], indirect=True)
 def test_partial_auction_search_does_not_exclude_previously_saved_lots(adapters,problem):
     source=get_source('iaa')
     one,two=ROWS['iaa'][:2]

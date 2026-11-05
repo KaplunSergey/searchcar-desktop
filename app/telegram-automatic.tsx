@@ -7,6 +7,9 @@ import { computerTimeZone, watchAuctionCountdown } from "./auction-time-client";
 import { AuctionTelegramPreview } from "./auction-telegram-preview";
 
 type Props = Pick<SourceWorkspaceProps, "source" | "locale" | "read" | "write"> & { projectId: number };
+export function telegramClockEnabled(runtime?: {desktop: boolean; telegram_delivery_enabled?: boolean}, failed = false) {
+  return runtime?.desktop === true && runtime.telegram_delivery_enabled === true && !failed;
+}
 type AutomaticStatus = { project_id: number; source_key: string; enabled: boolean; recipient: { project_id: number; title: string; chat_id: number; binding_id: string } | null;
   batch: TelegramBatch | null; issue: string | null; max_result_age_minutes: number };
 

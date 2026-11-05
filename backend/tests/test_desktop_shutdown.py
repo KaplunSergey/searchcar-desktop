@@ -63,6 +63,10 @@ def test_idle_desktop_exits_with_an_open_event_stream_and_releases_data_lock(tmp
                     assert monotonic() < deadline, "server startup timed out"
                     sleep(0.05)
                 assert client.get("/desktop/bootstrap", params={"token": secret}).status_code == 303
+                # Native/UI lifecycle evidence must also work in the ordinary profile.
+                csrf = client.get('/api/auth/me').json()['csrf_token']
+                assert client.post('/api/desktop/diagnostics/lifecycle', headers={'x-csrf-token':csrf},
+                    json={'event':'menu-resume','focused':True,'hidden':False}).status_code == 204
                 with client.stream("GET", "/api/events") as events:
                     assert events.status_code == 200
                     lines = events.iter_lines()
@@ -83,6 +87,10 @@ def test_idle_desktop_exits_with_an_open_event_stream_and_releases_data_lock(tmp
     restarted.acquire()
     restarted.release()
     assert "timeout graceful shutdown exceeded" not in (tmp_path / "server.log").read_text()
+    evidence = (data/'logs'/'searchcar-core.jsonl').read_text()
+    for stage in ['instance-lock', 'database', 'image-maintenance', 'http-server']:
+        assert f'stage={stage}' in evidence
+    assert 'Desktop lifecycle:' in evidence
 
 
 def test_shutdown_waits_for_partial_report_before_exiting(tmp_path, monkeypatch):

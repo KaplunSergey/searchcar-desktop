@@ -64,6 +64,7 @@ const SUPPORT_REPORT_PREFIX: &str = "searchcar-support-";
 mod windows_update;
 #[cfg(any(windows, test))]
 mod windows_menu;
+mod lifecycle_log;
 
 enum StartupWait {
     Ready,
@@ -304,6 +305,8 @@ fn service_health_script(ready: Option<bool>, observed_at: u128) -> String {
 fn monitor_service_health(app: tauri::AppHandle, port: u16, terminated: Arc<AtomicBool>) {
     thread::spawn(move || {
         let mut failures = 0_u8;
+        let mut previous_health = None;
+        let mut last_logged = Instant::now();
         loop {
             if app.state::<LifecycleState>().explicit_exit.load(Ordering::SeqCst) { break; }
             let stopped = terminated.load(Ordering::SeqCst);
@@ -313,7 +316,12 @@ fn monitor_service_health(app: tauri::AppHandle, port: u16, terminated: Arc<Atom
             let observed_at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.eval(service_health_script(ready, observed_at));
+                let eval_ok = window.eval(service_health_script(ready, observed_at)).is_ok();
+                if previous_health != Some(ready) || last_logged.elapsed() >= Duration::from_secs(30) {
+                    lifecycle_log::record("health_snapshot",serde_json::json!({"ready":ready,"eval_queued":eval_ok}));
+                    previous_health = Some(ready);
+                    last_logged = Instant::now();
+                }
             }
             if stopped { break; }
             thread::sleep(Duration::from_secs(2));
@@ -589,7 +597,9 @@ fn stop_sidecar(app: &tauri::AppHandle) {
     let state = app.state::<SidecarState>();
     let process = state.0.lock().ok().and_then(|mut child| child.take());
     if let Some(process) = process {
-        if request_sidecar_shutdown(process.port, &process.secret) {
+        let acknowledged = request_sidecar_shutdown(process.port, &process.secret);
+        lifecycle_log::record("shutdown_acknowledged",serde_json::json!({"ok":acknowledged}));
+        if acknowledged {
             let deadline = Instant::now() + Duration::from_secs(40);
             // HTTP stops before Python finishes cleanup and releases desktop.lock.
             // Wait for the process exit event, not the health endpoint disappearing.
@@ -600,6 +610,7 @@ fn stop_sidecar(app: &tauri::AppHandle) {
                 return;
             }
         }
+        lifecycle_log::record("sidecar_force_stop",serde_json::json!({}));
         let _ = process.child.kill();
     }
 }
@@ -614,6 +625,7 @@ fn finish_confirmed_exit(app: &tauri::AppHandle) {
     }
     let app_handle = app.clone();
     thread::spawn(move || {
+        lifecycle_log::record("exit_requested",serde_json::json!({}));
         if app_handle.get_webview_window("main").is_some() {
             if let Ok(directory) = app_handle.path().app_config_dir() {
                 let maximized = app_handle.state::<LifecycleState>().main_maximized.load(Ordering::SeqCst);
@@ -626,6 +638,7 @@ fn finish_confirmed_exit(app: &tauri::AppHandle) {
         // cancellation-requested. It then waits for the worker to persist the
         // partial report before the native process exits.
         stop_sidecar(&app_handle);
+        lifecycle_log::record("sidecar_stopped",serde_json::json!({}));
         app_handle.exit(0);
     });
 }
@@ -1002,7 +1015,13 @@ pub fn run() {
         .setup(|app| {
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
+            let data_dir = app.path().app_data_dir()?;
+            let (profile_dir, profile_arguments) = desktop_profile(&data_dir, source_test_build(),
+                option_env!("SEARCHCAR_TELEGRAM_DELIVERY_PREVIEW") == Some("1"));
+            lifecycle_log::init(&profile_dir);
+            lifecycle_log::record("startup_begin",serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"source_test":source_test_build()}));
             create_startup_window(app.handle())?;
+            lifecycle_log::record("startup_window_created",serde_json::json!({}));
             set_startup_state(
                 app.handle(),
                 "loading",
@@ -1014,9 +1033,6 @@ pub fn run() {
                 .take(64)
                 .map(char::from)
                 .collect();
-            let data_dir = app.path().app_data_dir()?;
-            let (profile_dir, profile_arguments) = desktop_profile(&data_dir, source_test_build(),
-                option_env!("SEARCHCAR_TELEGRAM_DELIVERY_PREVIEW") == Some("1"));
             let frontend_dir = app.path().resource_dir()?.join("desktop-ui");
             let browser_dir = app.path().resource_dir()?.join("browsers");
             let playwright_driver_dir = app
@@ -1025,13 +1041,16 @@ pub fn run() {
                 .join("playwright-driver");
             let license_config = app.path().resource_dir()?.join("license-service.json");
             std::fs::create_dir_all(&data_dir)?;
+            lifecycle_log::record("lease_check_begin",serde_json::json!({}));
             if let Err(error) = verify_required_lease(&license_config, &profile_dir) {
+                lifecycle_log::record("lease_check_failed",serde_json::json!({}));
                 show_startup_failure(
                     app.handle(),
                     &format!("Не удалось проверить локальную лицензию: {error}"),
                 );
                 return Ok(());
             }
+            lifecycle_log::record("lease_check_end",serde_json::json!({}));
 
             let mut sidecar_arguments = vec![
                 "serve".to_string(),
@@ -1063,6 +1082,7 @@ pub fn run() {
             {
                 Ok(command) => command,
                 Err(error) => {
+                    lifecycle_log::record("sidecar_spawn_failed",serde_json::json!({}));
                     show_startup_failure(
                         app.handle(),
                         &format!("Не найден компонент локального сервиса: {error}"),
@@ -1081,9 +1101,11 @@ pub fn run() {
                     option_env!("SEARCHCAR_MACOS_LOCAL_KEY_FALLBACK").unwrap_or("0"),
                 )
                 .env("SEARCHCAR_LICENSE_CONFIG_FILE", license_config);
+            lifecycle_log::record("sidecar_spawn_begin",serde_json::json!({}));
             let (mut events, child) = match command.spawn() {
                 Ok(process) => process,
                 Err(error) => {
+                    lifecycle_log::record("sidecar_spawn_failed",serde_json::json!({}));
                     show_startup_failure(
                         app.handle(),
                         &format!("Не удалось запустить локальный сервис: {error}"),
@@ -1091,6 +1113,7 @@ pub fn run() {
                     return Ok(());
                 }
             };
+            lifecycle_log::record("sidecar_spawn_end",serde_json::json!({}));
             let sidecar_terminated = Arc::new(AtomicBool::new(false));
             *app.state::<SidecarState>().0.lock().expect("sidecar state") =
                 Some(SidecarProcess {
@@ -1104,6 +1127,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 while let Some(event) = events.recv().await {
                     if matches!(event, CommandEvent::Terminated(_)) {
+                        lifecycle_log::record("sidecar_terminated",serde_json::json!({}));
                         termination_for_events.store(true, Ordering::SeqCst);
                     }
                 }
@@ -1189,6 +1213,7 @@ pub fn run() {
                 match wait_for_health(port, STARTUP_TIMEOUT, &sidecar_terminated) {
                     StartupWait::Ready => {}
                     StartupWait::Terminated => {
+                        lifecycle_log::record("startup_sidecar_terminated",serde_json::json!({}));
                         stop_sidecar(&app_handle);
                         show_startup_failure(
                             &app_handle,
@@ -1197,6 +1222,7 @@ pub fn run() {
                         return;
                     }
                     StartupWait::TimedOut => {
+                        lifecycle_log::record("startup_health_timeout",serde_json::json!({}));
                         stop_sidecar(&app_handle);
                         show_startup_failure(
                             &app_handle,
@@ -1205,6 +1231,7 @@ pub fn run() {
                         return;
                     }
                 }
+                lifecycle_log::record("server_ready",serde_json::json!({}));
                 set_startup_state(&app_handle, "loading", "Открываем приложение…");
                 let target =
                     format!("http://127.0.0.1:{port}/desktop/bootstrap?token={secret}");
@@ -1239,9 +1266,11 @@ pub fn run() {
                             }
                         }
                     }
+                    lifecycle_log::record("main_window_begin",serde_json::json!({}));
                     match builder.build()
                     {
                         Ok(main_window) => {
+                            lifecycle_log::record("main_window_created",serde_json::json!({}));
                             #[cfg(windows)]
                             windows_menu::install(&main_window);
                             #[cfg(not(windows))]
@@ -1250,10 +1279,10 @@ pub fn run() {
                             monitor_service_health(window_handle.clone(), port, health_terminated);
                             monitor_test_diagnostics(window_handle.clone(), diagnostic_terminated);
                         }
-                        Err(error) => show_startup_failure(
-                            &window_handle,
-                            &format!("Не удалось открыть главное окно: {error}"),
-                        ),
+                        Err(error) => {
+                            lifecycle_log::record("main_window_failed",serde_json::json!({}));
+                            show_startup_failure(&window_handle, &format!("Не удалось открыть главное окно: {error}"));
+                        }
                     }
                 });
 

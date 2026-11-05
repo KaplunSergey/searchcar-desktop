@@ -28,6 +28,7 @@ mod native {
     type Subclass = unsafe extern "system" fn(Hwnd, u32, usize, isize, usize, usize) -> isize;
     const SUBCLASS_ID: usize = 0x53434d52;
     const WM_EXITMENULOOP: u32 = 0x0212;
+    const WM_ENTERMENULOOP: u32 = 0x0211;
     const WM_NCDESTROY: u32 = 0x0082;
 
     #[link(name = "comctl32")]
@@ -63,12 +64,18 @@ mod native {
         // The subclass and COM controller are installed, used and dropped on this UI thread.
         let pointer = data as *mut Hook;
         let resume_message = (*pointer).resume_message;
+        if message == WM_ENTERMENULOOP {
+            crate::lifecycle_log::record("menu_enter",serde_json::json!({}));
+        }
         if message == WM_EXITMENULOOP && (*pointer).resume.queue() {
+            crate::lifecycle_log::record("menu_exit",serde_json::json!({}));
             if PostMessageW(hwnd, resume_message, 0, 0) == 0 {
                 (*pointer).resume.pending = false;
+                crate::lifecycle_log::record("menu_post_failed",serde_json::json!({}));
                 eprintln!("Could not queue native menu recovery");
             }
         } else if message == resume_message {
+            crate::lifecycle_log::record("menu_recovery_received",serde_json::json!({"foreground":GetForegroundWindow()==hwnd,"minimized":IsIconic(hwnd)!=0}));
             let recovery = {
                 let hook = &mut *pointer;
                 hook.resume.take(GetForegroundWindow() == hwnd, IsIconic(hwnd) != 0)
@@ -76,10 +83,14 @@ mod native {
             };
             // MoveFocus can re-enter window processing: hold no borrow of Hook across it.
             if let Some((controller, window)) = recovery {
-                if let Err(error) = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC) {
+                let focus = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+                crate::lifecycle_log::record("menu_focus_result",serde_json::json!({"ok":focus.is_ok()}));
+                if let Err(error) = focus {
                     eprintln!("Could not restore WebView focus after native menu: {error}");
                 }
-                if let Err(error) = window.eval("window.dispatchEvent(new Event('searchcar:menu-resume'));") {
+                let notify = window.eval("window.dispatchEvent(new Event('searchcar:menu-resume'));");
+                crate::lifecycle_log::record("menu_notify_result",serde_json::json!({"queued":notify.is_ok()}));
+                if let Err(error) = notify {
                     eprintln!("Could not notify UI after native menu: {error}");
                 }
             }
@@ -92,12 +103,14 @@ mod native {
         let owned = window.clone();
         if let Err(error) = window.with_webview(move |webview| unsafe {
             let Ok(hwnd) = owned.hwnd() else {
+                crate::lifecycle_log::record("menu_hwnd_failed",serde_json::json!({}));
                 eprintln!("Could not get main window for native menu recovery");
                 return;
             };
             let name: Vec<u16> = "SearchCar.MenuResume.v1\0".encode_utf16().collect();
             let resume_message = RegisterWindowMessageW(name.as_ptr());
             if resume_message == 0 {
+                crate::lifecycle_log::record("menu_register_failed",serde_json::json!({}));
                 eprintln!("Could not register native menu recovery message");
                 return;
             }
@@ -108,8 +121,12 @@ mod native {
             if SetWindowSubclass(hwnd.0, Some(procedure), SUBCLASS_ID, hook as usize) == 0 {
                 drop(Box::from_raw(hook));
                 eprintln!("Could not install native menu recovery");
+                crate::lifecycle_log::record("menu_hook_failed",serde_json::json!({}));
+            } else {
+                crate::lifecycle_log::record("menu_hook_installed",serde_json::json!({}));
             }
         }) {
+            crate::lifecycle_log::record("menu_install_schedule_failed",serde_json::json!({}));
             eprintln!("Could not schedule native menu recovery installation: {error}");
         }
     }

@@ -4,8 +4,16 @@ import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-const { TelegramAutomatic, checkedAutomaticStatus } = await import('../app/telegram-automatic.tsx');
+const { TelegramAutomatic, checkedAutomaticStatus, telegramClockEnabled } = await import('../app/telegram-automatic.tsx');
 const base=()=>({project_id:9,source_key:'copart',enabled:false,recipient:{project_id:9,title:'Team <script>',chat_id:555,binding_id:'b'.repeat(32)},batch:null,issue:null,max_result_age_minutes:30});
+
+test('ordinary Encar-only / delivery-disabled desktops do not send Telegram clock requests',()=>{
+  assert.equal(telegramClockEnabled({desktop:true,telegram_delivery_enabled:false}),false);
+  assert.equal(telegramClockEnabled({desktop:true}),false);
+  assert.equal(telegramClockEnabled({desktop:true,telegram_delivery_enabled:true}),true);
+  assert.equal(telegramClockEnabled({desktop:true,telegram_delivery_enabled:true},true),false);
+  assert.equal(telegramClockEnabled({desktop:false,telegram_delivery_enabled:true}),false);
+});
 
 test('automatic settings reject another source/project/recipient/batch rather than offering opt-in',()=>{
   assert.equal(checkedAutomaticStatus(base(),'copart',9).enabled,false);

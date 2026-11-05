@@ -156,7 +156,7 @@ def test_playwright_startup_error_is_reported_without_an_attribute_error(
 
 
 @pytest.mark.parametrize('mode', ['0', '1'])
-def test_hidden_target_attachment_is_driver_only_and_source_test_only(tmp_path, monkeypatch, mode):
+def test_hidden_target_attachment_is_driver_only_in_both_profiles(tmp_path, monkeypatch, mode):
     monkeypatch.delenv('PW_CHROMIUM_ATTACH_TO_OTHER', raising=False)
     monkeypatch.setenv('SEARCHCAR_SOURCE_TEST_MODE', mode)
     _write_playwright_driver(tmp_path)
@@ -164,7 +164,7 @@ def test_hidden_target_attachment_is_driver_only_and_source_test_only(tmp_path, 
     from playwright._impl import _transport
     environment = _transport.get_driver_env()
     actual = environment.get('PW_CHROMIUM_ATTACH_TO_OTHER')
-    assert actual == ('1' if mode == '1' else None)
+    assert actual == '1'
     assert 'PW_CHROMIUM_ATTACH_TO_OTHER' not in os.environ
 
 

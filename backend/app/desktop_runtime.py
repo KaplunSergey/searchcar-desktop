@@ -1,5 +1,6 @@
 import argparse
 from contextvars import ContextVar
+from contextlib import contextmanager
 import errno
 import hashlib
 import hmac
@@ -27,6 +28,19 @@ PARENT_WATCH_INTERVAL_SECONDS = 2.0
 desktop_correlation_id: ContextVar[str] = ContextVar(
     "searchcar_desktop_correlation_id", default="desktop-process"
 )
+
+
+@contextmanager
+def startup_stage(stage: str):
+    started = time.monotonic()
+    logger = logging.getLogger(__name__)
+    logger.info('Desktop startup: stage=%s state=begin', stage)
+    outcome = 'failed'
+    try:
+        yield
+        outcome = 'ok'
+    finally:
+        logger.info('Desktop startup: stage=%s state=end outcome=%s elapsed_ms=%s', stage, outcome, round((time.monotonic()-started)*1000))
 
 
 class PlaywrightRuntimeError(RuntimeError):
@@ -440,9 +454,9 @@ def configure_playwright_driver(driver_dir: Path) -> Path:
     def bundled_driver_environment() -> dict:
         environment = _driver.get_driver_env()
         # Pinned Playwright opt-in: attach to Chrome's windowless "other" target.
-        # Never change the global process environment or normal-profile drivers.
-        if os.environ.get("SEARCHCAR_SOURCE_TEST_MODE") == "1":
-            environment["PW_CHROMIUM_ATTACH_TO_OTHER"] = "1"
+        # Auctions may retain an owned idle target in either profile. This only
+        # enables attachment; it creates no targets and changes no global env.
+        environment["PW_CHROMIUM_ATTACH_TO_OTHER"] = "1"
         return environment
     _transport.get_driver_env = bundled_driver_environment
     os.environ["PLAYWRIGHT_NODEJS_PATH"] = str(executable)
@@ -654,6 +668,8 @@ def create_desktop_app(
     from starlette.staticfiles import StaticFiles
 
     from .main import app
+    from .desktop_lifecycle import router as lifecycle_router
+    app.include_router(lifecycle_router)
 
     expected_cookie = _session_cookie(session_secret)
     update_check_relay = DesktopUpdateCheckRelay()
@@ -1211,13 +1227,16 @@ def main() -> None:
     )
     configure_structured_logging(paths["logs"])
     instance_lock = DesktopInstanceLock(paths["root"] / "runtime" / "desktop.lock")
-    instance_lock.acquire(timeout_seconds=INSTANCE_LOCK_WAIT_SECONDS)
+    with startup_stage('instance-lock'):
+        instance_lock.acquire(timeout_seconds=INSTANCE_LOCK_WAIT_SECONDS)
     from .maintenance import clear_stale_maintenance_lock
 
     clear_stale_maintenance_lock()
-    apply_pending_restore(paths)
-    initialize_database()
-    normalize_desktop_workspace(paths)
+    with startup_stage('pending-restore'):
+        apply_pending_restore(paths)
+    with startup_stage('database'):
+        initialize_database()
+        normalize_desktop_workspace(paths)
     from sqlalchemy import select
     from .database import SessionLocal, engine
     from .desktop_scheduler import prepare_overdue_scheduler_catch_up
@@ -1246,7 +1265,8 @@ def main() -> None:
             )
     from .current_images import maintain_image_storage
     try:
-        image_maintenance = maintain_image_storage(engine, paths["storage"], paths["root"] / "backups")
+        with startup_stage('image-maintenance'):
+            image_maintenance = maintain_image_storage(engine, paths["storage"], paths["root"] / "backups")
         logging.getLogger(__name__).info("Current image maintenance: %s", image_maintenance)
     except Exception:
         # The legacy file route remains compatible. Optional photo migration
@@ -1271,11 +1291,12 @@ def main() -> None:
     license_sync_thread.start()
     shutdown_controller = GracefulShutdownController(worker_stop, worker_thread)
     session_secret = os.environ.get("SEARCHCAR_DESKTOP_SESSION_SECRET", "")
-    desktop_app = create_desktop_app(
-        arguments.frontend_dir,
-        session_secret,
-        shutdown_controller.request,
-    )
+    with startup_stage('create-app'):
+        desktop_app = create_desktop_app(
+            arguments.frontend_dir,
+            session_secret,
+            shutdown_controller.request,
+        )
     import uvicorn
 
     config = uvicorn.Config(
@@ -1304,6 +1325,7 @@ def main() -> None:
             "Ignoring invalid desktop parent PID"
         )
     try:
+        logging.getLogger(__name__).info('Desktop startup: stage=http-server state=starting')
         server.run()
     finally:
         shutdown_controller.request()

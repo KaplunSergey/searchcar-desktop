@@ -177,7 +177,7 @@ def test_project_for_an_unshipped_source_is_not_queued(tmp_path: Path) -> None:
     engine = database(tmp_path)
     with Session(engine) as db:
         current = owner(db)
-        disabled = project(db, current.id, "Copart", source_key="copart")
+        disabled = project(db, current.id, "Unshipped", source_key="not-shipped")
 
         with pytest.raises(HTTPException) as caught:
             scan_projects(ScanProjectsIn(project_ids=[disabled.id]), current, db)

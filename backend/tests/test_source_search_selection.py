@@ -334,6 +334,7 @@ def test_capture_runtime_failure_is_reported_even_after_its_context_has_closed(t
     assert 'private error' not in json.dumps(result)
 
 
+@pytest.mark.parametrize('profile_queue', [False, True], indirect=True)
 def test_selection_api_is_owner_scoped_and_does_not_create_a_project(adapters):
     from fastapi.testclient import TestClient
     from app.auth import require_user, require_csrf
@@ -386,8 +387,22 @@ def test_selection_api_is_owner_scoped_and_does_not_create_a_project(adapters):
                 'search_selection_id': picked.id,
             })
             assert changed.status_code == 409 and changed.json()['detail'] == 'search_selection_changed'
-            adapters.settings.source_test_mode = False
-            assert client.get('/api/source-search/iaa/selection').status_code == 409
+            opened = []
+            def start(*_args, **_kwargs):
+                opened.append(True)
+                return {'status': 'SELECTING'}
+            adapters.monkeypatch.setattr('app.main.search_selections.start', start)
+            assert client.post('/api/source-search/iaa/selection', json={'action': 'OPEN'}).status_code == 200
+            assert opened == [True]
+            from app.desktop_license import SearchEntitlementError
+            def denied(*_):
+                raise SearchEntitlementError('LICENSE_SUBSCRIPTION_EXPIRED')
+            adapters.monkeypatch.setattr('app.desktop_license.require_search_entitlement', denied)
+            adapters.monkeypatch.setattr('app.main.search_selections.start', lambda *_args, **_kwargs: pytest.fail('Expired license opened a browser'))
+            assert client.get('/api/source-search/iaa/selection').status_code == 200
+            blocked = client.post('/api/source-search/iaa/selection', json={'action': 'OPEN'})
+            assert blocked.status_code == 402, blocked.text
+            assert blocked.json()['detail'] == 'license_subscription_expired'
     finally:
         app.dependency_overrides.clear()
         app.dependency_overrides.update(previous)
