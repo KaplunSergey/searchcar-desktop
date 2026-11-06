@@ -121,7 +121,12 @@ bundle is retained with a UTC timestamp instead of being deleted.
 The ordinary candidate now ships Encar, Copart and IAA, subject to the license.
 Use `SEARCHCAR_SOURCE_TEST_MODE=0` for the ordinary local macOS candidate and
 `auction_preview=false` in Windows CI. Leave standalone diagnostics disabled.
-No production Telegram relay is enabled by this source promotion.
+The ordinary profile now defaults to the production Telegram relay at
+`https://searchcar-telegram-relay.mapatar23.workers.dev`. Pairing and manual
+delivery are enabled for Copart/IAA, never Encar. Automatic Today posting
+still requires the existing per-project opt-in (default OFF). No credential
+is bundled. Explicit trusted environment values, including delivery `0`,
+remain available for an operator kill switch.
 
 The developer local macOS launcher still builds the auction preview by default. It embeds
 `SEARCHCAR_SOURCE_TEST_MODE=1` in the native shell, which passes
@@ -135,8 +140,9 @@ set `SEARCHCAR_SOURCE_TEST_MODE=1` on that build command for an auction preview;
 the sidecar itself supports both profiles. Production CI retains its ordinary
 profile unless explicitly configured otherwise.
 
-For Windows CI, dispatch `windows-desktop.yml` with `auction_preview=true`
-to build this isolated profile with the staging Telegram delivery pilot.
+For legacy source-isolation checks only, dispatch Windows CI with
+`auction_preview=true`. That profile retains its staging origin, but the
+shared-bot staging relay is now disabled; it cannot test Telegram delivery.
 The option defaults to false and is applied only when compiling the native
 shell, not to the test suite. `installer.json` records the selected profile.
 This dispatch produces test artifacts only; it does not publish a release.
@@ -147,8 +153,10 @@ and forces `SEARCHCAR_TELEGRAM_DELIVERY_ENABLED=0`, overriding inherited values.
 It enables `SEARCHCAR_TELEGRAM_CHAT_PAIRING_ENABLED=1` only in that preview so
 private, group and channel recipient binding can be tested against staging.
 This works from Finder without custom shell variables and bundles no bot secret.
-Ordinary-profile builds retain their existing trusted configuration; this does
-not set a production relay default or enable message delivery. Source tests and
+The shared bot now belongs to production; staging is disabled, so old preview
+builds cannot pair or send. Use the ordinary candidate for Telegram acceptance.
+Staging grants/data are not migrated; connect the recipient once in the ordinary
+profile. Source tests and
 compiled preview acceptance cover missing/synthetic device binding, cached
 recipient reads, and delivery staying off without contacting Telegram. A real
 Start/check/confirm flow still needs explicit interactive acceptance.
@@ -165,8 +173,8 @@ default ON: they require a confirmed initial publication to that recipient befor
 the observed change and a new fully successful search. Enabling or reconnecting
 does not replay historical changes. Without
 that extra build flag, the pairing preview still forces delivery off; the
-sidecar rejects the delivery-preview flag outside source-test mode. Production
-defaults are unchanged. Connecting a recipient does not publish a vehicle's
+sidecar rejects the delivery-preview flag outside source-test mode. The staging
+pilot is now disabled on the server. Connecting a recipient does not publish a vehicle's
 initial message. With Today OFF, initial publications require an explicit
 single-car/bulk action; schedule-change notices follow their independent setting.
 With Today ON, the local dispatcher can recover fresh work from a committed full

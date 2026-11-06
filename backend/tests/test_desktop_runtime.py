@@ -101,6 +101,29 @@ def test_delivery_preview_flag_cannot_enable_the_ordinary_profile(tmp_path,monke
     assert error.value.code==2
 
 
+@pytest.mark.parametrize("disabled", [False, True])
+def test_ordinary_desktop_defaults_to_production_telegram_with_operator_kill_switch(tmp_path, monkeypatch, disabled):
+    import sys
+    from app import desktop_runtime
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    for key in ["SEARCHCAR_TELEGRAM_RELAY_URL", "SEARCHCAR_TELEGRAM_DELIVERY_ENABLED",
+                "SEARCHCAR_TELEGRAM_CHAT_PAIRING_ENABLED"]:
+        monkeypatch.delenv(key, raising=False)
+    if disabled:
+        monkeypatch.setenv("SEARCHCAR_TELEGRAM_DELIVERY_ENABLED", "0")
+        monkeypatch.setenv("SEARCHCAR_TELEGRAM_CHAT_PAIRING_ENABLED", "0")
+    monkeypatch.setattr(sys, "argv", ["searchcar-core", "serve", "--data-dir", str(tmp_path),
+        "--frontend-dir", str(tmp_path / "ui"), "--port", "18777"])
+    class Captured(Exception): pass
+    def capture(*_args):
+        assert os.environ["SEARCHCAR_TELEGRAM_RELAY_URL"] == "https://searchcar-telegram-relay.mapatar23.workers.dev"
+        assert os.environ["SEARCHCAR_TELEGRAM_DELIVERY_ENABLED"] == ("0" if disabled else "1")
+        assert os.environ["SEARCHCAR_TELEGRAM_CHAT_PAIRING_ENABLED"] == ("0" if disabled else "1")
+        raise Captured
+    monkeypatch.setattr(desktop_runtime, "configure_desktop_environment", capture)
+    with pytest.raises(Captured): desktop_runtime.main()
+
+
 def _write_playwright_driver(driver_dir: Path) -> tuple[Path, Path]:
     driver_dir.mkdir(parents=True, exist_ok=True)
     executable = driver_dir / "node"

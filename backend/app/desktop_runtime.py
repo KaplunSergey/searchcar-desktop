@@ -1219,6 +1219,11 @@ def main() -> None:
         os.environ["SEARCHCAR_TELEGRAM_CHAT_PAIRING_ENABLED"] = "1"
     elif arguments.telegram_delivery_preview:
         parser().error("--telegram-delivery-preview requires --source-test-mode")
+    else:
+        # Finder/Windows launches have no shell configuration; credentials stay on the relay.
+        os.environ.setdefault("SEARCHCAR_TELEGRAM_RELAY_URL", "https://searchcar-telegram-relay.mapatar23.workers.dev")
+        os.environ.setdefault("SEARCHCAR_TELEGRAM_DELIVERY_ENABLED", "1")
+        os.environ.setdefault("SEARCHCAR_TELEGRAM_CHAT_PAIRING_ENABLED", "1")
     paths = configure_desktop_environment(
         arguments.data_dir,
         arguments.port,

@@ -3,6 +3,7 @@ import { asObject } from "../../license-service/src/validation";
 import { boundedJson } from "../src/telegram-api";
 
 const TARGET = "https://searchcar-telegram-relay-staging.mapatar23.workers.dev/v1/telegram/webhook";
+const PRODUCTION = "https://searchcar-telegram-relay.mapatar23.workers.dev/v1/telegram/webhook";
 const BOT = "8996925581";
 
 async function telegram(token: string, method: "getMe" | "getWebhookInfo" | "setWebhook", body = {}) {
@@ -26,6 +27,18 @@ function webhookInfo(value: unknown) {
 // Exported only by the temporary operator deployment, never the normal relay.
 export class TelegramSetup extends WorkerEntrypoint<Env> {
   async configure() {
+    return this.#configureWebhook(TARGET, ["", TARGET]);
+  }
+
+  async configureProduction() {
+    return this.#configureWebhook(PRODUCTION, [TARGET, PRODUCTION]);
+  }
+
+  async restoreStaging() {
+    return this.#configureWebhook(TARGET, [PRODUCTION, TARGET]);
+  }
+
+  async #configureWebhook(target: string, previous: readonly string[]) {
     const env = this.env;
     if (env.PAIRING_ENABLED !== "1" || env.DELIVERY_ENABLED !== "0" || env.BOT_ID !== BOT
         || !new RegExp(`^${BOT}:[A-Za-z0-9_-]{30,100}$`, "u").test(env.TELEGRAM_BOT_TOKEN ?? "")
@@ -39,17 +52,17 @@ export class TelegramSetup extends WorkerEntrypoint<Env> {
         return { ok: false, code: "WRONG_BOT" };
       }
       const before = webhookInfo(await telegram(token, "getWebhookInfo"));
-      if (before.url && before.url !== TARGET) return { ok: false, code: "WEBHOOK_CONFLICT" };
-      const receiver = await fetch(TARGET, { method: "POST", redirect: "manual", signal: AbortSignal.timeout(10000),
+      if (!previous.includes(before.url)) return { ok: false, code: "WEBHOOK_CONFLICT" };
+      const receiver = await fetch(target, { method: "POST", redirect: "manual", signal: AbortSignal.timeout(10000),
         headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": env.TELEGRAM_WEBHOOK_SECRET! },
         body: JSON.stringify({ update_id: 0 }) });
       if (receiver.status !== 200 || (await boundedJson(receiver)).ok !== true) {
         return { ok: false, code: "RECEIVER_NOT_READY", receiver_status: receiver.status };
       }
-      if (await telegram(token, "setWebhook", { url: TARGET, secret_token: env.TELEGRAM_WEBHOOK_SECRET,
+      if (await telegram(token, "setWebhook", { url: target, secret_token: env.TELEGRAM_WEBHOOK_SECRET,
         allowed_updates: ["message"], drop_pending_updates: false }) !== true) throw Error();
       const after = webhookInfo(await telegram(token, "getWebhookInfo"));
-      if (after.url !== TARGET || !Array.isArray(after.updates) || after.updates.length !== 1 || after.updates[0] !== "message") throw Error();
+      if (after.url !== target || !Array.isArray(after.updates) || after.updates.length !== 1 || after.updates[0] !== "message") throw Error();
       return { ok: true, bot_id: Number(BOT), webhook_configured: true, pending_updates: after.pending, delivery_enabled: false };
     } catch {
       // No raw exceptions, token-bearing URL or webhook secret cross the RPC boundary.

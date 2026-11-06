@@ -5,7 +5,8 @@ import {Miniflare} from 'miniflare';
 const token='8996925581:fixture_token_not_a_real_credential_abc';
 const secret='fixture_webhook_secret_not_a_real_secret';
 const target='https://searchcar-telegram-relay-staging.mapatar23.workers.dev/v1/telegram/webhook';
-let mf,mode='ok',calls=[],hookReads=0;
+const production='https://searchcar-telegram-relay.mapatar23.workers.dev/v1/telegram/webhook';
+let mf,mode='ok',calls=[],hookReads=0,selectedTarget=target,beforeUrl='';
 before(async()=>{
   mf=new Miniflare({workers:[{name:'operator',modules:true,
     scriptPath:new URL('../dist/operator/index.js',import.meta.url).pathname,
@@ -13,7 +14,7 @@ before(async()=>{
     bindings:{PAIRING_ENABLED:'1',DELIVERY_ENABLED:'0',BOT_ID:'8996925581',TELEGRAM_BOT_TOKEN:token,TELEGRAM_WEBHOOK_SECRET:secret},
     outboundService:async request=>{
       const url=request.url;calls.push(url);
-      if(url===target){
+      if(url===selectedTarget){
         assert.equal(request.headers.get('x-telegram-bot-api-secret-token'),secret);
         assert.deepEqual(await request.json(),{update_id:0});
         return Response.json({ok:mode!=='receiver_failed'},{status:mode==='receiver_failed'?404:200});
@@ -26,18 +27,46 @@ before(async()=>{
       if(mode==='redirect')return new Response(null,{status:302,headers:{location:'https://untrusted.test'}});
       if(method==='getMe')return Response.json({ok:true,result:{id:8996925581,is_bot:true,username:mode==='wrong_bot'?'other_bot':'search_car_app_bot'}});
       if(method==='getWebhookInfo'){
-        const url=mode==='conflict'?'https://other-service.test/hook':hookReads++===0?'':target;
+        const url=mode==='conflict'?'https://other-service.test/hook':hookReads++===0?beforeUrl:selectedTarget;
         return Response.json({ok:true,result:{url,pending_update_count:3,allowed_updates:mode==='bad_updates'?['message','channel_post']:['message']}});
       }
       const body=await request.json();
-      assert.deepEqual(body,{url:target,secret_token:secret,allowed_updates:['message'],drop_pending_updates:false});
+      assert.deepEqual(body,{url:selectedTarget,secret_token:secret,allowed_updates:['message'],drop_pending_updates:false});
       return Response.json({ok:true,result:mode!=='set_rejected'});
     }},
     {name:'client',modules:true,compatibilityDate:'2026-05-15',serviceBindings:{SETUP:{name:'operator',entrypoint:'TelegramSetup'}},
-      script:`export default {async fetch(request,env){return Response.json(await env.SETUP.configure());}};`}]});
+      script:`export default {async fetch(request,env){
+        const path=new URL(request.url).pathname;
+        if(path==='/arbitrary')return Response.json(await env.SETUP.configureWebhook('https://untrusted.test/hook',['']));
+        return Response.json(path==='/production'?await env.SETUP.configureProduction():
+          path==='/restore'?await env.SETUP.restoreStaging():await env.SETUP.configure());
+      }};`}]});
 });
 after(async()=>{await mf?.dispose();});
-async function configure(scenario){mode=scenario;calls=[];hookReads=0;const client=await mf.getWorker('client');return (await client.fetch('https://fixture.test')).json();}
+async function configure(scenario,path='/',previous=''){
+  mode=scenario;calls=[];hookReads=0;beforeUrl=previous;selectedTarget=path==='/production'?production:target;
+  const client=await mf.getWorker('client');return (await client.fetch('https://fixture.test'+path)).json();
+}
+test('production cutover and coordinated rollback accept only the pinned existing bot webhooks',async()=>{
+  for(const [path,previous] of [['/production',target],['/production',production],['/restore',production]]){
+    const result=await configure('ok',path,previous);
+    assert.equal(result.ok,true);
+    assert.equal(calls.filter(url=>url.endsWith('/setWebhook')).length,1);
+  }
+  for(const previous of ['', 'https://untrusted.test/hook']){
+    const result=await configure('ok','/production',previous);
+    assert.deepEqual(result,{ok:false,code:'WEBHOOK_CONFLICT'});
+    assert.ok(!calls.some(url=>url.endsWith('/setWebhook')));
+  }
+});
+test('arbitrary-target helper is not exposed through RPC or a public HTTP setup endpoint',async()=>{
+  calls=[];
+  const client=await mf.getWorker('client');
+  await assert.rejects(client.fetch('https://fixture.test/arbitrary'),/does not implement/);
+  const operator=await mf.getWorker('operator');
+  assert.notEqual((await operator.fetch('https://fixture.test/configure',{method:'POST'})).status,200);
+  assert.deepEqual(calls,[]);
+});
 test('private operator configures only the staging webhook and preserves pending updates without sending',async()=>{
   const result=await configure('ok');
   assert.deepEqual(result,{ok:true,bot_id:8996925581,webhook_configured:true,pending_updates:3,delivery_enabled:false});
@@ -46,15 +75,15 @@ test('private operator configures only the staging webhook and preserves pending
   assert.ok(!JSON.stringify(result).includes(token));assert.ok(!JSON.stringify(result).includes(secret));
 });
 test('wrong bot, foreign webhook and failed receiver cannot alter webhook',async()=>{
-  for(const scenario of ['wrong_bot','conflict','receiver_failed']){
-    const result=await configure(scenario);assert.equal(result.ok,false);
+  for(const path of ['/','/production'])for(const scenario of ['wrong_bot','conflict','receiver_failed']){
+    const result=await configure(scenario,path,path==='/production'?target:'');assert.equal(result.ok,false);
     if(scenario==='receiver_failed')assert.deepEqual(result,{ok:false,code:'RECEIVER_NOT_READY',receiver_status:404});
     assert.ok(!calls.some(url=>url.endsWith('/setWebhook')));
   }
 });
 test('API failures and malformed responses are bounded, sanitized, and never automatically retried',async()=>{
-  for(const scenario of ['network','oversize','redirect','set_rejected','bad_updates']){
-    const result=await configure(scenario);assert.equal(result.ok,false);
+  for(const path of ['/','/production'])for(const scenario of ['network','oversize','redirect','set_rejected','bad_updates']){
+    const result=await configure(scenario,path,path==='/production'?target:'');assert.equal(result.ok,false);
     assert.ok(!JSON.stringify(result).includes(token));assert.ok(!JSON.stringify(result).includes(secret));
     assert.ok(calls.filter(url=>url.endsWith('/setWebhook')).length<=1);
   }

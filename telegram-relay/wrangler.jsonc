@@ -4,16 +4,16 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-22",
   "compatibility_flags": ["nodejs_compat"],
-  "workers_dev": false,
+  "workers_dev": true,
   "preview_urls": false,
-  "vars": { "PAIRING_ENABLED": "0", "CHAT_PAIRING_ENABLED": "0", "DELIVERY_ENABLED": "0", "BOT_ID": "0" },
+  "vars": { "PAIRING_ENABLED": "1", "CHAT_PAIRING_ENABLED": "1", "DELIVERY_ENABLED": "1", "BOT_ID": "8996925581" },
   "secrets": { "required": ["TELEGRAM_WEBHOOK_SECRET", "TELEGRAM_BOT_TOKEN"] },
   "observability": { "enabled": true, "head_sampling_rate": 0.1, "traces": { "enabled": false } },
   "d1_databases": [
     {
       "binding": "PAIRING_DB",
       "database_name": "searchcar-telegram-pairing",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "27c00463-45f5-4e36-afd0-8fa688a152cc",
       "migrations_dir": "migrations"
     }
   ],
@@ -23,7 +23,7 @@
       "name": "searchcar-telegram-relay-staging",
       "workers_dev": true,
       "preview_urls": false,
-      "vars": { "PAIRING_ENABLED": "1", "CHAT_PAIRING_ENABLED": "1", "DELIVERY_ENABLED": "1", "BOT_ID": "8996925581" },
+      "vars": { "PAIRING_ENABLED": "0", "CHAT_PAIRING_ENABLED": "0", "DELIVERY_ENABLED": "0", "BOT_ID": "8996925581" },
       "secrets": { "required": ["TELEGRAM_WEBHOOK_SECRET", "TELEGRAM_BOT_TOKEN"] },
       "services": [{ "binding": "LICENSE_AUTH", "service": "searchcar-license-service", "entrypoint": "TelegramAuthorization" }],
       "d1_databases": [

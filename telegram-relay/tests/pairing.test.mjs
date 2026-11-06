@@ -114,12 +114,12 @@ before(async()=>{
 beforeEach(async()=>{deliveryAllowed=false;chatFixture=null;chatReads.length=0;keyboardReply='success';keyboardRequests.length=0;await db.prepare('DELETE FROM security_windows').run();});
 after(async()=>{try{assert.deepEqual(unexpectedOutbound,[]);}finally{await mf?.dispose();}});
 
-test('authorized staging enables manual delivery with required secrets, keeping production disabled and license DB isolated',async()=>{
+test('production enables Telegram with required secrets and isolated DB; the shared-bot staging stays disabled',async()=>{
   const config=JSON.parse(await readFile(new URL('../wrangler.jsonc',import.meta.url),'utf8'));
   const stage=config.env?.staging;
   assert.ok(stage,'Separate staging environment required');
   assert.equal(stage.name,'searchcar-telegram-relay-staging');
-  assert.equal(stage.vars.PAIRING_ENABLED,'1');assert.equal(stage.vars.DELIVERY_ENABLED,'1');
+  assert.equal(stage.vars.PAIRING_ENABLED,'0');assert.equal(stage.vars.DELIVERY_ENABLED,'0');
   assert.equal(stage.vars.BOT_ID,'8996925581');
   assert.equal(stage.workers_dev,true);assert.equal(stage.preview_urls,false);
   assert.deepEqual(stage.d1_databases.map(db=>db.binding),['PAIRING_DB']);
@@ -127,9 +127,14 @@ test('authorized staging enables manual delivery with required secrets, keeping 
   for(const cfg of [config,stage])assert.deepEqual(cfg.services,[{
     binding:'LICENSE_AUTH',service:'searchcar-license-service',entrypoint:'TelegramAuthorization'}]);
   assert.deepEqual([...stage.secrets.required].sort(),['TELEGRAM_BOT_TOKEN','TELEGRAM_WEBHOOK_SECRET']);
-  assert.equal(config.vars.PAIRING_ENABLED,'0');assert.equal(config.workers_dev,false);
-  assert.equal(config.vars.DELIVERY_ENABLED,'0');
-  assert.equal(config.vars.CHAT_PAIRING_ENABLED,'0');assert.equal(stage.vars.CHAT_PAIRING_ENABLED,'1');
+  assert.equal(config.vars.BOT_ID,'8996925581');
+  assert.equal(config.vars.PAIRING_ENABLED,'1');assert.equal(config.workers_dev,true);
+  assert.equal(config.preview_urls,false);assert.equal(config.vars.DELIVERY_ENABLED,'1');
+  assert.equal(config.vars.CHAT_PAIRING_ENABLED,'1');assert.equal(stage.vars.CHAT_PAIRING_ENABLED,'0');
+  assert.deepEqual([...config.secrets.required].sort(),['TELEGRAM_BOT_TOKEN','TELEGRAM_WEBHOOK_SECRET']);
+  const license=JSON.parse(await readFile(new URL('../../license-service/wrangler.jsonc',import.meta.url),'utf8'));
+  const ids=[config,stage,license].map(cfg=>cfg.d1_databases[0].database_id);
+  assert.equal(new Set(ids).size,3);assert.ok(ids.every(id=>id!=='00000000-0000-0000-0000-000000000000'));
 });
 
 test('group Start opens native bot addition with minimal rights and a claimant-bound nonce, not the owner-hiding chat filter',async()=>{
