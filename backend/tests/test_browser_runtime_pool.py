@@ -71,6 +71,26 @@ def test_default_source_still_keeps_windowed_session(runtime):
         assert pool.acquire(1, source) is first
 
 
+@pytest.mark.parametrize('hidden', [False, True])
+def test_copart_release_never_leaves_a_visible_window_but_can_reuse_a_hidden_session(runtime, hidden):
+    from app.sources.copart import CopartSource
+    source = CopartSource()
+    source.open_browser = runtime.source('copart').open_browser
+    with runtime.pool as pool:
+        first = pool.acquire(1, source)
+        first[1].has_window = True
+        def hide():
+            if hidden:
+                first[1].has_window = False
+            return hidden
+        first[1].park_hidden = hide
+        pool.release(first[1])
+        assert (('close', 'copart') in runtime.events) is not hidden
+        assert not first[1].has_window or ('close', 'copart') in runtime.events
+        second = pool.acquire(1, source)
+        assert (second is first) is hidden
+
+
 @pytest.mark.parametrize('outcome', ['unsupported', 'hidden', 'error', 'still-visible'])
 def test_source_can_retain_verified_browser_only_after_its_window_is_closed(runtime, outcome):
     from playwright.sync_api import Error as BrowserError

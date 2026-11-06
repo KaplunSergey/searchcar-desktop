@@ -15,6 +15,37 @@ from test_source_test_profile import isolated_environment, profile_queue
 
 
 @pytest.mark.skipif(os.environ.get('RUN_SOURCE_SELECTION_BROWSER') != '1', reason='Opt-in bundled browser fixture')
+def test_copart_classic_preparation_does_not_wait_for_a_stalled_navigation_load():
+    from app.sources.copart import CopartSource
+    root = Path(__file__).resolve().parents[2]
+    configure_playwright_environment(root / 'desktop/runtime/browsers')
+    configure_playwright_driver(root / 'desktop/runtime/playwright-driver')
+    with desktop_playwright() as pw:
+        browser = pw.chromium.launch(headless=True, executable_path=str(bundled_headless_chromium(root / 'desktop/runtime/browsers')))
+        page = browser.new_page()
+        pending = []
+        def site(route):
+            if route.request.url.endswith('/slow-image'):
+                pending.append(route)  # Keep load pending without accessing any real site.
+            else:
+                html = ('<table id="serverSideDataTable"></table><img src="/slow-image">'
+                        if route.request.url.endswith('/classic') else
+                        '<button onclick="location.href=\'/classic\'">Classic view</button>')
+                route.fulfill(status=200, content_type='text/html', body=html)
+        page.route('**/*', site)
+        try:
+            page.goto('https://copart.fixture/start')
+            source = CopartSource()
+            source.prepare_timeout_seconds = 3
+            source.prepare_page(page, checkpoint=lambda: None, verification=lambda _: pytest.fail('Unexpected verification'))
+            assert page.locator('#serverSideDataTable').count() == 1
+            assert pending
+            assert page.evaluate('document.readyState') != 'complete'
+        finally:
+            browser.close()
+
+
+@pytest.mark.skipif(os.environ.get('RUN_SOURCE_SELECTION_BROWSER') != '1', reason='Opt-in bundled browser fixture')
 @pytest.mark.parametrize('case', ['rendered', 'loading', 'missing-count', 'empty'])
 def test_iaa_filter_confirmation_has_its_own_dom_readiness(tmp_path, case):
     root = Path(__file__).resolve().parents[2]

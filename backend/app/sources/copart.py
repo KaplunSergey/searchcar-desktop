@@ -1,9 +1,9 @@
-"""Copart USA Classic public DOM, opt-in test profile only."""
+"""Copart USA Classic public DOM."""
 import re
 import json
 from time import monotonic
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
-from playwright.sync_api import Error as BrowserError
+from playwright.sync_api import Error as BrowserError, TimeoutError as BrowserTimeout
 from .auction_lists import AuctionBrowserSession, AuctionListError, AuctionListSource, copart_schedule
 from .contracts import InvalidSourceUrlError
 from .search_presets import CopartCriteria, preset
@@ -11,6 +11,8 @@ from .search_presets import CopartCriteria, preset
 
 class CopartSource(AuctionListSource):
     key = 'copart'
+    reuse_windowed_browser_session = False
+    reuse_hidden_browser_session = True
     search_path = r'/(?:ru/)?lotSearchResults/?'
     listing_path = r'/(?:ru/)?lot/(\d+)(?:/[^?#]*)?'
     listing_prefix = '/lot/'
@@ -98,35 +100,17 @@ class CopartSource(AuctionListSource):
         started=monotonic()
         deadline=started+self.prepare_timeout_seconds
         window_requested=False
-        while not page.locator('#serverSideDataTable').count():
+        switch_attempted=False
+        while True:
             checkpoint()
-            if page.locator('#serverSideDataTable').count():
-                return
             state=self.read_dom(page)
             if state.get('blocked') or state.get('consent_required'):
                 verification('CAPTCHA' if state.get('blocked') else 'COOKIE_CONSENT')
                 deadline=monotonic()+self.prepare_timeout_seconds
+                switch_attempted=False
                 continue
-            classic=page.get_by_role('button',name=re.compile('Classic view',re.I))
-            if classic.count():
-                if isinstance(page, AuctionBrowserSession):
-                    page.wait_for_request(checkpoint)
-                try:
-                    classic.click(timeout=5000)
-                except BrowserError:
-                    # A consent banner can arrive between the DOM check and
-                    # click. The shared handler may reject optional cookies;
-                    # never force-click through an overlay.
-                    if not self.read_dom(page).get('consent_required'):
-                        raise
-                    verification('COOKIE_CONSENT')
-                    deadline=monotonic()+self.prepare_timeout_seconds
-                    continue
-                return
-            if isinstance(page, AuctionBrowserSession) and not page.interactive and not window_requested and monotonic()-started >= 15:
-                window_requested=True
-                verification('SEARCH_INTERFACE_LOADING')
-                continue  # Keep the original deadline; no automatic refresh loop.
+            if state.get('ready') or (state.get('interface') or {}).get('classic_table'):
+                return  # Row/count/pagination verification remains in collect_search_pages.
             if monotonic()>=deadline:
                 interface=state.get('interface') or {}
                 raise AuctionListError('SEARCH_PAGE_NOT_READY',
@@ -135,6 +119,30 @@ class CopartSource(AuctionListSource):
                     f'modern_table={bool(interface.get("modern_table"))}; '
                     f'unrendered_template={bool(interface.get("unrendered_template"))}; '
                     f'visible_frames={interface.get("visible_frames",0)})')
+            if not switch_attempted and state.get('can_prepare'):
+                classic=page.get_by_role('button',name=re.compile('Classic view',re.I))
+                if isinstance(page, AuctionBrowserSession):
+                    page.wait_for_request(checkpoint)
+                try:
+                    classic.click(timeout=min(5000, max(1, (deadline-monotonic())*1000)), no_wait_after=True)
+                except BrowserError as exc:
+                    # A consent banner can arrive between the DOM check and
+                    # click. The shared handler may reject optional cookies;
+                    # never force-click through an overlay.
+                    if self.read_dom(page).get('consent_required'):
+                        verification('COOKIE_CONSENT')
+                        deadline=monotonic()+self.prepare_timeout_seconds
+                        continue
+                    if not isinstance(exc, BrowserTimeout):
+                        raise
+                # A timed-out click may already have navigated. Observe its
+                # result within the original budget; never blindly toggle again.
+                switch_attempted=True
+                continue
+            if isinstance(page, AuctionBrowserSession) and not page.interactive and not window_requested and monotonic()-started >= 15:
+                window_requested=True
+                verification('SEARCH_INTERFACE_LOADING')
+                continue  # Keep the original deadline; no automatic refresh loop.
             page.wait_for_timeout(250)
 
     dom_script = r"""() => {
@@ -162,7 +170,7 @@ class CopartSource(AuctionListSource):
       return {rows,total,page:Number(number)||1,has_next:!!document.querySelector('#serverSideDataTable_next:not(.disabled)'),
         document_loaded:['interactive','complete'].includes(document.readyState),
         can_prepare:Array.from(document.querySelectorAll('button')).some(e=>/Classic view/i.test(text(e)||'')),
-        interface:{modern_table:!!document.querySelector('p-table table'),unrendered_template:body.includes('{{'),
+        interface:{classic_table:!!table,modern_table:!!document.querySelector('p-table table'),unrendered_template:body.includes('{{'),
           visible_frames:Array.from(document.querySelectorAll('iframe')).filter(e=>e.getClientRects().length&&e.clientWidth>0&&e.clientHeight>0&&getComputedStyle(e).visibility==='visible').length},
         consent_required:consent,
         ready:!!table&&!!counts,empty:total===0&&/No (matching records|data available)/i.test(text(table)||''),

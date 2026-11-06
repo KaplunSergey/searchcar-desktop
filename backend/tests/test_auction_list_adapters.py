@@ -115,7 +115,10 @@ class Page:
         self.navigations.append(url)
         self.url=url
     def evaluate(self, script):
-        return copy.deepcopy(self.snapshots[self.index])
+        state = copy.deepcopy(self.snapshots[self.index])
+        # This fake's table locator is present even while rows are loading.
+        state.setdefault('interface', {}).setdefault('classic_table', bool(self.locator('#serverSideDataTable').count()))
+        return state
     def locator(self, selector):
         page = self
         class Locator:

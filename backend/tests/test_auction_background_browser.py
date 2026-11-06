@@ -631,7 +631,8 @@ def test_copart_cold_interface_has_its_own_bounded_cancellable_load_budget(adapt
     page = SimpleNamespace(
         locator=lambda selector: SimpleNamespace(count=lambda: 0),
         evaluate=lambda script: {'ready':False,'blocked':False,'consent_required':False,'document_loaded':True,
-                                 'interface':{'modern_table':True,'unrendered_template':True,'visible_frames':0}},
+                                 'can_prepare':outcome == 'loaded' and clock[0] >= 40,
+                                 'interface':{'classic_table':bool(clicks),'modern_table':True,'unrendered_template':True,'visible_frames':0}},
         get_by_role=lambda *args, **kwargs: Classic(),
         wait_for_timeout=lambda ms: clock.__setitem__(0, clock[0]+ms/1000),
     )
