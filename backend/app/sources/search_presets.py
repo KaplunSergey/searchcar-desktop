@@ -67,13 +67,14 @@ class CopartCriteria(PublicFields):
     filter: dict[str, list[str]] = Field(default_factory=dict, max_length=100)
     searchName: str = Field(default='', max_length=1000)
     watchListOnly: bool = False
+    bidEligibleVehiclesOnly: bool = False
     freeFormSearch: bool = False
     vanityKeyword: bool = False
     exclusions: list[str] = Field(default_factory=list, max_length=100)
 
     @model_validator(mode='after')
     def public_search(self):
-        if self.watchListOnly:
+        if self.watchListOnly or self.bidEligibleVehiclesOnly:
             raise ValueError('account_search_not_supported')
         return self
 

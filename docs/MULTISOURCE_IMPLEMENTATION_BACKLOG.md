@@ -1,5 +1,24 @@
 # Последовательный план: источники, аукционы, Telegram
 
+## Copart Buy It Now — исправление схемы 06.11.2026
+
+В присланном публичном поиске Alfa Romeo / Buy It Now поле
+`bidEligibleVehiclesOnly: false` приводило к `extra_forbidden`, затем
+`SEARCH_FILTERS_UNSUPPORTED` и disabled подтверждению. Добавлена строгая boolean
+поддержка выключенного флага, без удаления поля из criteria/ссылки. Включённый
+account-specific режим по-прежнему запрещён, как watchListOnly; строки, числа,
+null и неизвестные поля не принимаются. Старые presets без нового поля сохраняют
+форму и fingerprint благодаря прежнему exclude_unset.
+
+RED на полных публичных условиях пользователя подтверждён, затем GREEN:
+сохраняются FETI Buy It Now, MAKE/MISC/ODM/VEHT/YEAR, free=false; qId не сохраняется.
+Проверены CLOSED draft/persist/revalidation и пять Copart selection-сценариев
+в bundled Chromium на полностью перехваченных ответах, включая подтверждение
+через панель. Это не живая Windows-проверка. Правка пока локальная и не входит
+в ранее запущенную Windows-сборку коммита `6464d10`.
+Полная backend-регрессия: 1306 passed / 128 opt-in skipped, 4 прежних reflection
+warnings; пять opt-in Copart browser fixtures и diff-check — PASS.
+
 ## Copart Classic view и оставшееся окно — исправление 06.11.2026
 
 Локально в `codex/multisource-auctions`: переключение Classic выполняется без

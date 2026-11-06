@@ -28,6 +28,61 @@ IAA = {
 }
 
 
+# Public criteria from the reported Alfa Romeo Buy It Now URL; no qId/tracking.
+COPART_BUY_NOW = {
+    'query': ['*'],
+    'filter': {
+        'FETI': ['buy_it_now_code:B1'],
+        'MAKE': ['search_lot_make_desc:"ALFA ROMEO"'],
+        'MISC': ['#VehicleTypeCode:VEHTYPE_V', '#MakeCode:ALFA OR #MakeDesc:Alfa Romeo'],
+        'ODM': ['odometer_reading_received:[0 TO 9999999]'],
+        'VEHT': ['vehicle_type_code:VEHTYPE_V'],
+        'YEAR': ['lot_year:[2016 TO 2027]'],
+    },
+    'watchListOnly': False, 'bidEligibleVehiclesOnly': False, 'searchName': '',
+    'freeFormSearch': False, 'vanityKeyword': False,
+}
+
+
+def test_reported_copart_buy_now_search_preserves_every_filter_and_can_be_confirmed(tmp_path):
+    from urllib.parse import urlencode, urlsplit, parse_qs
+    source = CopartSource()
+    url = 'https://www.copart.com/lotSearchResults?' + urlencode({
+        'searchCriteria': json.dumps(COPART_BUY_NOW), 'free': 'false', 'qId': 'discard'})
+    candidate = source.capture_search_url(url)
+    assert candidate['criteria'] == COPART_BUY_NOW
+    query = parse_qs(urlsplit(candidate['creation_url']).query)
+    assert json.loads(query['searchCriteria'][0]) == COPART_BUY_NOW
+    assert query['free'] == ['false'] and 'qId' not in query
+    assert 'FETI: buy_it_now_code:B1' in candidate['summary']
+    session = SelectionSession(tmp_path, 1, 'copart')
+    session.draft.begin('url', candidate)
+    session.draft.finish('url', 200)
+    session.draft.settle({'ready': True})
+    assert session.draft.can_use
+    session.draft.close()
+    session.persist()
+    saved = load_draft(tmp_path, 1, 'copart')
+    assert saved['status'] == 'CLOSED' and saved['can_use']
+    assert source.validate_selection_snapshot(saved['snapshot']) == candidate
+
+
+@pytest.mark.parametrize('value', [True, 'false', 0, None])
+def test_copart_rejects_account_specific_or_nonboolean_bid_eligibility(value):
+    from app.sources.search_presets import CopartCriteria
+    with pytest.raises(ValueError):
+        CopartCriteria.model_validate({**COPART_BUY_NOW, 'bidEligibleVehiclesOnly': value})
+
+
+def test_copart_old_presets_keep_their_shape_and_unknown_fields_still_fail_closed():
+    from app.sources.search_presets import CopartCriteria
+    old = {key: value for key, value in COPART_BUY_NOW.items() if key != 'bidEligibleVehiclesOnly'}
+    assert CopartCriteria.model_validate(old).model_dump(exclude_unset=True) == old
+    for field in ('Authorization', 'csrf', 'UnknownFilter'):
+        with pytest.raises(ValueError):
+            CopartCriteria.model_validate({**COPART_BUY_NOW, field: 'do-not-store'})
+
+
 def test_iaa_can_capture_public_filters_separately_from_the_address_bar():
     source = IAASource()
     capture = getattr(source, 'capture_search_request', None)

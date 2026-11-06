@@ -9,7 +9,7 @@ from app.desktop_runtime import (desktop_playwright, configure_playwright_enviro
     configure_playwright_driver, bundled_headless_chromium)
 from app.source_search_selection import SearchSelections, SelectionSession, load_draft
 from app.sources.iaa import IAASource
-from test_source_search_selection import IAA
+from test_source_search_selection import IAA, COPART_BUY_NOW
 from test_auction_list_adapters import adapters
 from test_source_test_profile import isolated_environment, profile_queue
 
@@ -130,7 +130,7 @@ def test_actual_request_capture_and_window_lifecycle(tmp_path, case):
 
 
 @pytest.mark.skipif(os.environ.get('RUN_SOURCE_SELECTION_BROWSER') != '1', reason='Opt-in bundled browser fixture')
-@pytest.mark.parametrize('case', ['close', 'confirm', 'unfinished', 'denied'])
+@pytest.mark.parametrize('case', ['close', 'confirm', 'buy-now-confirm', 'unfinished', 'denied'])
 def test_copart_url_selection_saves_the_link_not_unsubmitted_controls(tmp_path, adapters, case):
     from urllib.parse import urlencode
     from app.sources.copart import CopartSource
@@ -138,7 +138,7 @@ def test_copart_url_selection_saves_the_link_not_unsubmitted_controls(tmp_path, 
     root = Path(__file__).resolve().parents[2]
     configure_playwright_environment(root / 'desktop/runtime/browsers')
     configure_playwright_driver(root / 'desktop/runtime/playwright-driver')
-    criteria = {'query': ['Audi'], 'filter': {'YEAR': ['lot_year:[2021 TO 2027]']}}
+    criteria = COPART_BUY_NOW if case == 'buy-now-confirm' else {'query': ['Audi'], 'filter': {'YEAR': ['lot_year:[2021 TO 2027]']}}
     target = 'https://www.copart.com/lotSearchResults?' + urlencode({'searchCriteria': json.dumps(criteria)})
     html = '''<!doctype html><html><body><input aria-label="Year" value="2021">
       <table id="serverSideDataTable"><tbody><tr><td>No matching records</td></tr></tbody></table>
@@ -165,7 +165,7 @@ def test_copart_url_selection_saves_the_link_not_unsubmitted_controls(tmp_path, 
                 page.wait_for_timeout(ms)
                 count[0] += 1
                 if session.draft.can_use:
-                    if case == 'confirm':
+                    if case in ('confirm', 'buy-now-confirm'):
                         page.locator('#searchcar-selection-panel').get_by_role('button', name='Использовать выбранные фильтры', exact=True).click()
                         return
                     if case == 'unfinished':
