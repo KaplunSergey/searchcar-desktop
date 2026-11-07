@@ -111,7 +111,7 @@ def compiled_server(data, frontend, report_dir, index, previous_ports, *, source
     environment = os.environ.copy()
     # Do not inherit a developer's runtime session, binding or service settings.
     for key in list(environment):
-        if key.startswith("SEARCHCAR_LICENSE_") or key in {"SEARCHCAR_DESKTOP_DATA_DIR", "SEARCHCAR_DESKTOP_SESSION_SECRET", "SEARCHCAR_SOURCE_TEST_MODE", "PYTHONPATH", "PYTHONHOME"}:
+        if key.startswith(("SEARCHCAR_LICENSE_", "SEARCHCAR_TELEGRAM_")) or key in {"SEARCHCAR_DESKTOP_DATA_DIR", "SEARCHCAR_DESKTOP_SESSION_SECRET", "SEARCHCAR_SOURCE_TEST_MODE", "PYTHONPATH", "PYTHONHOME"}:
             environment.pop(key)
     # A host Python/IANA database must not hide missing compiled package data.
     environment["PYTHONTZPATH"] = ""
@@ -204,7 +204,8 @@ def test_compiled_catalog_and_owner_navigation_survive_new_ports(tmp_path):
             assert me["user"]["workspace"] is None
             recipients = client.get("/api/telegram/recipients")
             assert recipients.status_code == 200, recipients.text
-            assert recipients.json() == {"available": False, "issue": "telegram_relay_not_configured", "recipients": []}
+            assert recipients.json() == {"available": False, "issue": "telegram_device_binding_required", "recipients": []}
+            assert client.get("/api/desktop/runtime").json()["telegram_delivery_enabled"] is True
             headers = {"x-csrf-token": me["csrf_token"]}
             assert client.put("/api/auth/workspace", json=snapshot).status_code == 403
             invalid = {**snapshot, "current": route("unknown-source", "scans")}
